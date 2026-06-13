@@ -1,0 +1,36 @@
+# Daybook — runs as its own container, isolated from otuburu/vote.
+# A single Node service (SQLite-backed) on its own bridge network and
+# named volume. Apache on the host reverse-proxies daybook.torama.money
+# → 127.0.0.1:8090.
+services:
+  daybook:
+    image: ghcr.io/filatei/daybook:latest
+    # Local build fallback: `docker compose up -d --build` builds from source on
+    # the server (used for the first, no-CI bring-up). Once CI pushes to GHCR,
+    # `docker compose pull` uses the published image instead.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: daybook
+    restart: always
+    # Bind only to loopback — Apache is the public edge (TLS terminator).
+    ports:
+      - "127.0.0.1:8090:8090"
+    env_file:
+      - .env
+    volumes:
+      - daybookdata:/data
+    networks:
+      - daybook
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8090/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  daybookdata:
+
+networks:
+  daybook:
+    name: daybook

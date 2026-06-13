@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no"/>
+<meta name="theme-color" content="#0ea5e9"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Daybook"/>
+<link rel="manifest" href="/manifest.webmanifest"/>
+<link rel="apple-touch-icon" href="/icons/icon-192.png"/>
+<link rel="icon" href="/icons/icon-192.png"/>
+<link rel="stylesheet" href="/styles.css"/>
+<title>Daybook — Daily Sales & Incident Reporting</title>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login" class="login-wrap">
+  <div class="brandmark">
+    <div class="b">Day<span>book</span></div>
+    <div class="tag">Daily Business Reporting</div>
+  </div>
+  <div class="login-card">
+    <h3 style="margin:0 0 4px">Sign in</h3>
+    <p class="muted" style="margin:0 0 18px;font-size:14px">Use your Google account to continue.</p>
+    <div id="gsi-button" style="display:flex;justify-content:center;min-height:44px"></div>
+    <div id="gsi-fallback" class="muted hidden" style="font-size:13px;margin-top:14px">
+      Google sign-in isn't configured yet. Set <code>GOOGLE_CLIENT_ID</code> on the server.
+    </div>
+  </div>
+  <p class="muted" style="text-align:center;margin-top:18px;font-size:13px">
+    Multi-site daily reports for your business · Fido Water · Fiafia Water · and yours
+  </p>
+</div>
+
+<!-- App -->
+<div id="app" class="hidden">
+  <div class="topbar">
+    <div class="logo"><span class="dot"></span> Daybook</div>
+    <div class="spacer"></div>
+    <div class="tenant-pill hidden" id="tenantPill">
+      <span>🏢</span>
+      <select id="tenantSelect"></select>
+    </div>
+    <button class="iconbtn" id="logoutBtn" title="Sign out">⏻</button>
+  </div>
+
+  <main id="view"><!-- rendered by app.js --></main>
+
+  <button class="fab hidden" id="fab">＋</button>
+
+  <nav class="nav">
+    <button data-tab="dashboard" class="active"><span class="ic">📊</span>Dashboard</button>
+    <button data-tab="reports"><span class="ic">🧾</span>Reports</button>
+    <button data-tab="documents"><span class="ic">📁</span>Documents</button>
+    <button data-tab="admin"><span class="ic">⚙️</span>Admin</button>
+  </nav>
+</div>
+
+<div id="toasts"></div>
+<div id="modalRoot"></div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

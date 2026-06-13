@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  node:
+    name: Lint & smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install
+        run: npm ci || npm install
+      - name: Syntax check
+        run: node --check backend/server.js && node --check backend/routes.js && node --check backend/db.js && node --check backend/mailer.js && node --check backend/auth.js && node --check backend/seed.js
+      - name: Boot + smoke test
+        env:
+          JWT_SECRET: ci-test-secret
+          NODE_ENV: development
+          DAYBOOK_ALLOW_DEV_LOGIN: "1"
+          GOOGLE_CLIENT_ID: ci-test-client
+          PORT: "8090"
+          DAYBOOK_DB_PATH: /tmp/ci.db
+          UPLOAD_DIR: /tmp/ci-uploads
+        run: |
+          node backend/server.js & sleep 4
+          node backend/smoke.js

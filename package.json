@@ -1,0 +1,25 @@
+{
+  "name": "daybook",
+  "version": "0.1.0",
+  "description": "Daybook — multi-client daily sales & incident reporting PWA (SaaS). Tenants = client companies; Google sign-in; per-tenant roles. Mirrors otuburu deployment conventions.",
+  "main": "backend/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "NODE_ENV=development node backend/server.js",
+    "seed": "node backend/seed.js",
+    "smoke": "node backend/smoke.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.21.0",
+    "google-auth-library": "^9.14.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.1",
+    "nodemailer": "^6.9.14",
+    "uuid": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

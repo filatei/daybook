@@ -68,4 +68,7 @@ app.use((err, _req, res, _next) => {
   }
 });
 
-app.listen(PORT, () => console.log(`[Daybook] listening on :${PORT} (${process.env.NODE_ENV || 'development'})`));
+app.listen(PORT, () => {
+  console.log(`[Daybook] listening on :${PORT} (${process.env.NODE_ENV || 'development'})`);
+  try { require('./scheduler').start(); } catch (e) { console.error('[sync] scheduler not started:', e.message); }
+});

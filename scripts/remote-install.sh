@@ -112,6 +112,10 @@ ensure_env FIDO_SSH_USER ""
 ensure_env SALES_MONGO_URL ""
 ensure_env SALES_DB "fido_db"
 ensure_env SALES_TZ_OFFSET "+01:00"
+ensure_env SYNC_ENABLED "0"
+ensure_env SYNC_CRON "30 22 * * *"
+ensure_env SYNC_TZ "Africa/Lagos"
+ensure_env SYNC_EMAIL "0"
 chown daybookuser:daybookuser "${ENV_FILE}" 2>/dev/null || true
 
 # ── 5. TLS — temporary HTTP vhost → certbot → managed vhost ───────────────────

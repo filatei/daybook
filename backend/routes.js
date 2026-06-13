@@ -16,6 +16,7 @@ const {
 const { sendDailyReport, verifyConnection } = require('./mailer');
 const { callAI, callAgent, AIError, aiConfigured } = require('./aiClient');
 const sales = require('./salesSource');
+const scheduler = require('./scheduler');
 
 const router = express.Router();
 const db = getDb();
@@ -636,6 +637,15 @@ router.get('/timesheets/summary.csv', requireAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="timesheets-${req.query.from || 'all'}_${req.query.to || 'all'}.csv"`);
   res.send(csv);
+});
+
+// Manually run the POS→Daybook sync for a date (superadmin only).
+router.post('/sync/run', requireAuth, async (req, res) => {
+  if (!req.user.is_superadmin) return res.status(403).json({ error: 'superadmin only' });
+  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
+  const date = (req.body && req.body.date) || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SYNC_TZ || 'Africa/Lagos' });
+  try { res.json(await scheduler.syncDay(date, { email: !!(req.body && req.body.email) })); }
+  catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 module.exports = router;

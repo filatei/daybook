@@ -66,10 +66,15 @@ jobs:
           username: ${{ secrets.LINODE_USER }}
           key: ${{ secrets.LINODE_SSH_KEY }}
           port: ${{ secrets.LINODE_SSH_PORT }}
-          source: "docker-compose.yml,infra/apache/daybook.torama.money.conf,infra/systemd/daybook.service,scripts/deploy.sh,scripts/server-setup.sh"
+          source: "docker-compose.yml,infra/apache/daybook.torama.money.conf,infra/systemd/daybook.service,infra/systemd/daybook-mongo-tunnel.service,scripts/deploy.sh,scripts/server-setup.sh,scripts/remote-install.sh,scripts/bootstrap.sh"
           target: "/opt/daybook/backend"
 
-      - name: Write .env + pull + restart
+      # The server's /opt/daybook/backend/.env is the single source of truth for
+      # app config (managed by bootstrap.sh/remote-install.sh and edited on the
+      # box for secrets like JWT/AI/SALES). CI does NOT rewrite it — it only ships
+      # new code, pulls the freshly built image, and restarts. This avoids
+      # clobbering the auto-picked port, the Mongo tunnel URL, and sync settings.
+      - name: Pull image + restart (preserves server .env)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.LINODE_HOST }}
@@ -79,35 +84,7 @@ jobs:
           script: |
             set -e
             cd /opt/daybook/backend
-            # Preserve the auto-picked host port + the Mongo tunnel port (server-managed,
-            # not secrets) across CI deploys, then rewrite .env from GitHub Secrets.
-            PORT_PIN="$(grep -E '^DAYBOOK_HOST_PORT=' .env 2>/dev/null || echo 'DAYBOOK_HOST_PORT=8092')"
-            SALES_PIN="$(grep -E '^SALES_MONGO_URL=' .env 2>/dev/null || true)"
-            cat > .env <<ENVEOF
-            PORT=8090
-            NODE_ENV=production
-            PUBLIC_URL=https://daybook.torama.money
-            ${PORT_PIN}
-            JWT_SECRET=${{ secrets.DAYBOOK_JWT_SECRET }}
-            GOOGLE_CLIENT_ID=${{ secrets.DAYBOOK_GOOGLE_CLIENT_ID || '763064592541-afo8b3po66bmo04q9ecselk9prske4l0.apps.googleusercontent.com' }}
-            SUPERADMIN_EMAILS=${{ secrets.DAYBOOK_SUPERADMIN_EMAILS || 'filatei@gmail.com,filatei@torama.money' }}
-            DAYBOOK_DB_PATH=/data/daybook.db
-            UPLOAD_DIR=/data/uploads
-            MAX_UPLOAD_MB=${{ secrets.DAYBOOK_MAX_UPLOAD_MB || '25' }}
-            DAYBOOK_ALLOW_DEV_LOGIN=0
-            AI_API_KEY=${{ secrets.DAYBOOK_AI_API_KEY }}
-            AI_API_URL=${{ secrets.DAYBOOK_AI_API_URL || 'https://api.anthropic.com/v1/messages' }}
-            AI_MODEL=${{ secrets.DAYBOOK_AI_MODEL || 'claude-haiku-4-5-20251001' }}
-            SMTP_HOST=${{ secrets.SMTP_HOST || 'smtp-relay.gmail.com' }}
-            SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
-            SMTP_SECURE=${{ secrets.SMTP_SECURE || 'false' }}
-            SMTP_USER=${{ secrets.SMTP_USER }}
-            SMTP_PASS=${{ secrets.SMTP_PASS }}
-            SMTP_FROM=${{ secrets.DAYBOOK_SMTP_FROM || 'Daybook <noreply@torama.money>' }}
-            DEFAULT_REPORT_RECIPIENTS=${{ secrets.DAYBOOK_DEFAULT_RECIPIENTS || 'dailyreports@gtsng.com' }}
-            ${SALES_PIN}
-            ENVEOF
-            chmod 600 .env
+            [ -f .env ] || { echo "no .env on server — run scripts/bootstrap.sh once first"; exit 1; }
             chmod +x scripts/deploy.sh scripts/server-setup.sh
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u filatei --password-stdin
             bash scripts/deploy.sh

@@ -2,6 +2,11 @@
 # A single Node service (SQLite-backed) on its own bridge network and
 # named volume. Apache on the host reverse-proxies daybook.torama.money
 # → 127.0.0.1:8090.
+#
+# Explicit project name — DO NOT remove. Without it Compose derives the project
+# from the directory ("backend"), which collides with otuburu's stack and makes
+# `--remove-orphans` capable of deleting otuburu's containers.
+name: daybook
 services:
   daybook:
     image: ghcr.io/filatei/daybook:latest

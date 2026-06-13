@@ -105,8 +105,17 @@ apache2ctl configtest || die "apache config test failed"
 systemctl reload apache2
 
 # ── 7. Build image + start container ──────────────────────────────────────────
-log "Building image + starting container…"
 cd "${BACKEND}"
+# Clear any stale daybook container from an interrupted prior run (it may be
+# holding 127.0.0.1:8090). container_name is fixed, so this is safe + targeted.
+if docker ps -aq -f name='^daybook$' | grep -q .; then
+  log "Removing stale daybook container…"; docker rm -f daybook >/dev/null 2>&1 || true
+fi
+# Make sure nothing ELSE owns the port before we try to bind it.
+if ss -ltn 2>/dev/null | grep -q '127.0.0.1:8090 '; then
+  die "127.0.0.1:8090 is in use by another process. Find it with: sudo ss -ltnp | grep 8090 — free it or change the port in docker-compose.yml + infra/apache/${DOMAIN}.conf"
+fi
+log "Building image + starting container…"
 docker compose up -d --build
 systemctl enable daybook >/dev/null 2>&1 || true
 

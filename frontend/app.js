@@ -69,8 +69,9 @@ async function onGoogleCredential(resp) {
 }
 $('#logoutBtn').addEventListener('click', logout);
 function logout() {
-  State.token = null; localStorage.removeItem('daybook_token');
+  State.token = null; localStorage.removeItem('daybook_token'); aiHistory = [];
   if (window.google?.accounts?.id) google.accounts.id.disableAutoSelect();
+  const f = $('#aiFab'); if (f) f.remove();
   $('#app').classList.add('hidden'); $('#login').classList.remove('hidden');
 }
 
@@ -84,6 +85,7 @@ async function boot() {
   localStorage.setItem('daybook_tenant', State.tenant || '');
   applyBrand(); buildTenantSelect(); setupNav();
   $('.nav button[data-tab="admin"]').classList.toggle('hidden', !isGMup());
+  mountAssistant();
   go('dashboard');
 }
 function applyBrand() {
@@ -439,6 +441,52 @@ function confirmModal(title, sub, onYes) {
 }
 const emptyBox = (ic, t, s) => `<div class="empty"><div class="ic">${ic}</div><h3 style="margin:8px 0 4px">${esc(t)}</h3><p>${esc(s)}</p></div>`;
 const errBox = (e) => `<div class="empty"><div class="ic">⚠️</div><h3>Something went wrong</h3><p>${esc(e.message)}</p></div>`;
+
+/* ── AI ASSISTANT ────────────────────────────────────── */
+let aiHistory = [];
+function mountAssistant() {
+  if ($('#aiFab')) return;
+  const b = document.createElement('button');
+  b.id = 'aiFab'; b.className = 'fab ai'; b.title = 'Ask Daybook AI'; b.textContent = '✨';
+  b.onclick = openAssistant;
+  $('#app').appendChild(b);
+}
+async function openAssistant() {
+  const greeting = aiHistory.length ? '' : `<div class="bub sys">Ask me about ${esc(active()?.name || 'your companies')}'s sales, balances, trends, or which site to look at. I read your live report data.</div>`;
+  const body = modal(`
+    <div class="chat" id="aiChat">${greeting}${aiHistory.map(renderBub).join('')}</div>
+    <div class="chat-input">
+      <textarea class="input" id="aiInput" rows="1" placeholder="e.g. Which site had the best week?"></textarea>
+      <button class="btn" id="aiSend" style="width:auto;padding:13px 16px">➤</button>
+    </div>`, { title: '✨ Daybook Assistant', sub: active() ? `${active().name} · ${ROLE_LABEL[myRole()]}` : 'All companies' });
+  const chat = $('#aiChat', body), input = $('#aiInput', body), send = $('#aiSend', body);
+  chat.scrollTop = chat.scrollHeight;
+  const grow = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 120) + 'px'; };
+  input.oninput = grow;
+  const submit = async () => {
+    const q = input.value.trim(); if (!q) return;
+    input.value = ''; grow();
+    aiHistory.push({ role: 'user', content: q });
+    chat.insertAdjacentHTML('beforeend', renderBub({ role: 'user', content: q }));
+    const typing = document.createElement('div'); typing.className = 'bub a'; typing.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
+    chat.appendChild(typing); chat.scrollTop = chat.scrollHeight; send.disabled = true;
+    try {
+      const r = await api('/ai/chat', { method: 'POST', body: { message: q, history: aiHistory.slice(0, -1) } });
+      typing.remove();
+      aiHistory.push({ role: 'assistant', content: r.reply });
+      chat.insertAdjacentHTML('beforeend', renderBub({ role: 'assistant', content: r.reply }));
+    } catch (e) {
+      typing.remove();
+      const msg = e.message && e.message.includes('not configured')
+        ? 'AI isn\'t switched on yet — add an Anthropic API key (AI_API_KEY) on the server to enable it.' : e.message;
+      chat.insertAdjacentHTML('beforeend', `<div class="bub sys">${esc(msg)}</div>`);
+    } finally { send.disabled = false; chat.scrollTop = chat.scrollHeight; input.focus(); }
+  };
+  send.onclick = submit;
+  input.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } };
+  setTimeout(() => input.focus(), 100);
+}
+const renderBub = (m) => `<div class="bub ${m.role === 'user' ? 'u' : 'a'}">${esc(m.content)}</div>`;
 
 /* ── start ───────────────────────────────────────────── */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

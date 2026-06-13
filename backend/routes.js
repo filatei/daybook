@@ -14,6 +14,7 @@ const {
   accessibleTenants, contextFor, requestedTenant, atLeast, GOOGLE_CLIENT_ID,
 } = require('./auth');
 const { sendDailyReport, verifyConnection } = require('./mailer');
+const { callAI, AIError, aiConfigured } = require('./aiClient');
 
 const router = express.Router();
 const db = getDb();
@@ -399,5 +400,54 @@ router.delete('/recipients/:id', requireAuth, needTenant('ADMIN'), (req, res) =>
 });
 
 router.get('/mail/health', requireAuth, async (_req, res) => res.json(await verifyConnection()));
+
+// ── AI ASSISTANT ────────────────────────────────────────────────────────────
+router.get('/ai/health', requireAuth, (_req, res) => res.json({ configured: aiConfigured() }));
+
+// Build a compact context snapshot for the active tenant so the assistant can
+// answer questions about the business's own numbers.
+function aiContext(req) {
+  const s = scope(req);
+  if (s.error || s.all) return { scope: 'all companies', note: 'pick a workspace for company-specific figures' };
+  const t = tenantById(s.ctx.tenant_id);
+  const where = ['r.tenant_id=?']; const args = [s.ctx.tenant_id];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
+  const W = 'WHERE ' + where.join(' AND ');
+  const totals = db.prepare(`SELECT COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(total_cash),0) cash,
+    COALESCE(SUM(total_deposit),0) deposit, COALESCE(SUM(diesel+expenses),0) costs, COUNT(*) reports FROM daily_reports r ${W}`).get(...args);
+  const recent = db.prepare(`SELECT r.report_date, s.name site, r.total_sales, r.balance FROM daily_reports r
+    JOIN sites s ON s.id=r.site_id ${W} ORDER BY r.report_date DESC LIMIT 15`).all(...args);
+  const sites = db.prepare('SELECT name, code FROM sites WHERE tenant_id=?').all(s.ctx.tenant_id);
+  return { company: t.name, currency: t.currency, role: s.ctx.role, totals, sites, recent_reports: recent };
+}
+
+router.post('/ai/chat', requireAuth, async (req, res) => {
+  const question = (req.body && req.body.message || '').toString().slice(0, 4000);
+  if (!question.trim()) return res.status(400).json({ error: 'message required' });
+  const history = Array.isArray(req.body.history) ? req.body.history.slice(-8) : [];
+  const ctx = aiContext(req);
+  const system = `You are Daybook Assistant, a concise analyst inside Daybook — a daily sales & operations reporting app for businesses (e.g. water producers Fido Water and Fiafia Water). Help the signed-in user understand and act on THEIR company's reporting data.
+
+Rules:
+- Use only the data provided in CONTEXT below; if something isn't there, say you don't have it yet rather than inventing numbers.
+- Amounts are in Nigerian Naira (₦). Format money with ₦ and thousands separators.
+- Be brief and practical: surface trends, anomalies (e.g. a site with falling sales or high diesel cost), and clear next actions.
+- You cannot change data; if asked to, explain which screen the user should use (Reports, Documents, Admin).
+
+CONTEXT (live snapshot for this user):
+${JSON.stringify(ctx)}`;
+  const messages = [
+    ...history.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && m.content)
+      .map((m) => ({ role: m.role, content: String(m.content).slice(0, 2000) })),
+    { role: 'user', content: question },
+  ];
+  try {
+    const reply = await callAI({ system, messages, maxTokens: 700 });
+    res.json({ reply });
+  } catch (e) {
+    const status = e instanceof AIError ? e.httpStatus : 502;
+    res.status(status).json({ error: e.userMessage || e.message || 'AI error', code: e.code });
+  }
+});
 
 module.exports = router;

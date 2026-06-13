@@ -59,6 +59,9 @@ DAYBOOK_DB_PATH=/data/daybook.db
 UPLOAD_DIR=/data/uploads
 MAX_UPLOAD_MB=25
 DAYBOOK_ALLOW_DEV_LOGIN=0
+AI_API_KEY=${DAYBOOK_AI_API_KEY:-}
+AI_API_URL=${DAYBOOK_AI_API_URL:-https://api.anthropic.com/v1/messages}
+AI_MODEL=${DAYBOOK_AI_MODEL:-claude-haiku-4-5-20251001}
 SMTP_HOST=smtp-relay.gmail.com
 SMTP_PORT=587
 SMTP_SECURE=false
@@ -96,6 +99,13 @@ else
   log "Using pinned host port ${HOST_PORT}"
 fi
 export DAYBOOK_HOST_PORT="${HOST_PORT}"
+
+# ── 4c. Backfill any newer keys into an existing .env (preserves your values) ──
+ensure_env() { grep -qE "^$1=" "${ENV_FILE}" 2>/dev/null || echo "$1=$2" >> "${ENV_FILE}"; }
+ensure_env AI_API_KEY "${DAYBOOK_AI_API_KEY:-}"
+ensure_env AI_API_URL "https://api.anthropic.com/v1/messages"
+ensure_env AI_MODEL "claude-haiku-4-5-20251001"
+chown daybookuser:daybookuser "${ENV_FILE}" 2>/dev/null || true
 
 # ── 5. TLS — temporary HTTP vhost → certbot → managed vhost ───────────────────
 LE_DIR="/etc/letsencrypt/live/${DOMAIN}"

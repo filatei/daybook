@@ -87,6 +87,9 @@ jobs:
             UPLOAD_DIR=/data/uploads
             MAX_UPLOAD_MB=${{ secrets.DAYBOOK_MAX_UPLOAD_MB || '25' }}
             DAYBOOK_ALLOW_DEV_LOGIN=0
+            AI_API_KEY=${{ secrets.DAYBOOK_AI_API_KEY }}
+            AI_API_URL=${{ secrets.DAYBOOK_AI_API_URL || 'https://api.anthropic.com/v1/messages' }}
+            AI_MODEL=${{ secrets.DAYBOOK_AI_MODEL || 'claude-haiku-4-5-20251001' }}
             SMTP_HOST=${{ secrets.SMTP_HOST || 'smtp-relay.gmail.com' }}
             SMTP_PORT=${{ secrets.SMTP_PORT || '587' }}
             SMTP_SECURE=${{ secrets.SMTP_SECURE || 'false' }}

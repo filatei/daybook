@@ -148,6 +148,13 @@ cd "${BACKEND}"
 if docker ps -aq -f name='^daybook$' | grep -q .; then
   log "Removing stale daybook container…"; docker rm -f daybook >/dev/null 2>&1 || true
 fi
+# Remove a stale 'daybook' network left mislabeled by an earlier (project=backend)
+# run so compose can recreate it cleanly under this project.
+if docker network inspect daybook >/dev/null 2>&1; then
+  if [ -z "$(docker network inspect daybook -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)" ]; then
+    docker network rm daybook >/dev/null 2>&1 || true
+  fi
+fi
 # Final guard: the chosen port must be free now.
 if port_busy "${HOST_PORT}"; then
   die "127.0.0.1:${HOST_PORT} is in use. Find it: sudo ss -ltnp | grep ${HOST_PORT}"

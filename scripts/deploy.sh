@@ -25,7 +25,7 @@ log "Starting daybook…"
 docker compose up -d --force-recreate --remove-orphans
 
 # Host port chosen by remote-install.sh and pinned in .env (default 8091).
-HOST_PORT="$(grep -E '^DAYBOOK_HOST_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
+HOST_PORT="$(grep -E '^DAYBOOK_HOST_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- || true)"
 HOST_PORT="${HOST_PORT:-8091}"
 
 # ── 3. Install / refresh Apache vhost (substitute the real proxy port) ────────

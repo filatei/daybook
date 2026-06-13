@@ -76,11 +76,11 @@ chmod 640 "${ENV_FILE}"
 # Auto-select the first free port so we never collide with otuburu/vote/etc.
 # Once chosen it's pinned in .env so Apache + clients keep hitting the same one.
 port_busy() { ss -ltn 2>/dev/null | grep -q "127.0.0.1:$1 " || ss -ltn 2>/dev/null | grep -q "0.0.0.0:$1 " || ss -ltn 2>/dev/null | grep -q "\*:$1 "; }
-HOST_PORT="$(grep -E '^DAYBOOK_HOST_PORT=' "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2-)"
+HOST_PORT="$(grep -E '^DAYBOOK_HOST_PORT=' "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 # If a previously-pinned port is now taken by a NON-daybook process, drop it.
 if [[ -n "${HOST_PORT}" ]]; then
   docker rm -f daybook >/dev/null 2>&1 || true   # free our own old mapping first
-  port_busy "${HOST_PORT}" && { log "pinned port ${HOST_PORT} is occupied — choosing another"; HOST_PORT=""; }
+  if port_busy "${HOST_PORT}"; then log "pinned port ${HOST_PORT} is occupied — choosing another"; HOST_PORT=""; fi
 fi
 if [[ -z "${HOST_PORT}" ]]; then
   for p in 8091 8092 8093 8094 8095 8096 8097 8098 8099 8190 8191 8192 8193 8194 8195; do
@@ -124,12 +124,23 @@ fi
 
 # ── 6. Install managed Apache vhost (proxy target = chosen HOST_PORT) ─────────
 log "Installing Apache vhost (→ 127.0.0.1:${HOST_PORT})…"
+a2enmod ssl proxy proxy_http headers rewrite >/dev/null 2>&1 || true
 cp "${BACKEND}/infra/apache/${DOMAIN}.conf" /etc/apache2/sites-available/daybook.conf
 # The committed vhost uses 8091 as a placeholder; point it at the real port.
 sed -i "s#127\.0\.0\.1:8091#127.0.0.1:${HOST_PORT}#g" /etc/apache2/sites-available/daybook.conf
 a2ensite daybook.conf >/dev/null
+# Drop certbot's auto-generated shadow vhost if it ever appears — it can win the
+# ServerName match and shadow our managed config (lesson from otuburu).
+a2dissite "${DOMAIN}-le-ssl.conf" >/dev/null 2>&1 || true
+a2dissite daybook-http.conf >/dev/null 2>&1 || true
 apache2ctl configtest || die "apache config test failed"
 systemctl reload apache2
+# Confirm our vhost actually owns daybook.torama.money on :443.
+if apache2ctl -S 2>/dev/null | grep -q "${DOMAIN}"; then
+  ok "Apache vhost active for ${DOMAIN}"
+else
+  log "WARN: ${DOMAIN} not shown in 'apache2ctl -S' — another vhost may be shadowing it"
+fi
 
 # ── 7. Build image + start container ──────────────────────────────────────────
 cd "${BACKEND}"

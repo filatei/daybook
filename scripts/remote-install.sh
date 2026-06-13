@@ -72,6 +72,31 @@ fi
 chown daybookuser:daybookuser "${ENV_FILE}" 2>/dev/null || true
 chmod 640 "${ENV_FILE}"
 
+# ── 4b. Pick a stable, FREE loopback host port (persisted in .env) ────────────
+# Auto-select the first free port so we never collide with otuburu/vote/etc.
+# Once chosen it's pinned in .env so Apache + clients keep hitting the same one.
+port_busy() { ss -ltn 2>/dev/null | grep -q "127.0.0.1:$1 " || ss -ltn 2>/dev/null | grep -q "0.0.0.0:$1 " || ss -ltn 2>/dev/null | grep -q "\*:$1 "; }
+HOST_PORT="$(grep -E '^DAYBOOK_HOST_PORT=' "${ENV_FILE}" 2>/dev/null | head -1 | cut -d= -f2-)"
+# If a previously-pinned port is now taken by a NON-daybook process, drop it.
+if [[ -n "${HOST_PORT}" ]]; then
+  docker rm -f daybook >/dev/null 2>&1 || true   # free our own old mapping first
+  port_busy "${HOST_PORT}" && { log "pinned port ${HOST_PORT} is occupied — choosing another"; HOST_PORT=""; }
+fi
+if [[ -z "${HOST_PORT}" ]]; then
+  for p in 8091 8092 8093 8094 8095 8096 8097 8098 8099 8190 8191 8192 8193 8194 8195; do
+    if ! port_busy "$p"; then HOST_PORT="$p"; break; fi
+  done
+  [[ -n "${HOST_PORT}" ]] || die "no free loopback port found in 8091-8195 — free one and re-run"
+  # write/replace the pin in .env
+  sed -i '/^DAYBOOK_HOST_PORT=/d' "${ENV_FILE}"
+  echo "DAYBOOK_HOST_PORT=${HOST_PORT}" >> "${ENV_FILE}"
+  chown daybookuser:daybookuser "${ENV_FILE}" 2>/dev/null || true
+  ok "Using free host port ${HOST_PORT}"
+else
+  log "Using pinned host port ${HOST_PORT}"
+fi
+export DAYBOOK_HOST_PORT="${HOST_PORT}"
+
 # ── 5. TLS — temporary HTTP vhost → certbot → managed vhost ───────────────────
 LE_DIR="/etc/letsencrypt/live/${DOMAIN}"
 if [[ ! -d "${LE_DIR}" ]]; then
@@ -97,33 +122,34 @@ else
   log "Certificate already present — skipping issuance"
 fi
 
-# ── 6. Install managed Apache vhost ───────────────────────────────────────────
-log "Installing Apache vhost…"
+# ── 6. Install managed Apache vhost (proxy target = chosen HOST_PORT) ─────────
+log "Installing Apache vhost (→ 127.0.0.1:${HOST_PORT})…"
 cp "${BACKEND}/infra/apache/${DOMAIN}.conf" /etc/apache2/sites-available/daybook.conf
+# The committed vhost uses 8091 as a placeholder; point it at the real port.
+sed -i "s#127\.0\.0\.1:8091#127.0.0.1:${HOST_PORT}#g" /etc/apache2/sites-available/daybook.conf
 a2ensite daybook.conf >/dev/null
 apache2ctl configtest || die "apache config test failed"
 systemctl reload apache2
 
 # ── 7. Build image + start container ──────────────────────────────────────────
 cd "${BACKEND}"
-# Clear any stale daybook container from an interrupted prior run (it may be
-# holding 127.0.0.1:8090). container_name is fixed, so this is safe + targeted.
+# Clear any stale daybook container from an interrupted prior run (frees its port).
 if docker ps -aq -f name='^daybook$' | grep -q .; then
   log "Removing stale daybook container…"; docker rm -f daybook >/dev/null 2>&1 || true
 fi
-# Make sure nothing ELSE owns the host port before we try to bind it.
-if ss -ltn 2>/dev/null | grep -q '127.0.0.1:8091 '; then
-  die "127.0.0.1:8091 is in use by another process. Find it with: sudo ss -ltnp | grep 8091 — free it or change the host port in docker-compose.yml + infra/apache/${DOMAIN}.conf"
+# Final guard: the chosen port must be free now.
+if port_busy "${HOST_PORT}"; then
+  die "127.0.0.1:${HOST_PORT} is in use. Find it: sudo ss -ltnp | grep ${HOST_PORT}"
 fi
-log "Building image + starting container…"
+log "Building image + starting container on host port ${HOST_PORT}…"
 docker compose up -d --build
 systemctl enable daybook >/dev/null 2>&1 || true
 
 # ── 8. Health check ───────────────────────────────────────────────────────────
 log "Waiting for health…"
 for i in $(seq 1 20); do
-  if curl -fsS "http://127.0.0.1:8091/healthz" >/dev/null 2>&1; then
-    ok "Container healthy on :8091"; break
+  if curl -fsS "http://127.0.0.1:${HOST_PORT}/healthz" >/dev/null 2>&1; then
+    ok "Container healthy on :${HOST_PORT}"; break
   fi
   [[ $i -eq 20 ]] && die "container did not become healthy — check: docker logs daybook"
   sleep 2

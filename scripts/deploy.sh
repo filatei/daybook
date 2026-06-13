@@ -24,14 +24,20 @@ docker compose pull --quiet || log "pull skipped (building locally?)"
 log "Starting daybook…"
 docker compose up -d --force-recreate --remove-orphans
 
-# ── 3. Install / refresh Apache vhost ─────────────────────────────────────────
+# Host port chosen by remote-install.sh and pinned in .env (default 8091).
+HOST_PORT="$(grep -E '^DAYBOOK_HOST_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2-)"
+HOST_PORT="${HOST_PORT:-8091}"
+
+# ── 3. Install / refresh Apache vhost (substitute the real proxy port) ────────
 if [ -f "${VHOST_SRC}" ]; then
-  if ! diff -q "${VHOST_SRC}" "${VHOST_DST}" >/dev/null 2>&1; then
-    log "Updating Apache vhost…"
-    sudo -n cp "${VHOST_SRC}" "${VHOST_DST}" || log "WARN: couldn't copy vhost (run server-setup.sh?)"
+  TMP_VHOST="$(mktemp)"; sed "s#127\.0\.0\.1:8091#127.0.0.1:${HOST_PORT}#g" "${VHOST_SRC}" > "${TMP_VHOST}"
+  if ! diff -q "${TMP_VHOST}" "${VHOST_DST}" >/dev/null 2>&1; then
+    log "Updating Apache vhost (→ 127.0.0.1:${HOST_PORT})…"
+    sudo -n cp "${TMP_VHOST}" "${VHOST_DST}" || log "WARN: couldn't copy vhost (run server-setup.sh?)"
     sudo -n a2ensite daybook >/dev/null 2>&1 || true
     sudo -n apache2ctl -t && sudo -n systemctl reload apache2 || log "WARN: apache reload failed"
   fi
+  rm -f "${TMP_VHOST}"
 fi
 
 # ── 4. Prune dangling images ──────────────────────────────────────────────────
@@ -40,7 +46,7 @@ docker image prune -f --filter "until=24h" >/dev/null 2>&1 || true
 # ── 5. Health check ───────────────────────────────────────────────────────────
 sleep 3
 for i in $(seq 1 10); do
-  if curl -fsS "http://127.0.0.1:8091/healthz" >/dev/null 2>&1; then ok "daybook healthy"; exit 0; fi
+  if curl -fsS "http://127.0.0.1:${HOST_PORT}/healthz" >/dev/null 2>&1; then ok "daybook healthy"; exit 0; fi
   sleep 2
 done
 die "daybook did not become healthy — check: docker logs daybook"

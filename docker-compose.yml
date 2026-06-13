@@ -19,9 +19,10 @@ services:
     container_name: daybook
     restart: always
     # Bind only to loopback — Apache is the public edge (TLS terminator).
-    # Host 8091 → container 8090 (host 8090 is used by another service on this box).
+    # Host port is auto-selected by remote-install.sh (host 8090/8091 are taken on
+    # this box) and persisted as DAYBOOK_HOST_PORT in .env. Container always 8090.
     ports:
-      - "127.0.0.1:8091:8090"
+      - "127.0.0.1:${DAYBOOK_HOST_PORT:-8091}:8090"
     env_file:
       - .env
     volumes:

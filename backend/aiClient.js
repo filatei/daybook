@@ -99,4 +99,45 @@ async function callAI({ system, messages, maxTokens = 1024, noFallback = false }
 
 const aiConfigured = () => !!(process.env.AI_API_KEY || (process.env.AI_API_URL && !process.env.AI_API_URL.includes('anthropic.com')));
 
-module.exports = { callAI, AIError, aiConfigured };
+/**
+ * Agentic call with tools (Anthropic only). The model may call your tools to
+ * fetch data, then answer. `runTool(name, input)` executes a tool and returns
+ * a JSON-serialisable result. Loops up to maxRounds.
+ */
+async function callAgent({ system, messages, tools, runTool, maxTokens = 900, maxRounds = 4 }) {
+  const key = process.env.AI_API_KEY;
+  const url = process.env.AI_API_URL || 'https://api.anthropic.com/v1/messages';
+  const model = process.env.AI_MODEL || 'claude-haiku-4-5-20251001';
+  if (!key) throw new AIError('AI is not configured yet. Set AI_API_KEY on the server.', 'no_api_key', 503);
+  const msgs = messages.map((m) => ({ ...m }));
+  for (let round = 0; round < maxRounds; round++) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: msgs, tools }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      const t = data.error && data.error.type;
+      throw new AIError(userMsg(t), t || 'unknown', res.status);
+    }
+    const blocks = data.content || [];
+    if (data.stop_reason === 'tool_use') {
+      msgs.push({ role: 'assistant', content: blocks });
+      const results = [];
+      for (const blk of blocks) {
+        if (blk.type !== 'tool_use') continue;
+        let out;
+        try { out = await runTool(blk.name, blk.input || {}); }
+        catch (e) { out = { error: String(e.message || e) }; }
+        results.push({ type: 'tool_result', tool_use_id: blk.id, content: JSON.stringify(out).slice(0, 12000) });
+      }
+      msgs.push({ role: 'user', content: results });
+      continue;
+    }
+    return blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+  }
+  return 'I gathered the data but ran out of steps before finishing — please narrow the question.';
+}
+
+module.exports = { callAI, callAgent, AIError, aiConfigured };

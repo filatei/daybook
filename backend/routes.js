@@ -14,7 +14,7 @@ const {
   accessibleTenants, contextFor, requestedTenant, atLeast, GOOGLE_CLIENT_ID,
 } = require('./auth');
 const { sendDailyReport, verifyConnection } = require('./mailer');
-const { callAI, AIError, aiConfigured } = require('./aiClient');
+const { callAI, callAgent, AIError, aiConfigured } = require('./aiClient');
 const sales = require('./salesSource');
 
 const router = express.Router();
@@ -442,7 +442,38 @@ ${JSON.stringify(ctx)}`;
       .map((m) => ({ role: m.role, content: String(m.content).slice(0, 2000) })),
     { role: 'user', content: question },
   ];
+
+  // When the live POS sales DB is reachable, give the assistant a tool to query
+  // it directly — so it can answer ANY question about the real sales data.
+  const sc = scope(req);
+  const posReady = sales.salesEnabled() && sc.ctx; // a specific tenant is selected
   try {
+    if (posReady) {
+      // Site codes this caller may see (tenant isolation; site managers → own site only).
+      let allowed = db.prepare('SELECT code FROM sites WHERE tenant_id=?').all(sc.ctx.tenant_id).map((s) => s.code);
+      if (sc.ctx.role === 'SITE_MANAGER') { const me = siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
+      const sysT = system + `\n\nTODAY is ${new Date().toISOString().slice(0, 10)}. You can call query_pos_sales to read the LIVE point-of-sale database for this company. You may ONLY see these sites: ${allowed.join(', ')}. Always pass a date range. Summarise results in ₦ with clear takeaways.`;
+      const tools = [{
+        name: 'query_pos_sales',
+        description: 'Query the live POS sales database for this company. Returns aggregated real sales (amount in ₦, order counts, product qty). Use for any question about sales by site, payment method, product, or day over a date range.',
+        input_schema: { type: 'object', properties: {
+          from: { type: 'string', description: 'start date YYYY-MM-DD' },
+          to: { type: 'string', description: 'end date YYYY-MM-DD inclusive' },
+          site: { type: 'string', description: 'optional single site code, e.g. SWALI' },
+          groupBy: { type: 'string', enum: ['site', 'paymentMethod', 'product', 'day'], description: 'how to group results' },
+        }, required: ['from', 'to'] },
+      }];
+      const runTool = async (name, input) => {
+        if (name !== 'query_pos_sales') return { error: 'unknown tool' };
+        let sitesArg = allowed;
+        if (input.site) { const want = String(input.site).toUpperCase().replace(/[^A-Z0-9]/g, ''); sitesArg = allowed.filter((c) => c.toUpperCase().replace(/[^A-Z0-9]/g, '') === want); if (!sitesArg.length) return { error: 'site not accessible', allowed }; }
+        if (!sitesArg.length) return { error: 'no accessible sites' };
+        const rows = await sales.query({ from: input.from, to: input.to, sites: sitesArg, groupBy: input.groupBy || 'site' });
+        return { groupBy: input.groupBy || 'site', from: input.from, to: input.to, rows };
+      };
+      const reply = await callAgent({ system: sysT, messages, tools, runTool, maxTokens: 900 });
+      return res.json({ reply });
+    }
     const reply = await callAI({ system, messages, maxTokens: 700 });
     res.json({ reply });
   } catch (e) {
@@ -503,6 +534,108 @@ router.post('/ai/analyse', requireAuth, async (req, res) => {
     const reply = await callAI({ system, messages: [{ role: 'user', content: 'Analyse this day:\n' + JSON.stringify(payload) }], maxTokens: 600 });
     res.json({ reply, pos_sales: posData });
   } catch (e) { res.status(e instanceof AIError ? e.httpStatus : 502).json({ error: e.userMessage || e.message, code: e.code }); }
+});
+
+// ── STAFF & TIMESHEETS (live staff-hours; Daybook-owned) ──────────────────────
+router.get('/staff', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  if (s.all) return res.json(db.prepare('SELECT * FROM staff ORDER BY full_name').all());
+  if (s.ctx.role === 'SITE_MANAGER') return res.json(db.prepare("SELECT * FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name").all(s.ctx.tenant_id, s.ctx.site_id));
+  const site = req.query.site;
+  res.json(site ? db.prepare('SELECT * FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name').all(s.ctx.tenant_id, site)
+    : db.prepare('SELECT * FROM staff WHERE tenant_id=? ORDER BY full_name').all(s.ctx.tenant_id));
+});
+router.post('/staff', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const b = req.body || {};
+  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
+  if (!b.full_name || !site_id) return res.status(400).json({ error: 'full_name and site_id required' });
+  const site = siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
+  const id = uuid();
+  try { db.prepare('INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type) VALUES (?,?,?,?,?,?,?)').run(id, req.ctx.tenant_id, site_id, b.full_name.trim(), b.role_title || null, b.phone || null, b.pay_type || 'DAILY'); }
+  catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
+  res.status(201).json(db.prepare('SELECT * FROM staff WHERE id=?').get(id));
+});
+router.patch('/staff/:id', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const st = db.prepare('SELECT * FROM staff WHERE id=?').get(req.params.id);
+  if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const f = req.body || {};
+  db.prepare('UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,status=?,site_id=? WHERE id=?')
+    .run(f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, f.pay_type ?? st.pay_type, f.status ?? st.status, req.ctx.role === 'SITE_MANAGER' ? st.site_id : (f.site_id ?? st.site_id), st.id);
+  res.json(db.prepare('SELECT * FROM staff WHERE id=?').get(st.id));
+});
+// Import staff from the POS `peoples` collection, matched to this tenant's sites.
+router.post('/staff/import', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
+  try {
+    const people = await sales.getStaff();
+    const sites = db.prepare('SELECT * FROM sites WHERE tenant_id=?').all(req.ctx.tenant_id);
+    const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const ins = db.prepare('INSERT OR IGNORE INTO staff (id,tenant_id,site_id,full_name,ext_people_id) VALUES (?,?,?,?,?)');
+    let added = 0;
+    for (const p of people) {
+      if (!p.name || !p.siteName) continue;
+      const site = sites.find((s) => norm(s.code) === norm(p.siteName) || norm(s.name) === norm(p.siteName));
+      if (!site) continue;
+      if (ins.run(uuid(), req.ctx.tenant_id, site.id, p.name, p.ext_id).changes) added++;
+    }
+    audit(req.ctx.tenant_id, req.user.id, 'IMPORT', 'staff', null, { added });
+    res.json({ imported: added, scanned: people.length });
+  } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
+});
+
+router.get('/timesheets', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  const { site, from, to, date } = req.query; const where = [], args = [];
+  if (s.ctx) { where.push('t.tenant_id=?'); args.push(s.ctx.tenant_id);
+    if (s.ctx.role === 'SITE_MANAGER') { where.push('t.site_id=?'); args.push(s.ctx.site_id); }
+    else if (site) { where.push('t.site_id=?'); args.push(site); } }
+  if (date) { where.push('t.work_date=?'); args.push(date); }
+  if (from) { where.push('t.work_date>=?'); args.push(from); }
+  if (to) { where.push('t.work_date<=?'); args.push(to); }
+  const sql = `SELECT t.*, st.full_name FROM timesheets t JOIN staff st ON st.id=t.staff_id ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY t.work_date DESC, st.full_name LIMIT 2000`;
+  res.json(db.prepare(sql).all(...args));
+});
+router.post('/timesheets', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const b = req.body || {}; const work_date = b.work_date; const entries = Array.isArray(b.entries) ? b.entries : [];
+  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
+  if (!work_date || !site_id) return res.status(400).json({ error: 'work_date and site_id required' });
+  const up = db.prepare(`INSERT INTO timesheets (id,tenant_id,site_id,staff_id,work_date,present,hours,bags_bagged,bags_loaded,note,recorded_by)
+    VALUES (@id,@tenant_id,@site_id,@staff_id,@work_date,@present,@hours,@bags_bagged,@bags_loaded,@note,@recorded_by)
+    ON CONFLICT(staff_id,work_date) DO UPDATE SET present=@present,hours=@hours,bags_bagged=@bags_bagged,bags_loaded=@bags_loaded,note=@note,recorded_by=@recorded_by`);
+  let n = 0;
+  for (const e of entries) {
+    const st = db.prepare('SELECT tenant_id FROM staff WHERE id=?').get(e.staff_id);
+    if (!st || st.tenant_id !== req.ctx.tenant_id) continue;
+    up.run({ id: uuid(), tenant_id: req.ctx.tenant_id, site_id, staff_id: e.staff_id, work_date, present: e.present ? 1 : 0, hours: e.hours ?? null, bags_bagged: e.bags_bagged ?? null, bags_loaded: e.bags_loaded ?? null, note: e.note || null, recorded_by: req.user.id });
+    n++;
+  }
+  res.json({ saved: n, work_date });
+});
+function tsSummary(tenant_id, site, from, to) {
+  const where = ['t.tenant_id=?'], args = [tenant_id];
+  if (site) { where.push('t.site_id=?'); args.push(site); }
+  if (from) { where.push('t.work_date>=?'); args.push(from); }
+  if (to) { where.push('t.work_date<=?'); args.push(to); }
+  return db.prepare(`SELECT st.full_name staff, si.name site, COUNT(CASE WHEN t.present=1 THEN 1 END) days,
+    COALESCE(SUM(t.hours),0) hours, COALESCE(SUM(t.bags_bagged),0) bags_bagged, COALESCE(SUM(t.bags_loaded),0) bags_loaded
+    FROM timesheets t JOIN staff st ON st.id=t.staff_id JOIN sites si ON si.id=t.site_id
+    WHERE ${where.join(' AND ')} GROUP BY t.staff_id ORDER BY si.name, st.full_name`).all(...args);
+}
+router.get('/timesheets/summary', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+  const site = s.ctx.role === 'SITE_MANAGER' ? s.ctx.site_id : req.query.site;
+  res.json(tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to));
+});
+router.get('/timesheets/summary.csv', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error || !s.ctx) return res.status(400).send(s.error || 'select a workspace');
+  const site = s.ctx.role === 'SITE_MANAGER' ? s.ctx.site_id : req.query.site;
+  const rows = tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to);
+  const csv = ['Staff,Site,Days,Hours,Bags Bagged,Bags Loaded',
+    ...rows.map((r) => [r.staff, r.site, r.days, r.hours, r.bags_bagged, r.bags_loaded].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="timesheets-${req.query.from || 'all'}_${req.query.to || 'all'}.csv"`);
+  res.send(csv);
 });
 
 module.exports = router;

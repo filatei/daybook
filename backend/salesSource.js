@@ -106,9 +106,47 @@ async function getPayroll({ month, year, siteName }) {
   return rows;
 }
 
+/** Active staff (peoples) with resolved site name — for the import feature. */
+async function getStaff() {
+  const db = await getDb();
+  return db.collection('peoples').aggregate([
+    { $match: { $or: [{ status: 'ACTIVE' }, { status: { $exists: false } }] } },
+    { $lookup: { from: 'sites', localField: 'site', foreignField: '_id', as: 's' } },
+    { $project: { _id: 0, ext_id: { $toString: '$_id' }, name: 1, siteName: { $arrayElemAt: ['$s.name', 0] }, jobName: 1 } },
+    { $limit: 2000 },
+  ]).toArray();
+}
+
+/**
+ * Flexible read-only aggregation over fidoorders — the surface the AI tool calls.
+ * args: { from:'YYYY-MM-DD', to:'YYYY-MM-DD', site?, groupBy?:'site'|'paymentMethod'|'product'|'day' }
+ */
+async function query({ from, to, site, sites, groupBy = 'site' }) {
+  const db = await getDb();
+  const start = new Date(`${from}T00:00:00.000${TZ()}`);
+  const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
+  const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
+  // Tenant isolation: when a site allowlist is given, restrict to those sites.
+  if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
+  else if (site) match.site = siteRegex(site);
+  let pipeline;
+  if (groupBy === 'product') {
+    pipeline = [{ $match: match }, { $unwind: '$products' },
+      { $group: { _id: '$products.name', amount: { $sum: num('$products.amount') }, qty: { $sum: num('$products.qty') } } }];
+  } else {
+    const key = groupBy === 'paymentMethod' ? '$paymentMethod'
+      : groupBy === 'day' ? { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: TZ() } } : '$site';
+    pipeline = [{ $match: match }, { $addFields: { _amt: num('$txn_amount') } },
+      { $group: { _id: key, amount: { $sum: '$_amt' }, orders: { $sum: 1 } } }];
+  }
+  pipeline.push({ $sort: { amount: -1 } }, { $limit: 100 });
+  const rows = await db.collection('fidoorders').aggregate(pipeline).toArray();
+  return rows.map((r) => ({ group: r._id, amount: Math.round(r.amount || 0), orders: r.orders, qty: r.qty }));
+}
+
 async function ping() {
   try { await getDb(); await _client.db(DBNAME()).command({ ping: 1 }); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getSales, getExpensesTotal, getPayroll, ping };
+module.exports = { salesEnabled, getSales, getExpensesTotal, getPayroll, getStaff, query, ping };

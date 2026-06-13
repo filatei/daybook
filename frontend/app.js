@@ -114,7 +114,7 @@ function buildTenantSelect() {
 function setupNav() { $$('.nav button').forEach((b) => b.onclick = () => go(b.dataset.tab)); }
 function go(tab) {
   State.tab = tab; $$('.nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  ({ dashboard: viewDashboard, reports: viewReports, documents: viewDocuments, admin: viewAdmin }[tab] || viewDashboard)();
+  ({ dashboard: viewDashboard, reports: viewReports, staff: viewStaff, documents: viewDocuments, admin: viewAdmin }[tab] || viewDashboard)();
 }
 async function loadSites() { try { State.sites = await api(scoped('/sites')); } catch { State.sites = []; } return State.sites; }
 const siteName = (id) => State.sites.find((s) => s.id === id)?.name || '—';
@@ -493,6 +493,104 @@ function confirmModal(title, sub, onYes) {
 }
 const emptyBox = (ic, t, s) => `<div class="empty"><div class="ic">${ic}</div><h3 style="margin:8px 0 4px">${esc(t)}</h3><p>${esc(s)}</p></div>`;
 const errBox = (e) => `<div class="empty"><div class="ic">⚠️</div><h3>Something went wrong</h3><p>${esc(e.message)}</p></div>`;
+
+/* ── STAFF HOURS / TIMESHEETS ────────────────────────── */
+let staffDate = today(), staffSite = null;
+async function viewStaff() {
+  fabSet(false); const v = $('#view');
+  if (!State.tenant) { v.innerHTML = `<div class="section-title">Staff hours</div>` + emptyBox('👷', 'Pick a workspace', 'Choose a company at the top to record staff hours.'); return; }
+  await loadSites();
+  if (isSiteMgr()) staffSite = active().site_id;
+  else if (!staffSite || !State.sites.find((s) => s.id === staffSite)) staffSite = State.sites[0]?.id || null;
+  const siteSel = isSiteMgr() ? '' : `<select class="input" id="st-site" style="flex:1">${State.sites.map((s) => `<option value="${s.id}" ${s.id === staffSite ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`;
+  v.innerHTML = `<div class="section-title">Staff hours</div>
+    <div class="row" style="gap:8px;margin-bottom:10px">${siteSel}<input class="input" id="st-date" type="date" value="${staffDate}" style="flex:1"/></div>
+    <div class="row between" style="margin-bottom:10px">
+      <button class="btn ghost sm" id="st-summary">📊 Summary / export</button>
+      ${isGMup() && State.salesEnabled ? `<button class="btn ghost sm" id="st-import">⤓ Import from POS</button>` : ''}
+    </div>
+    <div id="st-list"><div class="skel"></div><div class="skel"></div></div>`;
+  if ($('#st-site')) $('#st-site').onchange = (e) => { staffSite = e.target.value; loadStaffGrid(); };
+  $('#st-date').onchange = (e) => { staffDate = e.target.value; loadStaffGrid(); };
+  $('#st-summary').onclick = staffSummary;
+  if ($('#st-import')) $('#st-import').onclick = importStaff;
+  loadStaffGrid();
+}
+async function loadStaffGrid() {
+  const list = $('#st-list'); if (!list) return; list.innerHTML = '<div class="skel"></div><div class="skel"></div>';
+  try {
+    let sp = '/staff'; if (!isSiteMgr() && staffSite) sp += '?site=' + staffSite;
+    let tp = '/timesheets?date=' + staffDate; if (!isSiteMgr() && staffSite) tp += '&site=' + staffSite;
+    const [staff, ts] = await Promise.all([api(scoped(sp)), api(scoped(tp))]);
+    const byStaff = {}; ts.forEach((t) => { byStaff[t.staff_id] = t; });
+    if (!staff.length) { list.innerHTML = emptyBox('👷', 'No staff yet', 'Add staff below' + (isGMup() && State.salesEnabled ? ' or import from the POS.' : '.')) + addBtns(); bindStaffBtns(); return; }
+    list.innerHTML = staff.map((s) => {
+      const t = byStaff[s.id] || { present: 1 };
+      return `<div class="card" data-sid="${s.id}" style="padding:12px">
+        <div class="row between"><b>${esc(s.full_name)}</b>
+          <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" class="st-present" ${t.present ? 'checked' : ''} style="width:auto"/> Present</label></div>
+        <div class="grid2" style="margin-top:8px">
+          <input class="input st-hours" type="number" inputmode="decimal" placeholder="Hours" value="${t.hours ?? ''}"/>
+          <input class="input st-bagged" type="number" inputmode="numeric" placeholder="Bags bagged" value="${t.bags_bagged ?? ''}"/>
+        </div>
+        <input class="input st-loaded" type="number" inputmode="numeric" placeholder="Bags loaded" value="${t.bags_loaded ?? ''}" style="margin-top:6px"/>
+      </div>`;
+    }).join('') + `<button class="btn" id="st-save" style="margin-top:6px">Save day</button>` + addBtns();
+    $('#st-save').onclick = saveStaffDay; bindStaffBtns();
+  } catch (e) { list.innerHTML = errBox(e); }
+}
+const addBtns = () => `<button class="btn ghost sm" id="st-add" style="margin-top:8px">＋ Add staff</button>`;
+function bindStaffBtns() { if ($('#st-add')) $('#st-add').onclick = addStaffForm; }
+async function saveStaffDay() {
+  const entries = $$('#st-list [data-sid]').map((c) => ({
+    staff_id: c.dataset.sid, present: $('.st-present', c).checked,
+    hours: $('.st-hours', c).value === '' ? null : +$('.st-hours', c).value,
+    bags_bagged: $('.st-bagged', c).value === '' ? null : +$('.st-bagged', c).value,
+    bags_loaded: $('.st-loaded', c).value === '' ? null : +$('.st-loaded', c).value,
+  }));
+  const btn = $('#st-save'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Saving…';
+  try { const r = await api('/timesheets?tenant=' + State.tenant, { method: 'POST', body: { work_date: staffDate, site_id: isSiteMgr() ? active().site_id : staffSite, entries } });
+    toast(`Saved ${r.saved} staff for ${staffDate}`, 'ok'); }
+  catch (e) { toast(e.message, 'err'); } finally { btn.disabled = false; btn.textContent = 'Save day'; }
+}
+function addStaffForm() {
+  const f = modal(`<form id="sf"><label class="fl">Full name</label><input class="input" id="ns-name"/>
+    <label class="fl">Role (optional)</label><input class="input" id="ns-role" placeholder="e.g. Bagger, Loader"/>
+    <label class="fl">Pay type</label><select class="input" id="ns-pay"><option>DAILY</option><option>HOURLY</option><option>MONTHLY</option><option>PIECE</option></select>
+    <div style="height:14px"></div><button class="btn" type="submit">Add staff</button></form>`, { title: 'Add staff', sub: isSiteMgr() ? active().name : siteName(staffSite) });
+  $('#sf', f).onsubmit = async (e) => { e.preventDefault(); const name = $('#ns-name', f).value.trim(); if (!name) { toast('Name required', 'err'); return; }
+    try { await api('/staff?tenant=' + State.tenant, { method: 'POST', body: { full_name: name, role_title: $('#ns-role', f).value.trim(), pay_type: $('#ns-pay', f).value, site_id: isSiteMgr() ? active().site_id : staffSite } });
+      toast('Staff added', 'ok'); closeModal(); loadStaffGrid(); } catch (er) { toast(er.message, 'err'); } };
+}
+async function importStaff() {
+  confirmModal('Import staff from POS?', 'Pulls active staff from the POS and matches them to this company\'s sites.', async () => {
+    try { const r = await api('/staff/import?tenant=' + State.tenant, { method: 'POST', body: {} }); toast(`Imported ${r.imported} of ${r.scanned}`, 'ok'); loadStaffGrid(); }
+    catch (e) { toast(e.message.includes('not configured') ? 'Sales DB not connected yet' : e.message, 'err'); }
+  });
+}
+function monthStart() { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10); }
+async function staffSummary() {
+  const b = modal(`
+    <div class="grid2"><div><label class="fl">From</label><input class="input" id="su-from" type="date" value="${monthStart()}"/></div>
+      <div><label class="fl">To</label><input class="input" id="su-to" type="date" value="${today()}"/></div></div>
+    <div id="su-list" style="margin-top:12px"><div class="skel"></div></div>
+    <button class="btn" id="su-csv" style="margin-top:10px">⬇ Export CSV (for payroll)</button>`, { title: 'Staff summary', sub: isSiteMgr() ? active().name : (staffSite ? siteName(staffSite) : active().name) });
+  const q = () => { let s = `from=${$('#su-from', b).value}&to=${$('#su-to', b).value}`; if (!isSiteMgr() && staffSite) s += '&site=' + staffSite; return s; };
+  async function load() {
+    const list = $('#su-list', b); list.innerHTML = '<div class="skel"></div>';
+    try { const rows = await api(scoped('/timesheets/summary?' + q()));
+      if (!rows.length) { list.innerHTML = '<div class="muted" style="text-align:center;padding:16px">No timesheet data in range</div>'; return; }
+      list.innerHTML = rows.map((r) => `<div class="list-item"><div class="meta"><div class="t">${esc(r.staff)}</div><div class="s">${esc(r.site)} · ${r.days} days · ${r.hours || 0}h · bagged ${r.bags_bagged || 0} · loaded ${r.bags_loaded || 0}</div></div></div>`).join('');
+    } catch (e) { list.innerHTML = errBox(e); }
+  }
+  $('#su-from', b).onchange = load; $('#su-to', b).onchange = load; load();
+  $('#su-csv', b).onclick = async () => {
+    try { const res = await fetch('/api' + scoped('/timesheets/summary.csv?' + q()), { headers: { Authorization: 'Bearer ' + State.token } });
+      if (!res.ok) throw new Error('export failed'); const blob = await res.blob();
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `timesheets-${$('#su-from', b).value}_${$('#su-to', b).value}.csv`; a.click(); URL.revokeObjectURL(a.href);
+      toast('CSV downloaded', 'ok'); } catch (e) { toast(e.message, 'err'); }
+  };
+}
 
 /* ── AI ASSISTANT ────────────────────────────────────── */
 let aiHistory = [];

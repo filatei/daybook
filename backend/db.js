@@ -152,6 +152,38 @@ function migrate(db) {
       UNIQUE(tenant_id, email)
     );
 
+    -- STAFF — a worker at a site (Daybook-owned; optionally linked to a POS person)
+    CREATE TABLE IF NOT EXISTS staff (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+      site_id       TEXT REFERENCES sites(id),
+      full_name     TEXT NOT NULL,
+      role_title    TEXT,
+      phone         TEXT,
+      pay_type      TEXT CHECK(pay_type IN ('HOURLY','DAILY','MONTHLY','PIECE')) DEFAULT 'DAILY',
+      ext_people_id TEXT,                                  -- fido peoples _id when imported
+      status        TEXT CHECK(status IN ('ACTIVE','INACTIVE')) DEFAULT 'ACTIVE',
+      created_at    INTEGER DEFAULT (unixepoch()),
+      UNIQUE(tenant_id, site_id, full_name)
+    );
+
+    -- TIMESHEETS — one row per staff per day (the live hours fido lacks)
+    CREATE TABLE IF NOT EXISTS timesheets (
+      id           TEXT PRIMARY KEY,
+      tenant_id    TEXT NOT NULL REFERENCES tenants(id),
+      site_id      TEXT NOT NULL REFERENCES sites(id),
+      staff_id     TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      work_date    TEXT NOT NULL,                          -- YYYY-MM-DD
+      present      INTEGER DEFAULT 1,
+      hours        REAL,
+      bags_bagged  INTEGER,
+      bags_loaded  INTEGER,
+      note         TEXT,
+      recorded_by  TEXT REFERENCES users(id),
+      created_at   INTEGER DEFAULT (unixepoch()),
+      UNIQUE(staff_id, work_date)
+    );
+
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
       subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())

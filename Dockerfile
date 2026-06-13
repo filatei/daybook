@@ -13,10 +13,14 @@ FROM node:20-bookworm-slim
 # /data holds the SQLite DB + uploaded files (volume-mounted in production)
 RUN mkdir -p /data/uploads && chown -R node:node /data
 WORKDIR /app
-COPY --from=builder /build/node_modules ./node_modules/
-COPY backend/ ./backend/
-COPY frontend/ ./frontend/
-COPY package.json ./
+# Copy owned by the non-root `node` user. Source files may have restrictive
+# (0600/0700) perms; --chown makes node the owner so it can read/traverse them,
+# and we normalise modes so the bits are correct regardless of host umask.
+COPY --chown=node:node --from=builder /build/node_modules ./node_modules/
+COPY --chown=node:node backend/ ./backend/
+COPY --chown=node:node frontend/ ./frontend/
+COPY --chown=node:node package.json ./
+RUN chmod -R u+rwX,go-w /app
 USER node
 
 ENV PORT=8090 \

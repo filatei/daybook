@@ -1,0 +1,28 @@
+# /etc/systemd/system/daybook-mongo-tunnel.service
+# Persistent autossh tunnel: daybook server 127.0.0.1:27018 → fido mongod 27017.
+# Lets Daybook read the POS sales DB read-only without exposing Mongo publicly.
+#
+# Requires (in /opt/daybook/backend/.env):
+#   FIDO_SSH_USER=<low-priv user on fido>   FIDO_SSH_HOST=fido.torama.ng   FIDO_SSH_PORT=2525
+# and the key /opt/daybook/.ssh/fido_tunnel authorised on fido for that user.
+[Unit]
+Description=Daybook → fido MongoDB SSH tunnel (read-only sales source)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=daybookuser
+Group=daybookuser
+EnvironmentFile=/opt/daybook/backend/.env
+Environment=AUTOSSH_GATETIME=0
+ExecStart=/usr/bin/autossh -M 0 -N \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+  -i /opt/daybook/.ssh/fido_tunnel \
+  -p ${FIDO_SSH_PORT} -L 127.0.0.1:27018:127.0.0.1:27017 \
+  ${FIDO_SSH_USER}@${FIDO_SSH_HOST}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

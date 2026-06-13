@@ -105,6 +105,13 @@ ensure_env() { grep -qE "^$1=" "${ENV_FILE}" 2>/dev/null || echo "$1=$2" >> "${E
 ensure_env AI_API_KEY "${DAYBOOK_AI_API_KEY:-}"
 ensure_env AI_API_URL "https://api.anthropic.com/v1/messages"
 ensure_env AI_MODEL "claude-haiku-4-5-20251001"
+# Sales source (fido POS Mongo via SSH tunnel) — placeholders; fill to enable.
+ensure_env FIDO_SSH_HOST "fido.torama.ng"
+ensure_env FIDO_SSH_PORT "2525"
+ensure_env FIDO_SSH_USER ""
+ensure_env SALES_MONGO_URL ""
+ensure_env SALES_DB "fido_db"
+ensure_env SALES_TZ_OFFSET "+01:00"
 chown daybookuser:daybookuser "${ENV_FILE}" 2>/dev/null || true
 
 # ── 5. TLS — temporary HTTP vhost → certbot → managed vhost ───────────────────
@@ -187,6 +194,43 @@ if curl -fsS "https://${DOMAIN}/healthz" >/dev/null 2>&1; then
   ok "LIVE → https://${DOMAIN}"
 else
   log "Local health OK but public HTTPS check failed — verify DNS/Apache. Try: curl -i https://${DOMAIN}/healthz"
+fi
+
+# ── 9. Sales-source SSH tunnel to fido (read-only POS Mongo) ──────────────────
+if ! command -v autossh >/dev/null; then
+  log "Installing autossh…"; apt-get install -y -qq autossh || log "WARN: could not install autossh"
+fi
+# Dedicated tunnel key (generated once, owned by daybookuser).
+KEYDIR=/opt/daybook/.ssh
+mkdir -p "${KEYDIR}"; chown daybookuser:daybookuser "${KEYDIR}"; chmod 700 "${KEYDIR}"
+if [ ! -f "${KEYDIR}/fido_tunnel" ]; then
+  log "Generating fido tunnel SSH key…"
+  sudo -u daybookuser ssh-keygen -t ed25519 -N "" -f "${KEYDIR}/fido_tunnel" -C "daybook-mongo-tunnel" >/dev/null
+fi
+cp "${BACKEND}/infra/systemd/daybook-mongo-tunnel.service" /etc/systemd/system/daybook-mongo-tunnel.service
+systemctl daemon-reload
+FIDO_USER="$(grep -E '^FIDO_SSH_USER=' "${ENV_FILE}" | head -1 | cut -d= -f2- || true)"
+SALES_URL="$(grep -E '^SALES_MONGO_URL=' "${ENV_FILE}" | head -1 | cut -d= -f2- || true)"
+if [ -n "${FIDO_USER}" ] && [ -n "${SALES_URL}" ]; then
+  log "Starting Mongo tunnel…"; systemctl enable --now daybook-mongo-tunnel >/dev/null 2>&1 || true
+  systemctl restart daybook-mongo-tunnel || true
+  ok "Mongo tunnel enabled (daybook-mongo-tunnel)"
+else
+  cat <<TUN
+
+ ── Sales source not yet active ───────────────────────────────
+ To connect Daybook to the fido POS sales DB:
+  1) Authorise this key on fido (port 2525) for a low-priv user — add to
+     that user's ~/.ssh/authorized_keys on fido.torama.ng:
+$(sed 's/^/        /' "${KEYDIR}/fido_tunnel.pub")
+  2) Create a read-only Mongo user on fido:
+        db.createUser({user:"daybook_ro",pwd:"<pw>",roles:[{role:"read",db:"fido_db"}]})
+  3) Edit ${ENV_FILE} and set:
+        FIDO_SSH_USER=<that low-priv user>
+        SALES_MONGO_URL=mongodb://daybook_ro:<pw>@127.0.0.1:27018/fido_db?authSource=admin&directConnection=true&readPreference=secondaryPreferred
+  4) Re-run this installer (or: sudo systemctl enable --now daybook-mongo-tunnel && daybook-deploy)
+ ──────────────────────────────────────────────────────────────
+TUN
 fi
 
 cat <<DONE

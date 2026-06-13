@@ -15,6 +15,7 @@ const {
 } = require('./auth');
 const { sendDailyReport, verifyConnection } = require('./mailer');
 const { callAI, AIError, aiConfigured } = require('./aiClient');
+const sales = require('./salesSource');
 
 const router = express.Router();
 const db = getDb();
@@ -448,6 +449,60 @@ ${JSON.stringify(ctx)}`;
     const status = e instanceof AIError ? e.httpStatus : 502;
     res.status(status).json({ error: e.userMessage || e.message || 'AI error', code: e.code });
   }
+});
+
+// ── SALES SOURCE (read-only fido POS Mongo) ───────────────────────────────────
+// Resolve the caller's access to a Daybook site; returns {site, ctx} or null.
+function siteAccess(req, siteId) {
+  const site = siteById(siteId);
+  if (!site) return null;
+  const c = contextFor(req.user, site.tenant_id);
+  if (!c) return null;
+  if (c.role === 'SITE_MANAGER' && c.site_id !== site.id) return null;
+  return { site, ctx: c };
+}
+
+router.get('/sales/status', requireAuth, (_req, res) => res.json({ enabled: sales.salesEnabled() }));
+
+// Pull a site+date's real sales from the POS for the manager to review/confirm.
+router.get('/sales/preview', requireAuth, async (req, res) => {
+  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
+  const { site: siteId, date } = req.query;
+  if (!siteId || !date) return res.status(400).json({ error: 'site and date required' });
+  const a = siteAccess(req, siteId);
+  if (!a) return res.status(403).json({ error: 'no access to this site' });
+  try {
+    const s = await sales.getSales(a.site.code, date);
+    let expenses = { total: 0, count: 0 };
+    try { expenses = await sales.getExpensesTotal(a.site.code, date); } catch {}
+    res.json({ site: { id: a.site.id, code: a.site.code, name: a.site.name }, date, sales: s, expenses });
+  } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
+});
+
+// Read computed payroll (already finalised in the POS) for a month/year.
+router.get('/payroll', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
+  try {
+    const rows = await sales.getPayroll({ month: req.query.month, year: req.query.year, siteName: req.query.site });
+    res.json(rows);
+  } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
+});
+
+// AI analysis of a site+date (pulls POS sales when available).
+router.post('/ai/analyse', requireAuth, async (req, res) => {
+  const { site: siteId, date } = req.body || {};
+  if (!siteId || !date) return res.status(400).json({ error: 'site and date required' });
+  const a = siteAccess(req, siteId);
+  if (!a) return res.status(403).json({ error: 'no access to this site' });
+  let posData = null;
+  if (sales.salesEnabled()) { try { posData = await sales.getSales(a.site.code, date); } catch {} }
+  const existing = db.prepare('SELECT * FROM daily_reports WHERE tenant_id=? AND site_id=? AND report_date=?').get(a.site.tenant_id, siteId, date);
+  const system = `You are Daybook Assistant analysing one site's day for a water business. Be concise and practical: state total sales, cash vs transfer split, top products, and flag anything unusual (a payment method missing, a product with zero sales, sales far from typical). End with one recommended action. Money is Naira (₦).`;
+  const payload = { site: a.site.name, date, pos_sales: posData, saved_report: existing ? { total_sales: existing.total_sales, total_cash: existing.total_cash, total_deposit: existing.total_deposit, diesel: existing.diesel, expenses: existing.expenses, balance: existing.balance } : null };
+  try {
+    const reply = await callAI({ system, messages: [{ role: 'user', content: 'Analyse this day:\n' + JSON.stringify(payload) }], maxTokens: 600 });
+    res.json({ reply, pos_sales: posData });
+  } catch (e) { res.status(e instanceof AIError ? e.httpStatus : 502).json({ error: e.userMessage || e.message, code: e.code }); }
 });
 
 module.exports = router;

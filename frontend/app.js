@@ -85,6 +85,7 @@ async function boot() {
   localStorage.setItem('daybook_tenant', State.tenant || '');
   applyBrand(); buildTenantSelect(); setupNav();
   $('.nav button[data-tab="admin"]').classList.toggle('hidden', !isGMup());
+  try { State.salesEnabled = (await api('/sales/status')).enabled; } catch { State.salesEnabled = false; }
   mountAssistant();
   go('dashboard');
 }
@@ -229,9 +230,16 @@ async function openReport(id) {
       ${r.notes ? `<div class="section-title" style="margin-left:0">Notes</div><div class="muted">${esc(r.notes)}</div>` : ''}
       <div style="height:16px"></div>
       <button class="btn ghost sm" id="r-edit" style="width:100%">✎ Edit report</button>
+      <div style="height:8px"></div><button class="btn ghost sm" id="r-analyse" style="width:100%;color:#5b21b6;border-color:#ddd6fe">✨ AI analyse this day</button>
       ${isGMup() ? `<div style="height:8px"></div><button class="btn sm" id="r-email" style="width:100%">✉ Email report to recipients</button>` : ''}`,
       { title: r.site_name || siteName(r.site_id), sub: r.report_date + ' · ' + r.status });
     $('#r-edit', b).onclick = () => { closeModal(); reportForm(r); };
+    $('#r-analyse', b).onclick = async (ev) => {
+      ev.target.disabled = true; ev.target.innerHTML = '<span class="spin"></span>Analysing…';
+      try { const a = await api('/ai/analyse', { method: 'POST', body: { site: r.site_id, date: r.report_date } });
+        modal(`<div class="bub a" style="max-width:100%">${esc(a.reply)}</div>`, { title: '✨ Analysis', sub: `${r.site_name || siteName(r.site_id)} · ${r.report_date}` }); }
+      catch (e) { toast(e.message.includes('not configured') ? 'AI not switched on yet' : e.message, 'err'); ev.target.disabled = false; ev.target.innerHTML = '✨ AI analyse this day'; }
+    };
     if (isGMup()) $('#r-email', b).onclick = async (ev) => {
       ev.target.disabled = true; ev.target.innerHTML = '<span class="spin"></span>Sending…';
       try { const res = await api(`/reports/${r.id}/email`, { method: 'POST', body: {} }); toast('Emailed to ' + res.to.length + ' recipient(s)', 'ok'); closeModal(); go('reports'); }
@@ -248,6 +256,7 @@ function reportForm(existing) {
       ${isSiteMgr() ? '' : `<label class="fl">Site</label><select class="input" id="rf-site">${siteOpts}</select>`}
       <label class="fl">Report date</label><input class="input" id="rf-date" type="date" value="${ex.report_date || today()}"/>
       <div class="err-msg" id="rf-date-e">Date required</div>
+      ${State.salesEnabled ? `<button type="button" class="btn ghost sm" id="rf-pull" style="width:100%;margin-top:10px;color:#5b21b6;border-color:#ddd6fe">⤓ Pull from sales DB</button>` : ''}
       <div class="section-title" style="margin-left:0">Sales line items</div>
       <div id="rf-lines">${lines.map(lineRow).join('')}</div>
       <button type="button" class="btn ghost sm" id="rf-add">＋ Add item</button>
@@ -276,6 +285,26 @@ function reportForm(existing) {
   function bindLines() { $$('#rf-lines .line', b).forEach((l) => { $('.l-amt', l).oninput = recalc; $('.x', l).onclick = () => { l.remove(); recalc(); }; }); }
   $('#rf-add', b).onclick = () => { const d = document.createElement('div'); d.innerHTML = lineRow({}); $('#rf-lines', b).appendChild(d.firstElementChild); bindLines(); };
   bindLines();
+  if ($('#rf-pull', b)) $('#rf-pull', b).onclick = async () => {
+    const date = $('#rf-date', b).value;
+    const site_id = isSiteMgr() ? active().site_id : ($('#rf-site', b) && $('#rf-site', b).value);
+    if (!date || !site_id) { toast('Pick a site and date first', 'err'); return; }
+    const btn = $('#rf-pull', b); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Pulling…';
+    try {
+      const r = await api(`/sales/preview?site=${site_id}&date=${date}`);
+      const lines = (r.sales.lines || []).length ? r.sales.lines : [{ product: '', qty: '', amount: '' }];
+      $('#rf-lines', b).innerHTML = lines.map((l) => lineRow({ product: l.product, qty: Math.round(l.qty || 0), amount: Math.round(l.amount || 0) })).join('');
+      bindLines();
+      $('#rf-cash', b).value = Math.round(r.sales.total_cash || 0);
+      $('#rf-deposit', b).value = Math.round(r.sales.total_deposit || 0);
+      if (r.expenses && r.expenses.total) $('#rf-exp', b).value = Math.round(r.expenses.total);
+      recalc();
+      const pm = (r.sales.payments || []).map((p) => `${p.method} ${ngn(p.amount)}`).join(' · ');
+      toast(`Pulled ${r.sales.orders} orders · ${ngn(r.sales.total)}`, 'ok', 4500);
+      if (pm) $('#rf-notes', b).value = (($('#rf-notes', b).value || '').trim() + `\n[POS ${date}] ${pm}`).trim();
+    } catch (e) { toast(e.message.includes('not configured') ? 'Sales DB not connected yet' : e.message, 'err'); }
+    finally { btn.disabled = false; btn.innerHTML = '⤓ Pull from sales DB'; }
+  };
   async function save(submit) {
     const date = $('#rf-date', b).value; if (!date) { setErr('rf-date', true); return; }
     const site_id = isSiteMgr() ? active().site_id : $('#rf-site', b).value;
@@ -361,6 +390,7 @@ async function viewAdmin() {
     ${adminRow('a-sites', '📍', 'Sites', 'Manage locations')}
     ${isAdmin() ? adminRow('a-members', '👤', 'People', 'Admins, managers & site managers') : ''}
     ${adminRow('a-recips', '✉️', 'Report recipients', 'Daily report email list')}
+    ${State.salesEnabled ? adminRow('a-payroll', '💵', 'Payroll', 'Staff pay (from POS)') : ''}
     ${isAdmin() ? adminRow('a-settings', '🎨', 'Workspace settings', 'Name & branding') : ''}
     ${State.user.is_superadmin ? adminRow('a-newco', '🏢', 'Create a company', 'Add another workspace') : ''}
     <div class="card" style="margin-top:10px"><div class="row between"><div><b>Signed in</b><div class="muted" style="font-size:13px">${esc(State.user.email)}${State.user.is_superadmin ? ' · Superadmin' : ' · ' + ROLE_LABEL[myRole()]}</div></div></div></div>`;
@@ -368,6 +398,28 @@ async function viewAdmin() {
   if ($('#a-members')) $('#a-members').onclick = adminMembers;
   if ($('#a-settings')) $('#a-settings').onclick = adminSettings;
   if ($('#a-newco')) $('#a-newco').onclick = () => renderOnboarding(false);
+  if ($('#a-payroll')) $('#a-payroll').onclick = adminPayroll;
+}
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+async function adminPayroll() {
+  const now = new Date();
+  const b = modal(`
+    <div class="grid2">
+      <div><label class="fl">Month</label><select class="input" id="pr-month">${MONTHS.map((m, i) => `<option ${i === now.getMonth() ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
+      <div><label class="fl">Year</label><select class="input" id="pr-year">${[0, 1, 2].map((d) => now.getFullYear() - d).map((y) => `<option>${y}</option>`).join('')}</select></div>
+    </div>
+    <div id="pr-list" style="margin-top:12px"><div class="skel"></div></div>`, { title: 'Payroll', sub: active().name + ' · from POS' });
+  async function load() {
+    const list = $('#pr-list', b); list.innerHTML = '<div class="skel"></div><div class="skel"></div>';
+    try {
+      const rows = await api(`/payroll?month=${$('#pr-month', b).value}&year=${$('#pr-year', b).value}`);
+      if (!rows.length) { list.innerHTML = '<div class="muted" style="text-align:center;padding:20px">No payroll for this period</div>'; return; }
+      const net = rows.reduce((a, r) => a + (r.netPay || 0), 0);
+      list.innerHTML = `<div class="card" style="background:var(--brand-l);border:none"><div class="row between"><b>${rows.length} staff</b><b>${ngn(net)} net</b></div></div>` +
+        rows.map((r) => `<div class="list-item"><div class="av">👤</div><div class="meta"><div class="t">${esc(r.staff)}</div><div class="s">${esc(r.siteName || '')} · ${r.daysWorked || 0} days · ${esc(r.status || '')}</div></div><div class="amt">${ngn(r.netPay)}</div></div>`).join('');
+    } catch (e) { list.innerHTML = errBox(e); }
+  }
+  $('#pr-month', b).onchange = load; $('#pr-year', b).onchange = load; load();
 }
 async function adminSites() {
   await loadSites();

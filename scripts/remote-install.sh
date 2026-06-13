@@ -111,9 +111,9 @@ cd "${BACKEND}"
 if docker ps -aq -f name='^daybook$' | grep -q .; then
   log "Removing stale daybook container…"; docker rm -f daybook >/dev/null 2>&1 || true
 fi
-# Make sure nothing ELSE owns the port before we try to bind it.
-if ss -ltn 2>/dev/null | grep -q '127.0.0.1:8090 '; then
-  die "127.0.0.1:8090 is in use by another process. Find it with: sudo ss -ltnp | grep 8090 — free it or change the port in docker-compose.yml + infra/apache/${DOMAIN}.conf"
+# Make sure nothing ELSE owns the host port before we try to bind it.
+if ss -ltn 2>/dev/null | grep -q '127.0.0.1:8091 '; then
+  die "127.0.0.1:8091 is in use by another process. Find it with: sudo ss -ltnp | grep 8091 — free it or change the host port in docker-compose.yml + infra/apache/${DOMAIN}.conf"
 fi
 log "Building image + starting container…"
 docker compose up -d --build
@@ -122,8 +122,8 @@ systemctl enable daybook >/dev/null 2>&1 || true
 # ── 8. Health check ───────────────────────────────────────────────────────────
 log "Waiting for health…"
 for i in $(seq 1 20); do
-  if curl -fsS "http://127.0.0.1:8090/healthz" >/dev/null 2>&1; then
-    ok "Container healthy on :8090"; break
+  if curl -fsS "http://127.0.0.1:8091/healthz" >/dev/null 2>&1; then
+    ok "Container healthy on :8091"; break
   fi
   [[ $i -eq 20 ]] && die "container did not become healthy — check: docker logs daybook"
   sleep 2

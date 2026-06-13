@@ -19,8 +19,9 @@ services:
     container_name: daybook
     restart: always
     # Bind only to loopback — Apache is the public edge (TLS terminator).
+    # Host 8091 → container 8090 (host 8090 is used by another service on this box).
     ports:
-      - "127.0.0.1:8090:8090"
+      - "127.0.0.1:8091:8090"
     env_file:
       - .env
     volumes:

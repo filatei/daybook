@@ -876,8 +876,10 @@ function checkout() {
 function showReceipt(sale) {
   const html = receiptHTML(sale);
   const b = modal(`<div style="background:#fff;padding:8px;border-radius:8px">${html}</div>
-    <div class="grid2" style="margin-top:12px"><button class="btn ghost" id="rNew">New sale</button><button class="btn" id="rPrint">🖨 Print</button></div>`,
+    <button class="btn" id="rBt" style="margin-top:12px">🖨 Print to Bluetooth printer</button>
+    <div class="grid2" style="margin-top:8px"><button class="btn ghost" id="rNew">New sale</button><button class="btn ghost" id="rPrint">Browser print</button></div>`,
     { title: sale.pending ? 'Receipt · pending sync' : 'Receipt #' + sale.receipt_no });
+  $('#rBt', b).onclick = () => btPrintReceipt(sale);
   $('#rPrint', b).onclick = () => printReceipt(html);
   $('#rNew', b).onclick = () => { closeModal(); viewSell(); };
 }
@@ -901,6 +903,102 @@ function printReceipt(html) {
   w.document.write(`<html><head><title>Receipt</title><style>@media print{@page{margin:0}}body{margin:0;padding:8px}</style></head><body onload="window.print();setTimeout(()=>window.close(),300)">${html}</body></html>`);
   w.document.close();
 }
+
+/* ── Bluetooth thermal printing (Web Bluetooth + ESC/POS) ────────────────────
+   Works on Android Chrome. Connects to a BLE thermal printer, then streams raw
+   ESC/POS bytes. The printer is remembered for the session after first pairing. */
+const BT = {
+  device: null, char: null,
+  // serial-data GATT services used by common cheap ESC/POS BLE printers
+  services: ['000018f0-0000-1000-8000-00805f9b34fb', '0000ff00-0000-1000-8000-00805f9b34fb',
+    '49535343-fe7d-4ae5-8fa9-9fafd205e455', '6e400001-b5a3-f393-e0a9-e50e24dcca9e',
+    'e7810a71-73ae-499d-8c15-faa9aef0c3f2', '0000ffe0-0000-1000-8000-00805f9b34fb'],
+  supported() { return !!(navigator.bluetooth && navigator.bluetooth.requestDevice); },
+  async _findChar(server) {
+    for (const s of await server.getPrimaryServices()) {
+      for (const c of await s.getCharacteristics()) {
+        if (c.properties.write || c.properties.writeWithoutResponse) return c;
+      }
+    }
+    return null;
+  },
+  async connect() {
+    if (!this.supported()) throw new Error('Bluetooth printing needs Android + Chrome. (iPhone browsers can’t print over Bluetooth.)');
+    const dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: this.services });
+    const server = await dev.gatt.connect();
+    const ch = await this._findChar(server);
+    if (!ch) throw new Error('No printable channel found on that device — is it an ESC/POS printer?');
+    this.device = dev; this.char = ch;
+    dev.addEventListener('gattserverdisconnected', () => { this.char = null; });
+    localStorage.setItem('daybook_printer', dev.name || 'Bluetooth printer');
+    return dev.name || 'printer';
+  },
+  async ensure() {
+    if (this.char && this.device && this.device.gatt.connected) return;
+    if (this.device && !this.device.gatt.connected) {        // reconnect a paired printer
+      const server = await this.device.gatt.connect();
+      this.char = await this._findChar(server);
+      if (this.char) return;
+    }
+    await this.connect();
+  },
+  async write(bytes) {
+    await this.ensure();
+    const CH = 180;
+    for (let i = 0; i < bytes.length; i += CH) {
+      const slice = bytes.slice(i, i + CH);
+      if (this.char.properties.writeWithoutResponse) await this.char.writeValueWithoutResponse(slice);
+      else await this.char.writeValue(slice);
+      await new Promise((r) => setTimeout(r, 18));            // pace BLE writes so the buffer keeps up
+    }
+  },
+};
+// Minimal ESC/POS encoder. `lines` items: string, or {text,align,bold,big}.
+const ESC = {
+  enc: new TextEncoder(),
+  build(lines) {
+    const out = [0x1B, 0x40];                                 // initialise
+    const push = (...b) => out.push(...b);
+    for (const ln of lines) {
+      const o = typeof ln === 'string' ? { text: ln } : ln;
+      push(0x1B, 0x61, o.align === 'center' ? 1 : o.align === 'right' ? 2 : 0);
+      push(0x1B, 0x45, o.bold ? 1 : 0);
+      push(0x1D, 0x21, o.big ? 0x11 : 0x00);
+      const t = (o.text || '').replace(/₦/g, 'NGN').replace(/[^\x20-\x7E]/g, '');  // printers lack ₦ glyph
+      for (const c of this.enc.encode(t)) push(c);
+      push(0x0A);
+    }
+    push(0x1D, 0x21, 0x00, 0x1B, 0x45, 0x00, 0x1B, 0x61, 0x00, 0x0A, 0x0A, 0x0A);
+    push(0x1D, 0x56, 0x42, 0x00);                             // partial cut (ignored if unsupported)
+    return Uint8Array.from(out);
+  },
+};
+const nairaPlain = (n) => 'NGN ' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+function receiptESC(sale, width = 32) {
+  const t = sale.tenant || {}, items = sale.items || [];
+  const row = (l, r) => { const s = String(l), e = String(r); return s + ' '.repeat(Math.max(1, width - s.length - e.length)) + e; };
+  const L = [];
+  L.push({ text: t.name || 'Receipt', align: 'center', bold: true, big: true });
+  if (sale.site && sale.site.name) L.push({ text: sale.site.name, align: 'center' });
+  L.push({ text: `${sale.sale_date}  #${sale.receipt_no || 'PENDING'}`, align: 'center' });
+  if (sale.pending) L.push({ text: '** offline - will sync **', align: 'center' });
+  L.push('-'.repeat(width));
+  for (const i of items) L.push(row(`${i.name} x${i.qty}`, nairaPlain(i.amount)));
+  L.push('-'.repeat(width));
+  L.push({ text: row('TOTAL', nairaPlain(sale.total)), bold: true });
+  L.push(row(`${sale.payment_method} paid`, nairaPlain(sale.amount_paid)));
+  if (sale.balance > 0) L.push(row('Balance', nairaPlain(sale.balance)));
+  if (sale.customer_name) L.push('Customer: ' + sale.customer_name);
+  L.push({ text: 'Thank you!', align: 'center' });
+  return ESC.build(L);
+}
+async function btPrint(bytes) {
+  try { toast('Sending to printer…', 'info', 2000); await BT.write(bytes); toast('Printed ✓', 'ok'); }
+  catch (e) { if (e && (e.name === 'NotFoundError' || e.name === 'AbortError')) return; toast('Print failed: ' + e.message, 'err', 6000); }
+}
+const btPrintReceipt = (sale) => btPrint(receiptESC(sale));
+// Generic: print arbitrary text lines to the thermal printer (anything in the app).
+const btPrintLines = (lines) => btPrint(ESC.build(Array.isArray(lines) ? lines : [String(lines)]));
 async function manageCatalog() {
   const products = await api(scoped('/products'));
   const b = modal(`<div class="row between" style="margin-bottom:8px"><b>Products</b>${isGMup() ? `<button class="btn ghost sm" id="addProd">＋ Product</button>` : ''}</div>

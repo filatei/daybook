@@ -55,10 +55,18 @@ app.use('/api', api);
 
 // ── static PWA frontend ────────────────────────────────────────────────────
 const FRONTEND = path.join(__dirname, '../frontend');
+// The service worker must always be revalidated so code updates are detected
+// immediately (no stale worker held for up to an hour in the HTTP cache).
+app.get('/sw.js', (_req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.type('application/javascript').sendFile(path.join(FRONTEND, 'sw.js'));
+});
 app.use(express.static(FRONTEND, { maxAge: '1h', index: false }));
-// SPA fallback (everything not /api or a real file → index.html)
+// SPA fallback (everything not /api or a real file → index.html). index.html is
+// no-cache so it always points at the current service worker / shell.
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(path.join(FRONTEND, 'index.html'));
 });
 

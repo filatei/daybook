@@ -1382,6 +1382,15 @@ function timeAgo(s) {
 }
 
 /* ── start ───────────────────────────────────────────── */
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').then((reg) => {
+  // Tell the user when a new version has been downloaded and is ready.
+  reg.addEventListener('updatefound', () => {
+    const nw = reg.installing; if (!nw) return;
+    nw.addEventListener('statechange', () => {
+      if (nw.state === 'installed' && navigator.serviceWorker.controller) toast('✨ Daybook updated — reload to get the latest', 'info', 8000);
+    });
+  });
+  setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000); // re-check hourly while open
+}).catch(() => {});
 initGoogle();
 if (State.token) boot().catch(() => logout());

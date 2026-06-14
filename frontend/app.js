@@ -37,6 +37,36 @@ async function api(path, { method = 'GET', body, form } = {}) {
 }
 const scoped = (p) => (State.tenant ? p + (p.includes('?') ? '&' : '?') + 'tenant=' + State.tenant : p);
 
+/* ── Offline-first (cache + sale outbox that syncs on reconnect) ──────────── */
+State.online = navigator.onLine;
+const uuidv4 = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxxxxxx4xxxyxxx'.replace(/[xy]/g, (c) => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
+const lsGet = (k, f) => { try { return JSON.parse(localStorage.getItem(k)) ?? f; } catch { return f; } };
+const outbox = () => lsGet('daybook_outbox', []);
+const setOutbox = (a) => { localStorage.setItem('daybook_outbox', JSON.stringify(a)); updatePill(); };
+const queueSale = (tenant, payload) => { const o = outbox(); o.push({ tenant, payload }); setOutbox(o); };
+const isNetErr = (e) => !navigator.onLine || /failed to fetch|networkerror|load failed|fetch failed/i.test(e && e.message || '');
+function updatePill() {
+  const n = outbox().length, show = (!State.online || n > 0) && State.token;
+  let pill = $('#offlinePill');
+  if (!show) { if (pill) pill.remove(); return; }
+  if (!pill) { pill = document.createElement('div'); pill.id = 'offlinePill'; pill.className = 'offline-pill'; document.body.appendChild(pill); }
+  pill.textContent = State.online ? `↻ syncing ${n}…` : (n ? `⚡ offline · ${n} queued` : '⚡ offline');
+}
+async function syncOutbox() {
+  if (!State.token || !State.online) return;
+  const o = outbox(); if (!o.length) { updatePill(); return; }
+  const remain = [];
+  for (const it of o) {
+    try { await api('/pos/sales?tenant=' + it.tenant, { method: 'POST', body: it.payload }); }
+    catch (e) { remain.push(it); }   // still offline / failed → keep for next pass
+  }
+  const synced = o.length - remain.length; setOutbox(remain);
+  if (synced > 0) { toast(`Synced ${synced} offline sale(s)`, 'ok'); if (State.tab === 'sell') viewSell(); }
+}
+window.addEventListener('online', () => { State.online = true; updatePill(); syncOutbox(); });
+window.addEventListener('offline', () => { State.online = false; updatePill(); });
+setInterval(() => { if (State.online) syncOutbox(); }, 30000);
+
 /* ── Toast / Modal / Validation (shared) ─────────────── */
 function toast(msg, kind = 'info', ms = 3200) {
   const el = document.createElement('div'); const ic = { ok: '✓', err: '⚠', info: 'ℹ' }[kind] || 'ℹ';
@@ -83,16 +113,22 @@ function logout() {
 
 /* ── Boot ────────────────────────────────────────────── */
 async function boot() {
-  const me = await api('/auth/me');
+  let me;
+  try { me = await api('/auth/me'); localStorage.setItem('daybook_me', JSON.stringify(me)); State.online = true; }
+  catch (e) {
+    const cached = lsGet('daybook_me', null);
+    if (cached && State.token) { me = cached; State.online = false; toast('Offline — working from cached data', 'info', 4000); }
+    else throw e;
+  }
   State.user = me.user; State.tenants = me.tenants;
   $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
   if (!State.tenants.length) { renderOnboarding(true); return; }
   if (!State.tenant || !State.tenants.find((t) => t.id === State.tenant)) State.tenant = State.tenants[0].id;
   localStorage.setItem('daybook_tenant', State.tenant || '');
   applyBrand(); buildTenantSelect(); setupNav();
-  updateTabs();
-  mountAssistant();
-  go('dashboard');
+  updateTabs(); mountAssistant(); updatePill();
+  syncOutbox();
+  go(!State.online && internalPos() ? 'sell' : 'dashboard');  // offline → straight to selling
 }
 function applyBrand() {
   const t = active();
@@ -622,7 +658,10 @@ async function viewSell() {
   fabSet(false); const v = $('#view');
   v.innerHTML = `<div class="section-title">Sell</div><div class="skel"></div>`;
   try {
-    const products = (await api(scoped('/products'))).filter((p) => p.status === 'ACTIVE');
+    let raw;
+    try { raw = await api(scoped('/products')); localStorage.setItem('dbk_prod_' + State.tenant, JSON.stringify(raw)); State.online = true; }
+    catch (e) { raw = lsGet('dbk_prod_' + State.tenant, null); if (!raw) throw e; State.online = false; updatePill(); }  // offline → cached catalog
+    const products = raw.filter((p) => p.status === 'ACTIVE');
     State._products = products;
     v.innerHTML = `${trialBanner()}
       <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">💳 New sale</h3>
@@ -663,15 +702,28 @@ function checkout() {
     <label class="fl">Customer (optional)</label><input class="input" id="c-cust" placeholder="Walk-in"/>
     <div style="height:14px"></div><button class="btn" type="submit" id="c-done">Complete sale</button></form>`, { title: 'Payment', sub: `${cart.length} item(s)` });
   $('#cf', f).onsubmit = async (e) => { e.preventDefault();
+    const method = $('#c-method', f).value, paid = +$('#c-paid', f).value || 0, cust = $('#c-cust', f).value.trim() || null;
+    const payload = { client_uid: uuidv4(), items: cart.map((c) => ({ product_id: c.product_id, qty: c.qty })), payment_method: method, amount_paid: paid, customer_name: cust, sale_date: today() };
+    const localSale = { pending: true, receipt_no: null, items: cart.map((c) => ({ name: c.name, qty: c.qty, price: c.price, amount: c.qty * c.price })),
+      total, payment_method: method, amount_paid: paid, balance: Math.max(0, total - paid), customer_name: cust, sale_date: today(),
+      tenant: { name: active().name }, site: { name: isSiteMgr() ? siteName(active().site_id) : '' } };
     const btn = $('#c-done', f); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Saving…';
-    try { const sale = await api('/pos/sales?tenant=' + State.tenant, { method: 'POST', body: { items: cart.map((c) => ({ product_id: c.product_id, qty: c.qty })), payment_method: $('#c-method', f).value, amount_paid: +$('#c-paid', f).value, customer_name: $('#c-cust', f).value.trim() || null } });
-      cart = []; closeModal(); showReceipt(sale.id); }
-    catch (er) { toast(er.message, 'err'); btn.disabled = false; btn.textContent = 'Complete sale'; } };
+    try {
+      const sale = await api('/pos/sales?tenant=' + State.tenant, { method: 'POST', body: payload });
+      State.online = true; cart = []; closeModal(); showReceipt({ ...localSale, pending: false, receipt_no: sale.receipt_no });
+    } catch (er) {
+      if (isNetErr(er)) {            // no signal → keep the sale; print now, sync later
+        State.online = false; queueSale(State.tenant, payload); cart = []; closeModal();
+        showReceipt(localSale); toast('Saved offline — will sync when back online', 'info', 4000);
+      } else { toast(er.message, 'err'); btn.disabled = false; btn.textContent = 'Complete sale'; }
+    }
+  };
 }
-async function showReceipt(id) {
-  const sale = await api('/pos/sales/' + id); const html = receiptHTML(sale);
+function showReceipt(sale) {
+  const html = receiptHTML(sale);
   const b = modal(`<div style="background:#fff;padding:8px;border-radius:8px">${html}</div>
-    <div class="grid2" style="margin-top:12px"><button class="btn ghost" id="rNew">New sale</button><button class="btn" id="rPrint">🖨 Print</button></div>`, { title: 'Receipt #' + sale.receipt_no });
+    <div class="grid2" style="margin-top:12px"><button class="btn ghost" id="rNew">New sale</button><button class="btn" id="rPrint">🖨 Print</button></div>`,
+    { title: sale.pending ? 'Receipt · pending sync' : 'Receipt #' + sale.receipt_no });
   $('#rPrint', b).onclick = () => printReceipt(html);
   $('#rNew', b).onclick = () => { closeModal(); viewSell(); };
 }
@@ -679,7 +731,8 @@ function receiptHTML(sale) {
   const t = sale.tenant || {}; const items = sale.items || [];
   return `<div style="font-family:'Courier New',monospace;font-size:13px;width:280px;margin:auto;color:#000">
     <div style="text-align:center"><div style="font-weight:bold;font-size:16px">${esc(t.name || '')}</div>
-    ${sale.site ? `<div>${esc(sale.site.name)}</div>` : ''}<div>${sale.sale_date} · #${sale.receipt_no}</div></div>
+    ${sale.site && sale.site.name ? `<div>${esc(sale.site.name)}</div>` : ''}<div>${sale.sale_date} · #${sale.receipt_no || 'PENDING'}</div>
+    ${sale.pending ? '<div style="font-size:11px">⚡ offline — syncs when online</div>' : ''}</div>
     <div style="border-top:1px dashed #000;margin:6px 0"></div>
     ${items.map((i) => `<div style="display:flex;justify-content:space-between"><span>${esc(i.name)} ×${i.qty}</span><span>${ngn(i.amount)}</span></div>`).join('')}
     <div style="border-top:1px dashed #000;margin:6px 0"></div>

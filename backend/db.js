@@ -264,6 +264,7 @@ function migrate(db) {
       balance       REAL DEFAULT 0,
       status        TEXT CHECK(status IN ('PAID','PART','UNPAID')) DEFAULT 'PAID',
       sale_date     TEXT,
+      client_uid    TEXT,                                  -- client-generated; dedupes offline re-sends
       sold_by       TEXT REFERENCES users(id),
       created_at    INTEGER DEFAULT (unixepoch())
     );
@@ -300,6 +301,7 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_products_t    ON products(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_possales_td   ON pos_sales(tenant_id, sale_date);
     CREATE INDEX IF NOT EXISTS idx_invmoves      ON inventory_moves(tenant_id, product_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_possales_uid ON pos_sales(tenant_id, client_uid) WHERE client_uid IS NOT NULL;
   `);
 
   // Idempotent column adds for databases created before these columns existed.
@@ -307,6 +309,7 @@ function migrate(db) {
   addCol('tenants', 'trial_ends_at', 'INTEGER');
   addCol('tenants', 'paid_until', 'INTEGER');
   addCol('tenants', 'pos_source', 'TEXT');
+  addCol('pos_sales', 'client_uid', 'TEXT');
 }
 
 module.exports = { getDb };

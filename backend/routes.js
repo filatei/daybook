@@ -776,6 +776,11 @@ router.post('/customers', requireAuth, needTenant('SITE_MANAGER'), (req, res) =>
 // Record a live sale → decrements stock, assigns a receipt number, returns the sale.
 router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
   const b = req.body || {};
+  // Idempotency: a re-sent offline sale (same client_uid) returns the original.
+  if (b.client_uid) {
+    const dup = db.prepare('SELECT * FROM pos_sales WHERE tenant_id=? AND client_uid=?').get(req.ctx.tenant_id, b.client_uid);
+    if (dup) return res.status(200).json(dup);
+  }
   const items = Array.isArray(b.items) ? b.items.filter((i) => i.product_id && (+i.qty > 0)) : [];
   if (!items.length) return res.status(400).json({ error: 'no items' });
   const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
@@ -795,11 +800,11 @@ router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), (req, res) =>
   const id = uuid();
   const nextNo = (db.prepare('SELECT COALESCE(MAX(receipt_no),0)+1 n FROM pos_sales WHERE tenant_id=?').get(req.ctx.tenant_id).n);
   const sale_date = b.sale_date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
-  db.prepare(`INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,sold_by)
-    VALUES (@id,@tenant_id,@site_id,@receipt_no,@customer_id,@customer_name,@items_json,@subtotal,@discount,@total,@payment_method,@amount_paid,@balance,@status,@sale_date,@sold_by)`)
+  db.prepare(`INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,client_uid,sold_by)
+    VALUES (@id,@tenant_id,@site_id,@receipt_no,@customer_id,@customer_name,@items_json,@subtotal,@discount,@total,@payment_method,@amount_paid,@balance,@status,@sale_date,@client_uid,@sold_by)`)
     .run({ id, tenant_id: req.ctx.tenant_id, site_id, receipt_no: nextNo, customer_id: b.customer_id || null, customer_name: b.customer_name || null,
       items_json: JSON.stringify(lines.map((l) => ({ product_id: l.product_id, name: l.name, qty: l.qty, price: l.price, amount: l.amount }))),
-      subtotal, discount, total, payment_method: (b.payment_method || 'CASH').toUpperCase(), amount_paid, balance, status, sale_date, sold_by: req.user.id });
+      subtotal, discount, total, payment_method: (b.payment_method || 'CASH').toUpperCase(), amount_paid, balance, status, sale_date, client_uid: b.client_uid || null, sold_by: req.user.id });
   // stock decrement + inventory move
   for (const l of lines) {
     if (!l.track) continue;

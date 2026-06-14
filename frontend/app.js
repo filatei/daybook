@@ -1082,9 +1082,8 @@ async function captureClock(staffId, name, kind, date, after) {
     <div class="row" style="gap:8px;margin-top:8px"><button class="btn ghost" id="cap-retake" style="display:none">Retake</button><button class="btn" id="cap-photo">📷 Capture photo</button></div>
     <label class="fl" style="margin-top:12px">Signature</label>
     <canvas id="sig" style="width:100%;height:120px;border:1.5px dashed var(--line);border-radius:10px;touch-action:none;background:#fff"></canvas>
-    <button class="btn ghost sm" id="sig-clear" style="margin-top:6px">Clear signature</button>
     <div class="muted" id="cap-geo" style="font-size:12px;margin-top:8px">📍 locating…</div>
-    <button class="btn" id="cap-save" style="margin-top:10px" disabled>Save ${kind === 'out' ? 'clock-out' : 'clock-in'}</button>`,
+    <div class="cap-bar"><button type="button" class="btn ghost" id="sig-clear">Clear sign</button><button class="btn" id="cap-save" disabled>Save ${kind === 'out' ? 'clock-out' : 'clock-in'}</button></div>`,
     { title: '📸 ' + (kind === 'out' ? 'Clock out' : 'Clock in') });
   let photo = null, geo = null, signed = false;
   const video = $('#cam', b), shot = $('#shot', b), saveBtn = $('#cap-save', b);

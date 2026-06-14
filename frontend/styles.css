@@ -172,6 +172,9 @@ canvas{max-width:100%}
 .seg{display:flex;gap:4px;background:#f1f3f9;border-radius:11px;padding:4px;margin-bottom:12px}
 .seg-b{flex:1;border:none;background:transparent;color:var(--muted);padding:8px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer}
 .seg-b.on{background:#fff;color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.1)}
+/* sticky action bar (e.g. attendance Clear + Save) — always visible above the fold */
+.cap-bar{position:sticky;bottom:0;display:grid;grid-template-columns:1fr 1.6fr;gap:8px;background:#fff;padding:10px 0 calc(6px + var(--safe-b));margin-top:10px;border-top:1px solid var(--line);z-index:2}
+.cap-bar .btn{margin:0}
 /* ── Chat (staff messaging) ──────────────────────────── */
 .bell{position:relative}
 .badge{position:absolute;top:-3px;right:-3px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#ef4444;color:#fff;font-size:11px;font-weight:700;display:grid;place-items:center;box-shadow:0 0 0 2px var(--brand)}

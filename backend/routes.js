@@ -1061,7 +1061,7 @@ router.post('/billing/checkout', requireAuth, needTenant('ADMIN'), async (req, r
   try {
     const data = await paystack.initTransaction({ email, amountKobo: price.kobo, reference,
       metadata: { tenant_id: t.id, plan: b.plan, months: price.months, custom_fields: [{ display_name: 'Workspace', variable_name: 'workspace', value: t.name }] },
-      callback_url });
+      callback_url, label: `Daybook · ${t.name} (${b.plan})` });
     res.json({ authorization_url: data.authorization_url, reference, amount: price.naira, currency: paystack.CURRENCY, months: price.months });
   } catch (e) {
     db.prepare("UPDATE payments SET status='FAILED' WHERE reference=?").run(reference);
@@ -1084,15 +1084,22 @@ router.get('/billing/verify', requireAuth, async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// Paystack server-to-server webhook. No auth — verified by HMAC signature on the raw body.
-router.post('/billing/webhook', (req, res) => {
+// Paystack server-to-server webhook. No auth — verified by HMAC signature on the
+// raw body, then cross-verified against the Paystack API before we act (same
+// defence-in-depth as Otuburu's staking webhook).
+router.post('/billing/webhook', async (req, res) => {
   const sig = req.headers['x-paystack-signature'];
   if (!paystack.verifySignature(req.rawBody, sig)) return res.status(401).json({ error: 'bad signature' });
+  res.json({ received: true });                       // ack immediately; Paystack retries only on non-2xx
   const evt = req.body || {};
   if (evt.event === 'charge.success' && evt.data && evt.data.reference) {
-    try { applyPaidPayment(evt.data.reference, evt.data); } catch (e) { /* logged via 200 below; Paystack retries on non-2xx */ }
+    const ref = evt.data.reference;
+    try {
+      const data = await paystack.verifyTransaction(ref);   // cross-check the gateway, don't trust the body alone
+      if (data && data.status === 'success') applyPaidPayment(ref, data);
+      else console.warn('[billing] webhook cross-verify not successful for', ref, data && data.status);
+    } catch (e) { console.warn('[billing] webhook verify failed for', ref, e.message); }
   }
-  res.json({ received: true }); // always 2xx for recognised, signed events
 });
 
 module.exports = router;

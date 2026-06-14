@@ -38,10 +38,16 @@ async function ps(path, { method = 'GET', body } = {}) {
 }
 
 // Create a hosted-checkout transaction. Returns { authorization_url, reference }.
-function initTransaction({ email, amountKobo, reference, metadata, callback_url }) {
+// Channels mirror Otuburu's staking checkout so the payment experience is
+// identical across Torama apps.
+function initTransaction({ email, amountKobo, reference, metadata, callback_url, label }) {
   return ps('/transaction/initialize', {
     method: 'POST',
-    body: { email, amount: amountKobo, reference, currency: CURRENCY, metadata, callback_url },
+    body: {
+      email, amount: amountKobo, reference, currency: CURRENCY, metadata, callback_url,
+      channels: ['card', 'bank', 'ussd', 'bank_transfer'],
+      label: label || 'Daybook subscription',
+    },
   });
 }
 

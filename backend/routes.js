@@ -17,6 +17,7 @@ const { sendDailyReport, verifyConnection } = require('./mailer');
 const { callAI, callAgent, AIError, aiConfigured } = require('./aiClient');
 const sales = require('./salesSource');
 const scheduler = require('./scheduler');
+const paystack = require('./paystack');
 
 const router = express.Router();
 const db = getDb();
@@ -1019,6 +1020,79 @@ router.post('/tenants/:id/billing', requireAuth, (req, res) => {
     .run(paid_until, b.plan ?? t.plan, b.status ?? 'ACTIVE', t.id);
   audit(t.id, req.user.id, 'BILLING', 'tenant', t.id, { paid_until, plan: b.plan });
   res.json(tenantById(t.id));
+});
+
+// ── SELF-SERVE SUBSCRIPTION (Paystack) ────────────────────────────────────────
+const MONTH_SECS = 2629800; // ~30.44 days
+
+// Apply a verified successful payment to its tenant (idempotent on the reference).
+function applyPaidPayment(reference, rawData) {
+  const p = db.prepare('SELECT * FROM payments WHERE reference=?').get(reference);
+  if (!p) return { error: 'unknown reference' };
+  if (p.status === 'SUCCESS') return { tenant: tenantById(p.tenant_id), already: true };
+  const t = tenantById(p.tenant_id); if (!t) return { error: 'tenant gone' };
+  const now = Math.floor(Date.now() / 1000);
+  const base = Math.max(now, t.paid_until || 0);             // extend, don't truncate existing time
+  const paid_until = base + (p.months || 1) * MONTH_SECS;
+  db.prepare("UPDATE tenants SET paid_until=?, plan=?, status='ACTIVE' WHERE id=?").run(paid_until, p.plan || t.plan, t.id);
+  db.prepare("UPDATE payments SET status='SUCCESS', paid_at=?, raw=? WHERE id=?").run(now, rawData ? JSON.stringify(rawData).slice(0, 8000) : p.raw, p.id);
+  audit(t.id, p.created_by, 'SUBSCRIBE', 'tenant', t.id, { reference, plan: p.plan, months: p.months, paid_until });
+  notify(t.id, tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription active', body: `${p.plan} · ${p.months} month(s)`, link: 'admin' });
+  return { tenant: tenantById(t.id) };
+}
+
+// Plans + whether self-serve checkout is available.
+router.get('/billing/plans', requireAuth, (_req, res) =>
+  res.json({ enabled: paystack.paystackEnabled(), currency: paystack.CURRENCY, public_key: paystack.PUBLIC, plans: paystack.planList() }));
+
+// Start a checkout. Admin of the tenant only. Returns Paystack's hosted-page URL.
+router.post('/billing/checkout', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  if (!paystack.paystackEnabled()) return res.status(503).json({ error: 'billing not configured', code: 'no_paystack' });
+  const t = tenantById(req.ctx.tenant_id);
+  if (t.plan === 'OWNER') return res.status(400).json({ error: 'this workspace does not require a subscription' });
+  const b = req.body || {};
+  const price = paystack.priceFor(b.plan, b.months);
+  if (!price) return res.status(400).json({ error: 'unknown plan' });
+  const reference = 'DBK-' + t.id.slice(0, 8) + '-' + Date.now().toString(36) + '-' + uuid().slice(0, 6);
+  const email = req.user.email;
+  db.prepare('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,email,created_by) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(uuid(), t.id, reference, b.plan, price.months, price.naira, paystack.CURRENCY, email, req.user.id);
+  const callback_url = (process.env.PUBLIC_BASE_URL || '') + '/?pay=' + reference;
+  try {
+    const data = await paystack.initTransaction({ email, amountKobo: price.kobo, reference,
+      metadata: { tenant_id: t.id, plan: b.plan, months: price.months, custom_fields: [{ display_name: 'Workspace', variable_name: 'workspace', value: t.name }] },
+      callback_url });
+    res.json({ authorization_url: data.authorization_url, reference, amount: price.naira, currency: paystack.CURRENCY, months: price.months });
+  } catch (e) {
+    db.prepare("UPDATE payments SET status='FAILED' WHERE reference=?").run(reference);
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// Verify a reference (called when the user returns from Paystack). Idempotent.
+router.get('/billing/verify', requireAuth, async (req, res) => {
+  const reference = req.query.reference; if (!reference) return res.status(400).json({ error: 'reference required' });
+  const p = db.prepare('SELECT * FROM payments WHERE reference=?').get(reference);
+  if (!p) return res.status(404).json({ error: 'unknown reference' });
+  if (!contextFor(req.user, p.tenant_id)) return res.status(403).json({ error: 'not your workspace' });
+  if (p.status === 'SUCCESS') return res.json({ status: 'success', tenant: tenantById(p.tenant_id) });
+  if (!paystack.paystackEnabled()) return res.status(503).json({ error: 'billing not configured' });
+  try {
+    const data = await paystack.verifyTransaction(reference);
+    if (data.status === 'success') { const r = applyPaidPayment(reference, data); return res.json({ status: 'success', tenant: r.tenant }); }
+    return res.json({ status: data.status || 'pending' });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// Paystack server-to-server webhook. No auth — verified by HMAC signature on the raw body.
+router.post('/billing/webhook', (req, res) => {
+  const sig = req.headers['x-paystack-signature'];
+  if (!paystack.verifySignature(req.rawBody, sig)) return res.status(401).json({ error: 'bad signature' });
+  const evt = req.body || {};
+  if (evt.event === 'charge.success' && evt.data && evt.data.reference) {
+    try { applyPaidPayment(evt.data.reference, evt.data); } catch (e) { /* logged via 200 below; Paystack retries on non-2xx */ }
+  }
+  res.json({ received: true }); // always 2xx for recognised, signed events
 });
 
 module.exports = router;

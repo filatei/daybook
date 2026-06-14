@@ -132,6 +132,7 @@ async function boot() {
   updateTabs(); mountAssistant(); mountChat(); mountNotifications(); updatePill();
   syncOutbox(); syncChatOutbox(); pollNotifs();
   go(!State.online && internalPos() ? 'sell' : 'dashboard');  // offline → straight to selling
+  handlePaymentReturn();                                      // confirm a Paystack return, if any
 }
 function applyBrand() {
   const t = active();
@@ -457,6 +458,7 @@ async function viewAdmin() {
     ${adminRow('a-recips', '✉️', 'Report recipients', 'Daily report email list')}
     ${posOn() ? adminRow('a-payroll', '💵', 'Payroll', 'Staff pay (from POS)') : ''}
     ${isAdmin() ? adminRow('a-settings', '🎨', 'Workspace settings', 'Name & branding') : ''}
+    ${isAdmin() && active().plan !== 'OWNER' ? adminRow('a-billing', '💳', 'Subscription', 'Plan & billing') : ''}
     ${adminRow('a-ideas', '💡', 'Feature requests', 'Suggest & track improvements')}
     ${State.user.is_superadmin ? adminRow('a-newco', '🏢', 'Create a company', 'Add another workspace') : ''}
     <div class="card" style="margin-top:10px"><div class="row between"><div><b>Signed in</b><div class="muted" style="font-size:13px">${esc(State.user.email)}${State.user.is_superadmin ? ' · Superadmin' : ' · ' + ROLE_LABEL[myRole()]}</div></div></div></div>`;
@@ -466,6 +468,48 @@ async function viewAdmin() {
   if ($('#a-newco')) $('#a-newco').onclick = () => renderOnboarding(false);
   if ($('#a-payroll')) $('#a-payroll').onclick = adminPayroll;
   if ($('#a-ideas')) $('#a-ideas').onclick = adminFeatures;
+  if ($('#a-billing')) $('#a-billing').onclick = adminBilling;
+}
+async function adminBilling() {
+  const t = active();
+  const paidUntil = t.paid_until ? new Date(t.paid_until * 1000).toLocaleDateString() : null;
+  const statusLine = paidUntil ? `Paid through <b>${paidUntil}</b>` : (t.trial_days_left != null ? `Free trial · <b>${t.trial_days_left} day(s)</b> left` : 'No active subscription');
+  const b = modal(`<div class="card" style="background:var(--brand-l);border:none;margin-bottom:12px"><div class="t">${esc(t.name)}</div><div class="s">${statusLine}</div></div>
+    <div id="bl-plans"><div class="skel"></div></div>`, { title: '💳 Subscription', sub: 'Powered by Paystack' });
+  let cfg; try { cfg = await api('/billing/plans?tenant=' + State.tenant); } catch (e) { $('#bl-plans', b).innerHTML = errBox(e); return; }
+  if (!cfg.enabled) {
+    $('#bl-plans', b).innerHTML = `<div class="muted" style="text-align:center;padding:18px">Online payment isn't switched on yet.<br>Contact Torama to activate your subscription.</div>`;
+    return;
+  }
+  const cur = (n) => '₦' + Number(n).toLocaleString('en-NG');
+  $('#bl-plans', b).innerHTML = `
+    <label class="fl">Billing period</label>
+    <select class="input" id="bl-months">${[[1, '1 month'], [3, '3 months'], [6, '6 months'], [12, '12 months']].map(([m, l]) => `<option value="${m}">${l}</option>`).join('')}</select>
+    <div style="height:10px"></div>
+    ${cfg.plans.map((p) => `<div class="card" style="margin-bottom:10px"><div class="row between"><div><b>${esc(p.name)}</b><div class="muted" style="font-size:12.5px">${esc(p.blurb)}</div></div>
+      <div style="text-align:right"><div><b class="bl-price" data-price="${p.price}">${cur(p.price)}</b><span class="muted" style="font-size:12px">/mo</span></div>
+      <button class="btn" data-plan="${p.code}" style="width:auto;padding:8px 14px;margin-top:6px">Subscribe</button></div></div></div>`).join('')}
+    <div class="muted" style="font-size:11.5px;text-align:center;margin-top:4px">You'll be redirected to Paystack's secure page to pay.</div>`;
+  const months = $('#bl-months', b);
+  const reprice = () => $$('.bl-price', b).forEach((el) => el.textContent = cur(+el.dataset.price * (+months.value)) );
+  months.onchange = reprice; reprice();
+  $$('[data-plan]', b).forEach((btn) => btn.onclick = async () => {
+    btn.disabled = true; const old = btn.textContent; btn.innerHTML = '<span class="spin"></span>';
+    try {
+      const r = await api('/billing/checkout?tenant=' + State.tenant, { method: 'POST', body: { plan: btn.dataset.plan, months: +months.value } });
+      window.location.href = r.authorization_url;   // hand off to Paystack's hosted checkout
+    } catch (e) { btn.disabled = false; btn.textContent = old; toast(e.message, 'err'); }
+  });
+}
+// After returning from Paystack (?pay=REF), confirm the payment server-side.
+async function handlePaymentReturn() {
+  const u = new URL(location.href); const ref = u.searchParams.get('pay'); if (!ref) return;
+  u.searchParams.delete('pay'); history.replaceState({}, '', u.pathname + (u.search || ''));
+  try {
+    const r = await api('/billing/verify?reference=' + encodeURIComponent(ref) + (State.tenant ? '&tenant=' + State.tenant : ''));
+    if (r.status === 'success') { toast('Payment confirmed — subscription active 🎉', 'ok', 5000); try { const me = await api('/auth/me'); State.tenants = me.tenants; buildTenantSelect(); applyBrand(); } catch {} go('dashboard'); }
+    else toast('Payment ' + (r.status || 'pending') + ' — we\'ll update once confirmed', 'info', 5000);
+  } catch (e) { toast('Could not confirm payment: ' + e.message, 'err'); }
 }
 const FR_STATUS = ['NEW', 'PLANNED', 'IN_PROGRESS', 'DONE', 'DECLINED'];
 const FR_BADGE = { NEW: '#64748b', PLANNED: '#0ea5e9', IN_PROGRESS: '#d97706', DONE: '#16a34a', DECLINED: '#ef4444' };
@@ -838,10 +882,12 @@ async function manageCustomers() {
 function trialBanner() {
   const t = active(); if (!t || t.plan === 'OWNER' || t.trial_days_left == null) return '';
   const d = t.trial_days_left;
-  if (d > 3) return `<div class="card" style="background:#ecfdf5;border-color:#a7f3d0;margin-bottom:12px;padding:11px 14px"><div class="row between"><b style="color:#065f46">✨ Free trial · ${d} days left</b></div></div>`;
-  if (d > 0) return `<div class="card" style="background:#fffbeb;border-color:#fde68a;margin-bottom:12px;padding:11px 14px"><b style="color:#92400e">⏳ Trial ends in ${d} day(s)</b><div class="muted" style="font-size:12px">Subscribe to keep your data — contact Torama.</div></div>`;
-  return `<div class="card" style="background:#fef2f2;border-color:#fecaca;margin-bottom:12px;padding:11px 14px"><b style="color:#991b1b">Trial ended</b><div class="muted" style="font-size:12px">Workspace suspended. Contact Torama to reactivate before data is removed.</div></div>`;
+  const cta = isAdmin() ? `<button class="btn" onclick="dbkBilling()" style="width:auto;padding:7px 13px;font-size:13px">Subscribe</button>` : '';
+  if (d > 3) return `<div class="card" style="background:#ecfdf5;border-color:#a7f3d0;margin-bottom:12px;padding:11px 14px"><div class="row between"><b style="color:#065f46">✨ Free trial · ${d} days left</b>${cta}</div></div>`;
+  if (d > 0) return `<div class="card" style="background:#fffbeb;border-color:#fde68a;margin-bottom:12px;padding:11px 14px"><div class="row between"><div><b style="color:#92400e">⏳ Trial ends in ${d} day(s)</b><div class="muted" style="font-size:12px">Subscribe to keep your data.</div></div>${cta}</div></div>`;
+  return `<div class="card" style="background:#fef2f2;border-color:#fecaca;margin-bottom:12px;padding:11px 14px"><div class="row between"><div><b style="color:#991b1b">Trial ended</b><div class="muted" style="font-size:12px">Workspace suspended. Subscribe to reactivate before data is removed.</div></div>${cta}</div></div>`;
 }
+window.dbkBilling = () => { const t = active(); if (isAdmin() && t && t.plan !== 'OWNER') adminBilling(); };
 
 /* ── GENERATORS ──────────────────────────────────────── */
 async function manageGenerators() {

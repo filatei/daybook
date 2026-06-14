@@ -322,6 +322,23 @@ function migrate(db) {
       updated_at  INTEGER DEFAULT (unixepoch())
     );
 
+    -- ── Subscription payments (Paystack) ──────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS payments (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      reference   TEXT UNIQUE NOT NULL,
+      plan        TEXT,
+      months      INTEGER,
+      amount      INTEGER,                                 -- major unit (₦)
+      currency    TEXT,
+      status      TEXT DEFAULT 'PENDING',                  -- PENDING | SUCCESS | FAILED
+      email       TEXT,
+      created_by  TEXT REFERENCES users(id),
+      created_at  INTEGER DEFAULT (unixepoch()),
+      paid_at     INTEGER,
+      raw         TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
       subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())

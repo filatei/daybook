@@ -25,6 +25,11 @@ services:
       - "127.0.0.1:${DAYBOOK_HOST_PORT:-8091}:8090"
     env_file:
       - .env
+    # Lets the app reach host-side services (the fido Mongo SSH tunnel on
+    # host port 27018) via host.docker.internal — the container's own 127.0.0.1
+    # is NOT the host's. Used by SALES_MONGO_URL.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - daybookdata:/data
     networks:

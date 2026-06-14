@@ -82,7 +82,7 @@ Set these (replace the password):
 ```ini
 FIDO_SSH_USER=daybooktunnel
 # <user1_pw> = the password from fido tor-pos-backend/.env CONNECT_STR (alphanumeric, no encoding)
-SALES_MONGO_URL=mongodb://user1:<user1_pw>@127.0.0.1:27018/fido_db?authSource=admin&directConnection=true&readPreference=secondaryPreferred
+SALES_MONGO_URL=mongodb://user1:<user1_pw>@host.docker.internal:27018/fido_db?authSource=admin&directConnection=true&readPreference=secondaryPreferred
 
 # optional — nightly snapshot of every site's sales into Daybook reports:
 SYNC_ENABLED=1

@@ -15,11 +15,15 @@ User=daybookuser
 Group=daybookuser
 EnvironmentFile=/opt/daybook/backend/.env
 Environment=AUTOSSH_GATETIME=0
+# Bind on 0.0.0.0 so the daybook CONTAINER can reach it via host.docker.internal
+# (the container's own 127.0.0.1 is not the host's). Keep host port 27018 closed
+# to the public at the firewall — Mongo auth is the backstop, but don't expose it.
 ExecStart=/usr/bin/autossh -M 0 -N \
   -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
   -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+  -o GatewayPorts=yes \
   -i /opt/daybook/.ssh/fido_tunnel \
-  -p ${FIDO_SSH_PORT} -L 127.0.0.1:27018:127.0.0.1:27017 \
+  -p ${FIDO_SSH_PORT} -L 0.0.0.0:27018:127.0.0.1:27017 \
   ${FIDO_SSH_USER}@${FIDO_SSH_HOST}
 Restart=always
 RestartSec=10

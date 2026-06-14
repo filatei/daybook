@@ -13,7 +13,12 @@ const State = {
   tab: 'dashboard', sites: [], charts: {},
 };
 const active = () => State.tenants.find((t) => t.id === State.tenant) || null;
-const posOn = () => !!(active() && active().pos);   // POS (live fido sales) only for linked tenants
+const posOn = () => !!(active() && active().pos);   // external fido POS (Fido/Fiafia)
+const internalPos = () => !!(active() && !active().pos);  // self-contained tenants → in-app POS
+function updateTabs() {
+  $('.nav button[data-tab="admin"]').classList.toggle('hidden', !isGMup());
+  $('.nav button[data-tab="sell"]').classList.toggle('hidden', !internalPos());
+}
 const myRole = () => (State.user?.is_superadmin && !active() ? 'ADMIN' : active()?.role) || null;
 const isAdmin = () => myRole() === 'ADMIN';
 const isGMup = () => ['ADMIN', 'GENERAL_MANAGER'].includes(myRole());
@@ -85,7 +90,7 @@ async function boot() {
   if (!State.tenant || !State.tenants.find((t) => t.id === State.tenant)) State.tenant = State.tenants[0].id;
   localStorage.setItem('daybook_tenant', State.tenant || '');
   applyBrand(); buildTenantSelect(); setupNav();
-  $('.nav button[data-tab="admin"]').classList.toggle('hidden', !isGMup());
+  updateTabs();
   mountAssistant();
   go('dashboard');
 }
@@ -109,12 +114,12 @@ function buildTenantSelect() {
   const allOpt = State.user.is_superadmin ? `<option value="">★ All companies</option>` : '';
   sel.innerHTML = allOpt + State.tenants.map((t) => `<option value="${t.id}" ${t.id === State.tenant ? 'selected' : ''}>${esc(t.name)} · ${ROLE_LABEL[t.role]}</option>`).join('');
   sel.value = State.tenant || '';
-  sel.onchange = () => { State.tenant = sel.value || null; localStorage.setItem('daybook_tenant', State.tenant || ''); applyBrand(); $('.nav button[data-tab="admin"]').classList.toggle('hidden', !isGMup()); go(State.tab); };
+  sel.onchange = () => { State.tenant = sel.value || null; localStorage.setItem('daybook_tenant', State.tenant || ''); applyBrand(); updateTabs(); go(State.tab); };
 }
 function setupNav() { $$('.nav button').forEach((b) => b.onclick = () => go(b.dataset.tab)); }
 function go(tab) {
   State.tab = tab; $$('.nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  ({ dashboard: viewDashboard, reports: viewReports, staff: viewStaff, documents: viewDocuments, admin: viewAdmin }[tab] || viewDashboard)();
+  ({ dashboard: viewDashboard, sell: viewSell, reports: viewReports, staff: viewStaff, documents: viewDocuments, admin: viewAdmin }[tab] || viewDashboard)();
 }
 async function loadSites() { try { State.sites = await api(scoped('/sites')); } catch { State.sites = []; } return State.sites; }
 const siteName = (id) => State.sites.find((s) => s.id === id)?.name || '—';
@@ -609,6 +614,125 @@ async function staffSummary() {
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `timesheets-${$('#su-from', b).value}_${$('#su-to', b).value}.csv`; a.click(); URL.revokeObjectURL(a.href);
       toast('CSV downloaded', 'ok'); } catch (e) { toast(e.message, 'err'); }
   };
+}
+
+/* ── SELL (in-app POS) ───────────────────────────────── */
+let cart = [];
+async function viewSell() {
+  fabSet(false); const v = $('#view');
+  v.innerHTML = `<div class="section-title">Sell</div><div class="skel"></div>`;
+  try {
+    const products = (await api(scoped('/products'))).filter((p) => p.status === 'ACTIVE');
+    State._products = products;
+    v.innerHTML = `${trialBanner()}
+      <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">💳 New sale</h3>
+        <button class="btn ghost sm" id="sellManage">⚙️ Catalog</button></div>
+      <input class="input" id="prodSearch" placeholder="Search products…" style="margin-bottom:10px"/>
+      <div id="prodGrid" class="prodgrid"></div><div id="cartBar"></div>`;
+    renderGrid(products); renderCart();
+    $('#prodSearch').oninput = (e) => { const q = e.target.value.toLowerCase(); renderGrid(products.filter((p) => p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q))); };
+    $('#sellManage').onclick = manageCatalog;
+  } catch (e) { v.innerHTML = errBox(e); }
+}
+function renderGrid(products) {
+  const g = $('#prodGrid'); if (!g) return;
+  if (!products.length) { g.innerHTML = `<div class="empty" style="grid-column:1/-1"><div class="ic">📦</div><p>No products yet. Tap ⚙️ Catalog to add.</p></div>`; return; }
+  g.innerHTML = products.map((p) => `<button class="prodcard" data-p="${p.id}"><div class="pn">${esc(p.name)}</div><div class="pp">${ngn(p.price)}</div>${p.track_stock ? `<div class="ps ${p.stock_qty <= 0 ? 'out' : ''}">${p.stock_qty} ${esc(p.unit || '')}</div>` : ''}</button>`).join('');
+  $$('#prodGrid .prodcard').forEach((b) => b.onclick = () => addToCart(b.dataset.p));
+}
+function addToCart(pid) { const p = State._products.find((x) => x.id === pid); if (!p) return; const ex = cart.find((c) => c.product_id === pid); if (ex) ex.qty++; else cart.push({ product_id: pid, name: p.name, price: p.price, qty: 1 }); renderCart(); }
+function renderCart() {
+  const bar = $('#cartBar'); if (!bar) return;
+  if (!cart.length) { bar.innerHTML = ''; return; }
+  const total = cart.reduce((a, c) => a + c.qty * c.price, 0);
+  bar.innerHTML = `<div class="card" style="margin-top:12px">
+    ${cart.map((c, i) => `<div class="row between" style="padding:6px 0"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</span>
+      <span class="row" style="gap:7px"><button class="qb" data-dec="${i}">−</button><b>${c.qty}</b><button class="qb" data-inc="${i}">＋</button><b style="min-width:72px;text-align:right">${ngn(c.qty * c.price)}</b></span></div>`).join('')}
+    <div class="row between" style="padding-top:8px;border-top:1px solid var(--line)"><b>Total</b><b style="font-size:18px">${ngn(total)}</b></div>
+    <button class="btn" id="charge" style="margin-top:10px">Charge ${ngn(total)}</button></div>`;
+  $$('[data-inc]', bar).forEach((b) => b.onclick = () => { cart[+b.dataset.inc].qty++; renderCart(); });
+  $$('[data-dec]', bar).forEach((b) => b.onclick = () => { const i = +b.dataset.dec; cart[i].qty--; if (cart[i].qty <= 0) cart.splice(i, 1); renderCart(); });
+  $('#charge', bar).onclick = checkout;
+}
+function checkout() {
+  const total = cart.reduce((a, c) => a + c.qty * c.price, 0);
+  const f = modal(`<form id="cf">
+    <div class="row between" style="margin-bottom:8px"><b>Total</b><b style="font-size:20px">${ngn(total)}</b></div>
+    <label class="fl">Payment method</label><select class="input" id="c-method"><option>CASH</option><option>TRANSFER</option><option>POS</option><option>CREDIT</option></select>
+    <label class="fl">Amount paid</label><input class="input" id="c-paid" type="number" inputmode="decimal" value="${Math.round(total)}"/>
+    <label class="fl">Customer (optional)</label><input class="input" id="c-cust" placeholder="Walk-in"/>
+    <div style="height:14px"></div><button class="btn" type="submit" id="c-done">Complete sale</button></form>`, { title: 'Payment', sub: `${cart.length} item(s)` });
+  $('#cf', f).onsubmit = async (e) => { e.preventDefault();
+    const btn = $('#c-done', f); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Saving…';
+    try { const sale = await api('/pos/sales?tenant=' + State.tenant, { method: 'POST', body: { items: cart.map((c) => ({ product_id: c.product_id, qty: c.qty })), payment_method: $('#c-method', f).value, amount_paid: +$('#c-paid', f).value, customer_name: $('#c-cust', f).value.trim() || null } });
+      cart = []; closeModal(); showReceipt(sale.id); }
+    catch (er) { toast(er.message, 'err'); btn.disabled = false; btn.textContent = 'Complete sale'; } };
+}
+async function showReceipt(id) {
+  const sale = await api('/pos/sales/' + id); const html = receiptHTML(sale);
+  const b = modal(`<div style="background:#fff;padding:8px;border-radius:8px">${html}</div>
+    <div class="grid2" style="margin-top:12px"><button class="btn ghost" id="rNew">New sale</button><button class="btn" id="rPrint">🖨 Print</button></div>`, { title: 'Receipt #' + sale.receipt_no });
+  $('#rPrint', b).onclick = () => printReceipt(html);
+  $('#rNew', b).onclick = () => { closeModal(); viewSell(); };
+}
+function receiptHTML(sale) {
+  const t = sale.tenant || {}; const items = sale.items || [];
+  return `<div style="font-family:'Courier New',monospace;font-size:13px;width:280px;margin:auto;color:#000">
+    <div style="text-align:center"><div style="font-weight:bold;font-size:16px">${esc(t.name || '')}</div>
+    ${sale.site ? `<div>${esc(sale.site.name)}</div>` : ''}<div>${sale.sale_date} · #${sale.receipt_no}</div></div>
+    <div style="border-top:1px dashed #000;margin:6px 0"></div>
+    ${items.map((i) => `<div style="display:flex;justify-content:space-between"><span>${esc(i.name)} ×${i.qty}</span><span>${ngn(i.amount)}</span></div>`).join('')}
+    <div style="border-top:1px dashed #000;margin:6px 0"></div>
+    <div style="display:flex;justify-content:space-between;font-weight:bold"><span>TOTAL</span><span>${ngn(sale.total)}</span></div>
+    <div style="display:flex;justify-content:space-between"><span>${esc(sale.payment_method)} paid</span><span>${ngn(sale.amount_paid)}</span></div>
+    ${sale.balance > 0 ? `<div style="display:flex;justify-content:space-between"><span>Balance</span><span>${ngn(sale.balance)}</span></div>` : ''}
+    ${sale.customer_name ? `<div>Customer: ${esc(sale.customer_name)}</div>` : ''}
+    <div style="text-align:center;margin-top:8px">Thank you!</div></div>`;
+}
+function printReceipt(html) {
+  const w = window.open('', '_blank', 'width=320,height=600'); if (!w) { toast('Allow pop-ups to print', 'err'); return; }
+  w.document.write(`<html><head><title>Receipt</title><style>@media print{@page{margin:0}}body{margin:0;padding:8px}</style></head><body onload="window.print();setTimeout(()=>window.close(),300)">${html}</body></html>`);
+  w.document.close();
+}
+async function manageCatalog() {
+  const products = await api(scoped('/products'));
+  const b = modal(`<div class="row between" style="margin-bottom:8px"><b>Products</b>${isGMup() ? `<button class="btn ghost sm" id="addProd">＋ Product</button>` : ''}</div>
+    <div>${products.map((p) => `<div class="list-item"><div class="meta"><div class="t">${esc(p.name)}</div><div class="s">${ngn(p.price)}${p.track_stock ? ' · stock ' + p.stock_qty + ' ' + esc(p.unit || '') : ''} · ${p.status}</div></div><button class="btn ghost sm" data-stock="${p.id}">Stock</button></div>`).join('') || '<div class="muted">No products</div>'}</div>
+    <div style="height:10px"></div><button class="btn ghost" id="custBtn">👥 Customers</button>`, { title: 'Catalog', sub: active().name });
+  if ($('#addProd', b)) $('#addProd', b).onclick = prodForm;
+  $('#custBtn', b).onclick = manageCustomers;
+  $$('[data-stock]', b).forEach((el) => el.onclick = () => stockForm(el.dataset.stock, products.find((p) => p.id === el.dataset.stock)));
+}
+function prodForm() {
+  const f = modal(`<form id="pf"><label class="fl">Name</label><input class="input" id="p-name"/>
+    <div class="grid2"><div><label class="fl">Price (₦)</label><input class="input" id="p-price" type="number" inputmode="decimal"/></div>
+      <div><label class="fl">Cost (₦)</label><input class="input" id="p-cost" type="number" inputmode="decimal"/></div></div>
+    <div class="grid2"><div><label class="fl">Category</label><input class="input" id="p-cat"/></div><div><label class="fl">Unit</label><input class="input" id="p-unit" value="unit"/></div></div>
+    <label class="fl row"><input type="checkbox" id="p-track" checked style="width:auto;margin-right:8px"/> Track stock</label>
+    <label class="fl">Opening stock</label><input class="input" id="p-stock" type="number" inputmode="decimal" value="0"/>
+    <div style="height:14px"></div><button class="btn" type="submit">Add product</button></form>`, { title: 'New product' });
+  $('#pf', f).onsubmit = async (e) => { e.preventDefault(); const name = $('#p-name', f).value.trim(); if (!name) { toast('Name required', 'err'); return; }
+    try { await api('/products?tenant=' + State.tenant, { method: 'POST', body: { name, price: +$('#p-price', f).value || 0, cost: +$('#p-cost', f).value || 0, category: $('#p-cat', f).value.trim(), unit: $('#p-unit', f).value.trim() || 'unit', track_stock: $('#p-track', f).checked, stock_qty: +$('#p-stock', f).value || 0 } });
+      toast('Product added', 'ok'); closeModal(); manageCatalog(); } catch (er) { toast(er.message, 'err'); } };
+}
+function stockForm(id, p) {
+  const f = modal(`<form id="kf"><div class="muted" style="margin-bottom:8px">Current: <b>${p.stock_qty} ${esc(p.unit || '')}</b></div>
+    <label class="fl">Type</label><select class="input" id="k-type"><option value="PURCHASE">Stock in (purchase)</option><option value="ADJUST">Adjustment</option></select>
+    <label class="fl">Quantity (use − for removal)</label><input class="input" id="k-qty" type="number" inputmode="decimal"/>
+    <label class="fl">Note</label><input class="input" id="k-note"/>
+    <div style="height:14px"></div><button class="btn" type="submit">Save</button></form>`, { title: 'Stock · ' + p.name });
+  $('#kf', f).onsubmit = async (e) => { e.preventDefault(); const qty = +$('#k-qty', f).value; if (!qty) { toast('Qty required', 'err'); return; }
+    try { await api('/products/' + id + '/stock?tenant=' + State.tenant, { method: 'POST', body: { qty, type: $('#k-type', f).value, note: $('#k-note', f).value.trim() } });
+      toast('Stock updated', 'ok'); closeModal(); manageCatalog(); } catch (er) { toast(er.message, 'err'); } };
+}
+async function manageCustomers() {
+  const custs = await api(scoped('/customers'));
+  const b = modal(`<div>${custs.map((c) => `<div class="list-item"><div class="av">👤</div><div class="meta"><div class="t">${esc(c.name)}</div><div class="s">${esc(c.phone || '')} ${esc(c.email || '')}</div></div></div>`).join('') || '<div class="muted">No customers</div>'}</div>
+    <form id="ncf" style="margin-top:10px"><label class="fl">Add customer</label><input class="input" id="nc-name" placeholder="Name"/>
+      <div class="grid2"><input class="input" id="nc-phone" placeholder="Phone"/><input class="input" id="nc-email" placeholder="Email"/></div>
+      <div style="height:10px"></div><button class="btn" type="submit">Add</button></form>`, { title: 'Customers' });
+  $('#ncf', b).onsubmit = async (e) => { e.preventDefault(); const name = $('#nc-name', b).value.trim(); if (!name) { toast('Name required', 'err'); return; }
+    try { await api('/customers?tenant=' + State.tenant, { method: 'POST', body: { name, phone: $('#nc-phone', b).value.trim(), email: $('#nc-email', b).value.trim() } }); toast('Added', 'ok'); manageCustomers(); } catch (er) { toast(er.message, 'err'); } };
 }
 
 /* ── TRIAL BANNER ────────────────────────────────────── */

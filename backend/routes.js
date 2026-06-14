@@ -722,6 +722,127 @@ router.post('/generators/:id/logs', requireAuth, needTenant('SITE_MANAGER'), (re
   res.status(201).json(db.prepare('SELECT * FROM generator_logs WHERE id=?').get(id));
 });
 
+// ── IN-APP POS (products, customers, live sales, inventory) ───────────────────
+// Available to self-contained tenants (those NOT linked to the external fido POS).
+function internalPos(tenant_id) { const t = tenantById(tenant_id); return !!t && !t.pos_source; }
+
+router.get('/products', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  if (s.all) return res.json(db.prepare('SELECT * FROM products ORDER BY name').all());
+  res.json(db.prepare("SELECT * FROM products WHERE tenant_id=? ORDER BY status, name").all(s.ctx.tenant_id));
+});
+router.post('/products', requireAuth, needTenant('GENERAL_MANAGER'), (req, res) => {
+  const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'name required' });
+  const id = uuid();
+  try {
+    db.prepare(`INSERT INTO products (id,tenant_id,name,category,price,cost,sku,unit,track_stock,stock_qty)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, req.ctx.tenant_id, b.name.trim(), b.category || null, +b.price || 0, +b.cost || 0, b.sku || null, b.unit || 'unit', b.track_stock === false ? 0 : 1, +b.stock_qty || 0);
+  } catch { return res.status(409).json({ error: 'product name already exists' }); }
+  res.status(201).json(db.prepare('SELECT * FROM products WHERE id=?').get(id));
+});
+router.patch('/products/:id', requireAuth, needTenant('GENERAL_MANAGER'), (req, res) => {
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(req.params.id);
+  if (!p || p.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  const f = req.body || {};
+  db.prepare('UPDATE products SET name=?,category=?,price=?,cost=?,sku=?,unit=?,track_stock=?,status=? WHERE id=?')
+    .run(f.name ?? p.name, f.category ?? p.category, f.price ?? p.price, f.cost ?? p.cost, f.sku ?? p.sku, f.unit ?? p.unit, f.track_stock != null ? (f.track_stock ? 1 : 0) : p.track_stock, f.status ?? p.status, p.id);
+  res.json(db.prepare('SELECT * FROM products WHERE id=?').get(p.id));
+});
+// Stock movement (purchase / manual adjust). qty signed.
+router.post('/products/:id/stock', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const p = db.prepare('SELECT * FROM products WHERE id=?').get(req.params.id);
+  if (!p || p.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {}; const qty = +b.qty || 0; const type = (b.type || 'ADJUST').toUpperCase();
+  if (!qty) return res.status(400).json({ error: 'qty required' });
+  db.prepare('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,unit_cost,note,created_by) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(uuid(), p.tenant_id, p.id, req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null), ['PURCHASE', 'ADJUST'].includes(type) ? type : 'ADJUST', qty, +b.unit_cost || null, b.note || null, req.user.id);
+  db.prepare('UPDATE products SET stock_qty=stock_qty+? WHERE id=?').run(qty, p.id);
+  res.json(db.prepare('SELECT * FROM products WHERE id=?').get(p.id));
+});
+
+router.get('/customers', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+  const q = req.query.q;
+  res.json(q ? db.prepare("SELECT * FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 50").all(s.ctx.tenant_id, '%' + q + '%')
+    : db.prepare('SELECT * FROM customers WHERE tenant_id=? ORDER BY name LIMIT 200').all(s.ctx.tenant_id));
+});
+router.post('/customers', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'name required' });
+  const id = uuid();
+  db.prepare('INSERT INTO customers (id,tenant_id,name,phone,email,note) VALUES (?,?,?,?,?,?)').run(id, req.ctx.tenant_id, b.name.trim(), b.phone || null, b.email || null, b.note || null);
+  res.status(201).json(db.prepare('SELECT * FROM customers WHERE id=?').get(id));
+});
+
+// Record a live sale → decrements stock, assigns a receipt number, returns the sale.
+router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const b = req.body || {};
+  const items = Array.isArray(b.items) ? b.items.filter((i) => i.product_id && (+i.qty > 0)) : [];
+  if (!items.length) return res.status(400).json({ error: 'no items' });
+  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
+  const lines = [];
+  for (const it of items) {
+    const p = db.prepare('SELECT * FROM products WHERE id=? AND tenant_id=?').get(it.product_id, req.ctx.tenant_id);
+    if (!p) return res.status(400).json({ error: 'invalid product in cart' });
+    const qty = +it.qty; const price = it.price != null ? +it.price : p.price; const amount = qty * price;
+    lines.push({ product_id: p.id, name: p.name, qty, price, amount, track: p.track_stock });
+  }
+  const subtotal = lines.reduce((a, l) => a + l.amount, 0);
+  const discount = +b.discount || 0;
+  const total = Math.max(0, subtotal - discount);
+  const amount_paid = b.amount_paid != null ? +b.amount_paid : total;
+  const balance = +(total - amount_paid).toFixed(2);
+  const status = balance <= 0 ? 'PAID' : (amount_paid > 0 ? 'PART' : 'UNPAID');
+  const id = uuid();
+  const nextNo = (db.prepare('SELECT COALESCE(MAX(receipt_no),0)+1 n FROM pos_sales WHERE tenant_id=?').get(req.ctx.tenant_id).n);
+  const sale_date = b.sale_date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  db.prepare(`INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,sold_by)
+    VALUES (@id,@tenant_id,@site_id,@receipt_no,@customer_id,@customer_name,@items_json,@subtotal,@discount,@total,@payment_method,@amount_paid,@balance,@status,@sale_date,@sold_by)`)
+    .run({ id, tenant_id: req.ctx.tenant_id, site_id, receipt_no: nextNo, customer_id: b.customer_id || null, customer_name: b.customer_name || null,
+      items_json: JSON.stringify(lines.map((l) => ({ product_id: l.product_id, name: l.name, qty: l.qty, price: l.price, amount: l.amount }))),
+      subtotal, discount, total, payment_method: (b.payment_method || 'CASH').toUpperCase(), amount_paid, balance, status, sale_date, sold_by: req.user.id });
+  // stock decrement + inventory move
+  for (const l of lines) {
+    if (!l.track) continue;
+    db.prepare('UPDATE products SET stock_qty=stock_qty-? WHERE id=?').run(l.qty, l.product_id);
+    db.prepare('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,ref,created_by) VALUES (?,?,?,?,?,?,?,?)')
+      .run(uuid(), req.ctx.tenant_id, l.product_id, site_id, 'SALE', -l.qty, 'receipt#' + nextNo, req.user.id);
+  }
+  res.status(201).json(db.prepare('SELECT * FROM pos_sales WHERE id=?').get(id));
+});
+router.get('/pos/sales', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+  const { from, to, site } = req.query; const where = ['p.tenant_id=?'], args = [s.ctx.tenant_id];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
+  if (from) { where.push('p.sale_date>=?'); args.push(from); }
+  if (to) { where.push('p.sale_date<=?'); args.push(to); }
+  res.json(db.prepare(`SELECT p.*, s.name site_name FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 300`).all(...args));
+});
+router.get('/pos/sales/:id', requireAuth, (req, res) => {
+  const sale = db.prepare('SELECT * FROM pos_sales WHERE id=?').get(req.params.id);
+  if (!sale) return res.status(404).json({ error: 'not found' });
+  const c = contextFor(req.user, sale.tenant_id);
+  if (!c || (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
+  res.json({ ...sale, items: J(sale.items_json, []), tenant: tenantById(sale.tenant_id), site: sale.site_id ? siteById(sale.site_id) : null });
+});
+// Per-day POS summary (feeds the dashboard panel + daily report pull for self-contained tenants).
+router.get('/pos/summary', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+  const date = req.query.date; if (!date) return res.status(400).json({ error: 'date required' });
+  const where = ['tenant_id=?', 'sale_date=?'], args = [s.ctx.tenant_id, date];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
+  const W = 'WHERE ' + where.join(' AND ');
+  const rows = db.prepare(`SELECT * FROM pos_sales ${W}`).all(...args);
+  const total = rows.reduce((a, r) => a + (r.total || 0), 0);
+  const pay = {}; const prod = {};
+  for (const r of rows) {
+    pay[r.payment_method] = (pay[r.payment_method] || 0) + (r.total || 0);
+    for (const it of J(r.items_json, [])) { const k = it.name; if (!prod[k]) prod[k] = { product: k, qty: 0, amount: 0 }; prod[k].qty += it.qty; prod[k].amount += it.amount; }
+  }
+  const cash = pay.CASH || 0;
+  res.json({ date, total, orders: rows.length, total_cash: cash, total_deposit: total - cash,
+    payments: Object.entries(pay).map(([method, amount]) => ({ method, amount })), lines: Object.values(prod) });
+});
+
 // ── BILLING (superadmin: mark a tenant paid / extend / reactivate) ────────────
 router.post('/tenants/:id/billing', requireAuth, (req, res) => {
   if (!req.user.is_superadmin) return res.status(403).json({ error: 'superadmin only' });

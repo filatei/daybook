@@ -221,6 +221,67 @@ function migrate(db) {
       created_at    INTEGER DEFAULT (unixepoch())
     );
 
+    -- ── In-app POS (self-contained tenants: live sales + receipts) ────────────
+    CREATE TABLE IF NOT EXISTS products (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      name        TEXT NOT NULL,
+      category    TEXT,
+      price       REAL NOT NULL DEFAULT 0,
+      cost        REAL DEFAULT 0,
+      sku         TEXT,
+      unit        TEXT DEFAULT 'unit',
+      track_stock INTEGER DEFAULT 1,
+      stock_qty   REAL DEFAULT 0,
+      status      TEXT CHECK(status IN ('ACTIVE','INACTIVE')) DEFAULT 'ACTIVE',
+      created_at  INTEGER DEFAULT (unixepoch()),
+      UNIQUE(tenant_id, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS customers (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      name        TEXT NOT NULL,
+      phone       TEXT,
+      email       TEXT,
+      note        TEXT,
+      created_at  INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS pos_sales (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+      site_id       TEXT REFERENCES sites(id),
+      receipt_no    INTEGER,
+      customer_id   TEXT REFERENCES customers(id),
+      customer_name TEXT,
+      items_json    TEXT,                                  -- [{product_id,name,qty,price,amount}]
+      subtotal      REAL DEFAULT 0,
+      discount      REAL DEFAULT 0,
+      total         REAL DEFAULT 0,
+      payment_method TEXT,
+      amount_paid   REAL DEFAULT 0,
+      balance       REAL DEFAULT 0,
+      status        TEXT CHECK(status IN ('PAID','PART','UNPAID')) DEFAULT 'PAID',
+      sale_date     TEXT,
+      sold_by       TEXT REFERENCES users(id),
+      created_at    INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_moves (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      product_id  TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      site_id     TEXT REFERENCES sites(id),
+      type        TEXT CHECK(type IN ('PURCHASE','SALE','ADJUST')) NOT NULL,
+      qty         REAL NOT NULL,                           -- signed: + in, - out
+      unit_cost   REAL,
+      ref         TEXT,
+      note        TEXT,
+      created_by  TEXT REFERENCES users(id),
+      created_at  INTEGER DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
       subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())
@@ -236,6 +297,9 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_docs_tc       ON documents(tenant_id, category);
     CREATE INDEX IF NOT EXISTS idx_sites_tenant  ON sites(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_genlogs       ON generator_logs(tenant_id, generator_id, log_date);
+    CREATE INDEX IF NOT EXISTS idx_products_t    ON products(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_possales_td   ON pos_sales(tenant_id, sale_date);
+    CREATE INDEX IF NOT EXISTS idx_invmoves      ON inventory_moves(tenant_id, product_id);
   `);
 
   // Idempotent column adds for databases created before these columns existed.

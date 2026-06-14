@@ -37,8 +37,9 @@ app.use((req, _res, next) => {
   next();
 });
 
-// keep the raw body so the Paystack webhook can verify its HMAC signature
-app.use(express.json({ limit: '2mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
+// keep the raw body so payment webhooks can verify their HMAC signatures; the
+// larger limit accommodates attendance photo + signature captures (base64).
+app.use(express.json({ limit: '6mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // security headers
 app.use((_req, res, next) => {

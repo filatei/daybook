@@ -659,6 +659,80 @@ router.post('/staff/import', requireAuth, needTenant('GENERAL_MANAGER'), async (
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
 });
 
+// ── STAFF ATTENDANCE (shared-device clock-in: photo + signature + GPS) ────────
+const ATT_DIR = path.join(UPLOAD_DIR, 'attendance');
+fs.mkdirSync(ATT_DIR, { recursive: true });
+// Persist a small base64 data-URL (camera frame / signature) to disk. Returns filename.
+function saveDataUrl(dataUrl, tag) {
+  if (typeof dataUrl !== 'string') return null;
+  const m = dataUrl.match(/^data:image\/(png|jpe?g|webp);base64,(.+)$/);
+  if (!m) return null;
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 4 * 1024 * 1024) throw new Error('image too large');     // cap ~4MB
+  const ext = m[1] === 'jpg' ? 'jpeg' : m[1];
+  const name = `${tag}-${Date.now()}-${uuid().slice(0, 8)}.${ext}`;
+  fs.writeFileSync(path.join(ATT_DIR, name), buf);
+  return name;
+}
+// Today's attendance for a tenant/site, with staff names. Site managers see their site only.
+router.get('/attendance', requireAuth, (req, res) => {
+  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const where = ['a.tenant_id=?', 'a.work_date=?'], args = [s.ctx.tenant_id, date];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('a.site_id=?'); args.push(s.ctx.site_id); }
+  else if (req.query.site) { where.push('a.site_id=?'); args.push(req.query.site); }
+  const rows = db.prepare(`SELECT a.*, st.full_name, si.name site_name FROM attendance a
+    LEFT JOIN staff st ON st.id=a.staff_id LEFT JOIN sites si ON si.id=a.site_id
+    WHERE ${where.join(' AND ')} ORDER BY a.clock_in DESC, st.full_name`).all(...args);
+  res.json(rows.map((r) => ({
+    id: r.id, staff_id: r.staff_id, staff: r.full_name, site_id: r.site_id, site: r.site_name, work_date: r.work_date,
+    clock_in: r.clock_in, clock_out: r.clock_out, has_photo_in: !!r.photo_in, has_photo_out: !!r.photo_out, has_signature: !!r.signature,
+    in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
+  })));
+});
+// Clock a staff member in/out with a captured photo, signature and GPS fix.
+router.post('/attendance/clock', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const b = req.body || {};
+  const kind = b.kind === 'out' ? 'out' : 'in';
+  const st = db.prepare('SELECT * FROM staff WHERE id=?').get(b.staff_id);
+  if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid staff' });
+  if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const date = (b.work_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  let photo = null, sig = null;
+  try { photo = saveDataUrl(b.photo, kind === 'out' ? 'out' : 'in'); sig = saveDataUrl(b.signature, 'sig'); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  const now = nowS();
+  const existing = db.prepare('SELECT * FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=?').get(req.ctx.tenant_id, st.id, date);
+  const id = existing ? existing.id : uuid();
+  const lat = b.lat != null ? Number(b.lat) : null, lng = b.lng != null ? Number(b.lng) : null, acc = b.accuracy != null ? Number(b.accuracy) : null;
+  if (!existing) {
+    db.prepare(`INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,photo_in,signature,in_lat,in_lng,in_acc,captured_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, req.ctx.tenant_id, st.site_id, st.id, date,
+      kind === 'in' ? now : null, kind === 'in' ? photo : null, sig, kind === 'in' ? lat : null, kind === 'in' ? lng : null, kind === 'in' ? acc : null, req.user.id);
+    if (kind === 'out') db.prepare('UPDATE attendance SET clock_out=?, photo_out=?, out_lat=?, out_lng=?, out_acc=? WHERE id=?').run(now, photo, lat, lng, acc, id);
+  } else if (kind === 'in') {
+    db.prepare('UPDATE attendance SET clock_in=?, photo_in=COALESCE(?,photo_in), signature=COALESCE(?,signature), in_lat=?, in_lng=?, in_acc=?, updated_at=? WHERE id=?')
+      .run(now, photo, sig, lat, lng, acc, now, id);
+  } else {
+    db.prepare('UPDATE attendance SET clock_out=?, photo_out=COALESCE(?,photo_out), signature=COALESCE(?,signature), out_lat=?, out_lng=?, out_acc=?, updated_at=? WHERE id=?')
+      .run(now, photo, sig, lat, lng, acc, now, id);
+  }
+  audit(req.ctx.tenant_id, req.user.id, kind === 'in' ? 'CLOCK_IN' : 'CLOCK_OUT', 'attendance', id, { staff: st.full_name, date });
+  res.status(existing ? 200 : 201).json({ id, kind, clock: now });
+});
+// Serve a captured image (auth + tenant/site scoped). which = in | out | sig
+router.get('/attendance/:id/img/:which', requireAuth, (req, res) => {
+  const a = db.prepare('SELECT * FROM attendance WHERE id=?').get(req.params.id);
+  if (!a) return res.status(404).end();
+  const c = contextFor(req.user, a.tenant_id);
+  if (!c || (c.role === 'SITE_MANAGER' && a.site_id !== c.site_id)) return res.status(404).end();
+  const name = req.params.which === 'out' ? a.photo_out : req.params.which === 'sig' ? a.signature : a.photo_in;
+  if (!name) return res.status(404).end();
+  const p = path.join(ATT_DIR, name);
+  if (!fs.existsSync(p)) return res.status(404).end();
+  res.sendFile(p);
+});
+
 router.get('/timesheets', requireAuth, (req, res) => {
   const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
   const { site, from, to, date } = req.query; const where = [], args = [];

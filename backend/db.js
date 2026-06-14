@@ -339,6 +339,26 @@ function migrate(db) {
       raw         TEXT
     );
 
+    -- ── Staff attendance (shared-device clock-in: photo + signature + GPS) ─────
+    CREATE TABLE IF NOT EXISTS attendance (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      site_id     TEXT REFERENCES sites(id),
+      staff_id    TEXT NOT NULL REFERENCES staff(id),
+      work_date   TEXT NOT NULL,                            -- YYYY-MM-DD
+      clock_in    INTEGER,
+      clock_out   INTEGER,
+      photo_in    TEXT,                                     -- stored filenames
+      photo_out   TEXT,
+      signature   TEXT,
+      in_lat      REAL, in_lng REAL, in_acc REAL,
+      out_lat     REAL, out_lng REAL, out_acc REAL,
+      captured_by TEXT REFERENCES users(id),
+      created_at  INTEGER DEFAULT (unixepoch()),
+      updated_at  INTEGER DEFAULT (unixepoch()),
+      UNIQUE(tenant_id, staff_id, work_date)
+    );
+
     -- Cached gateway plan codes (Paystack Plans) keyed by planType_interval
     CREATE TABLE IF NOT EXISTS payment_plans (
       id          TEXT PRIMARY KEY,

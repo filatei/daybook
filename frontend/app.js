@@ -90,6 +90,7 @@ function modal(html, { title, sub } = {}) {
 }
 function closeModal(fromPop) {
   if (!modalOpen) return;
+  if (typeof stopCam === 'function') stopCam();          // release camera if an attendance capture was open
   modalOpen = false;
   const m = $('.modal', $('#modalRoot'));
   if (m) { m.style.animation = 'sheet .25s reverse'; setTimeout(() => ($('#modalRoot').innerHTML = ''), 220); }
@@ -719,6 +720,7 @@ async function viewStaff() {
   const siteSel = isSiteMgr() ? '' : `<select class="input" id="st-site" style="flex:1">${State.sites.map((s) => `<option value="${s.id}" ${s.id === staffSite ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>`;
   v.innerHTML = `<div class="section-title">Staff hours</div>
     <div class="row" style="gap:8px;margin-bottom:10px">${siteSel}<input class="input" id="st-date" type="date" value="${staffDate}" style="flex:1"/></div>
+    <button class="btn" id="st-attend" style="margin-bottom:10px">📸 Attendance · clock staff in/out</button>
     <div class="row between" style="margin-bottom:10px">
       <button class="btn ghost sm" id="st-summary">📊 Summary / export</button>
       ${isGMup() && posOn() ? `<button class="btn ghost sm" id="st-import">⤓ Import from POS</button>` : ''}
@@ -726,6 +728,7 @@ async function viewStaff() {
     <div id="st-list"><div class="skel"></div><div class="skel"></div></div>`;
   if ($('#st-site')) $('#st-site').onchange = (e) => { staffSite = e.target.value; loadStaffGrid(); };
   $('#st-date').onchange = (e) => { staffDate = e.target.value; loadStaffGrid(); };
+  $('#st-attend').onclick = openAttendance;
   $('#st-summary').onclick = staffSummary;
   if ($('#st-import')) $('#st-import').onclick = importStaff;
   loadStaffGrid();
@@ -999,6 +1002,92 @@ async function btPrint(bytes) {
 const btPrintReceipt = (sale) => btPrint(receiptESC(sale));
 // Generic: print arbitrary text lines to the thermal printer (anything in the app).
 const btPrintLines = (lines) => btPrint(ESC.build(Array.isArray(lines) ? lines : [String(lines)]));
+
+/* ── Staff attendance kiosk (photo + signature + GPS clock-in) ───────────────
+   Runs on one shared device per site — no staff phone needed. The site manager
+   captures the staff member's photo + on-screen signature + GPS as daily proof. */
+async function openAttendance() {
+  const site = isSiteMgr() ? active().site_id : staffSite;
+  const b = modal(`<div class="row" style="gap:8px;margin-bottom:10px"><input class="input" id="at-date" type="date" value="${today()}" style="flex:1"/></div>
+    <div id="at-list"><div class="skel"></div><div class="skel"></div></div>`, { title: '📸 Attendance', sub: active().name });
+  const load = async () => {
+    const list = $('#at-list', b); if (!list) return; list.innerHTML = '<div class="skel"></div><div class="skel"></div>';
+    const date = $('#at-date', b).value;
+    try {
+      const sp = '/staff' + (!isSiteMgr() && site ? '?site=' + site : '');
+      const ap = '/attendance?date=' + date + (!isSiteMgr() && site ? '&site=' + site : '');
+      const [staff, att] = await Promise.all([api(scoped(sp)), api(scoped(ap))]);
+      const byId = {}; att.forEach((a) => (byId[a.staff_id] = a));
+      if (!staff.length) { list.innerHTML = '<div class="muted" style="text-align:center;padding:18px">No staff for this site yet</div>'; return; }
+      list.innerHTML = staff.map((s) => {
+        const a = byId[s.id];
+        const status = a ? (a.clock_out ? `Out ${clock(a.clock_out)}` : `In ${clock(a.clock_in)}`) : 'Not clocked in';
+        const action = !a || (!a.clock_in && !a.clock_out) ? 'in' : (a.clock_in && !a.clock_out ? 'out' : 'done');
+        return `<div class="list-item"><div class="av">${a ? '🟢' : '⚪'}</div><div class="meta"><div class="t">${esc(s.full_name)}</div><div class="s">${esc(s.role_title || '')}${s.role_title ? ' · ' : ''}${status}</div></div>
+          ${action === 'done' ? `<span class="pill-cat" style="background:#dcfce7;color:#166534">✓ done</span>`
+            : `<button class="btn ${action === 'out' ? 'ghost' : ''}" data-staff="${s.id}" data-name="${esc(s.full_name)}" data-kind="${action}" style="width:auto;padding:8px 13px">${action === 'out' ? 'Clock out' : 'Clock in'}</button>`}</div>`;
+      }).join('');
+      $$('[data-staff]', list).forEach((btn) => btn.onclick = () => captureClock(btn.dataset.staff, btn.dataset.name, btn.dataset.kind, date, load));
+    } catch (e) { list.innerHTML = errBox(e); }
+  };
+  $('#at-date', b).onchange = load; load();
+}
+let _camStream = null;
+function stopCam() { if (_camStream) { _camStream.getTracks().forEach((t) => t.stop()); _camStream = null; } }
+async function startCam(video) {
+  try { _camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false }); }
+  catch { _camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
+  video.srcObject = _camStream;
+}
+async function captureClock(staffId, name, kind, date, after) {
+  const b = modal(`
+    <div class="muted" style="margin-bottom:8px">${esc(name)} · <b>${kind === 'out' ? 'Clock out' : 'Clock in'}</b></div>
+    <div style="position:relative;background:#000;border-radius:12px;overflow:hidden;aspect-ratio:4/3">
+      <video id="cam" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover"></video>
+      <img id="shot" style="display:none;width:100%;height:100%;object-fit:cover"/></div>
+    <div class="row" style="gap:8px;margin-top:8px"><button class="btn ghost" id="cap-retake" style="display:none">Retake</button><button class="btn" id="cap-photo">📷 Capture photo</button></div>
+    <label class="fl" style="margin-top:12px">Signature</label>
+    <canvas id="sig" style="width:100%;height:120px;border:1.5px dashed var(--line);border-radius:10px;touch-action:none;background:#fff"></canvas>
+    <button class="btn ghost sm" id="sig-clear" style="margin-top:6px">Clear signature</button>
+    <div class="muted" id="cap-geo" style="font-size:12px;margin-top:8px">📍 locating…</div>
+    <button class="btn" id="cap-save" style="margin-top:10px" disabled>Save ${kind === 'out' ? 'clock-out' : 'clock-in'}</button>`,
+    { title: '📸 ' + (kind === 'out' ? 'Clock out' : 'Clock in') });
+  let photo = null, geo = null, signed = false;
+  const video = $('#cam', b), shot = $('#shot', b), saveBtn = $('#cap-save', b);
+  const updateSave = () => { saveBtn.disabled = !(photo && signed); };
+  try { await startCam(video); } catch { $('#cap-photo', b).disabled = true; toast('No camera available', 'err'); }
+  $('#cap-photo', b).onclick = () => {
+    const w = 480, h = Math.round(w * (video.videoHeight || 480) / (video.videoWidth || 640));
+    const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').drawImage(video, 0, 0, w, h);
+    photo = c.toDataURL('image/jpeg', 0.6); shot.src = photo; shot.style.display = 'block'; video.style.display = 'none'; stopCam();
+    $('#cap-photo', b).style.display = 'none'; $('#cap-retake', b).style.display = 'block'; updateSave();
+  };
+  $('#cap-retake', b).onclick = async () => {
+    photo = null; shot.style.display = 'none'; video.style.display = 'block';
+    $('#cap-photo', b).style.display = 'block'; $('#cap-retake', b).style.display = 'none';
+    try { await startCam(video); } catch {} updateSave();
+  };
+  // signature pad
+  const sig = $('#sig', b), ctx = sig.getContext('2d'); let drawing = false;
+  setTimeout(() => { const r = sig.getBoundingClientRect(); sig.width = r.width; sig.height = r.height; ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.strokeStyle = '#111'; }, 60);
+  const at = (e) => { const r = sig.getBoundingClientRect(); const p = e.touches ? e.touches[0] : e; return [p.clientX - r.left, p.clientY - r.top]; };
+  sig.addEventListener('pointerdown', (e) => { drawing = true; signed = true; const [x, y] = at(e); ctx.beginPath(); ctx.moveTo(x, y); e.preventDefault(); updateSave(); });
+  sig.addEventListener('pointermove', (e) => { if (!drawing) return; const [x, y] = at(e); ctx.lineTo(x, y); ctx.stroke(); e.preventDefault(); });
+  window.addEventListener('pointerup', () => { drawing = false; });
+  $('#sig-clear', b).onclick = () => { ctx.clearRect(0, 0, sig.width, sig.height); signed = false; updateSave(); };
+  // geolocation
+  if (navigator.geolocation) navigator.geolocation.getCurrentPosition(
+    (p) => { geo = { lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }; const g = $('#cap-geo', b); if (g) g.textContent = `📍 ${geo.lat.toFixed(5)}, ${geo.lng.toFixed(5)} (±${Math.round(geo.accuracy)}m)`; },
+    () => { const g = $('#cap-geo', b); if (g) g.textContent = '📍 location unavailable'; }, { enableHighAccuracy: true, timeout: 8000 });
+  else $('#cap-geo', b).textContent = '📍 no GPS on this device';
+  saveBtn.onclick = async () => {
+    saveBtn.disabled = true; saveBtn.innerHTML = '<span class="spin"></span>';
+    try {
+      await api(scoped('/attendance/clock'), { method: 'POST', body: { staff_id: staffId, kind, work_date: date, photo, signature: signed ? sig.toDataURL('image/png') : null, lat: geo && geo.lat, lng: geo && geo.lng, accuracy: geo && geo.accuracy } });
+      stopCam(); closeModal(); toast(`${name} clocked ${kind === 'out' ? 'out' : 'in'} ✓`, 'ok'); if (after) after();
+    } catch (e) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; toast(isNetErr(e) ? 'Need a connection to record attendance' : e.message, 'err', 5000); }
+  };
+}
 async function manageCatalog() {
   const products = await api(scoped('/products'));
   const b = modal(`<div class="row between" style="margin-bottom:8px"><b>Products</b>${isGMup() ? `<button class="btn ghost sm" id="addProd">＋ Product</button>` : ''}</div>

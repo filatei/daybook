@@ -73,15 +73,38 @@ function toast(msg, kind = 'info', ms = 3200) {
   el.className = `toast ${kind}`; el.innerHTML = `<span class="ti">${ic}</span><span>${esc(msg)}</span>`;
   $('#toasts').appendChild(el); setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, ms);
 }
+let modalOpen = false, modalPopGuard = false;
 function modal(html, { title, sub } = {}) {
   const root = $('#modalRoot');
   root.innerHTML = `<div class="modal-bg"><div class="modal"><div class="grip"></div>
+    <button class="modal-x" id="modalX" aria-label="Close" title="Close">✕</button>
     ${title ? `<h3>${esc(title)}</h3>` : ''}${sub ? `<p class="sub">${esc(sub)}</p>` : ''}
     <div id="modalBody">${html}</div></div></div>`;
   const bg = $('.modal-bg', root); bg.addEventListener('click', (e) => { if (e.target === bg) closeModal(); });
+  $('#modalX', root).addEventListener('click', () => closeModal());
+  modalOpen = true;
+  // Push one history entry for the modal layer so the phone Back button closes it
+  // (instead of leaving the app). Nested modal() calls reuse the same entry.
+  if (!(history.state && history.state.dbkModal)) history.pushState({ dbkModal: true }, '');
   return $('#modalBody', root);
 }
-function closeModal() { const m = $('.modal', $('#modalRoot')); if (m) { m.style.animation = 'sheet .25s reverse'; setTimeout(() => ($('#modalRoot').innerHTML = ''), 220); } }
+function closeModal(fromPop) {
+  if (!modalOpen) return;
+  modalOpen = false;
+  const m = $('.modal', $('#modalRoot'));
+  if (m) { m.style.animation = 'sheet .25s reverse'; setTimeout(() => ($('#modalRoot').innerHTML = ''), 220); }
+  if (!fromPop && history.state && history.state.dbkModal) { modalPopGuard = true; history.back(); }
+}
+// Phone/browser Back: close an open modal first; otherwise keep the user in the
+// app (route to dashboard) rather than letting Back exit the PWA.
+window.addEventListener('popstate', () => {
+  if (modalOpen) { closeModal(true); return; }
+  if (modalPopGuard) { modalPopGuard = false; return; }      // our own back() after a button-close
+  if (State.token && !$('#app').classList.contains('hidden')) {
+    if (State.tab && State.tab !== 'dashboard') go('dashboard');
+    history.pushState({ dbkAnchor: true }, '');               // re-anchor so Back never exits the app
+  }
+});
 function setErr(id, show) { const i = $('#' + id), e = $('#' + id + '-e'); if (i) i.classList.toggle('err', show); if (e) e.classList.toggle('show', show); }
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
@@ -132,6 +155,7 @@ async function boot() {
   updateTabs(); mountAssistant(); mountChat(); mountNotifications(); updatePill();
   syncOutbox(); syncChatOutbox(); pollNotifs();
   go(!State.online && internalPos() ? 'sell' : 'dashboard');  // offline → straight to selling
+  history.replaceState({ dbkAnchor: true }, '');              // base entry so Back stays inside the app
   handlePaymentReturn();                                      // confirm a Paystack return, if any
 }
 function applyBrand() {
@@ -488,23 +512,44 @@ async function adminBilling() {
     return;
   }
   const cur = (n) => '₦' + Number(n).toLocaleString('en-NG');
+  const auto = cfg.autorenew && cfg.autorenew.enabled;
   $('#bl-plans', b).innerHTML = `
-    <label class="fl">Billing period</label>
-    <select class="input" id="bl-months">${[[1, '1 month'], [3, '3 months'], [6, '6 months'], [12, '12 months']].map(([m, l]) => `<option value="${m}">${l}</option>`).join('')}</select>
+    ${auto ? `<div class="seg" id="bl-mode"><button class="seg-b on" data-mode="once">Pay once</button><button class="seg-b" data-mode="auto">🔁 Auto-renew</button></div>` : ''}
+    <label class="fl" id="bl-perlbl">Billing period</label>
+    <select class="input" id="bl-period"></select>
     <div style="height:10px"></div>
     ${cfg.plans.map((p) => `<div class="card" style="margin-bottom:10px"><div class="row between"><div><b>${esc(p.name)}</b><div class="muted" style="font-size:12.5px">${esc(p.blurb)}</div></div>
-      <div style="text-align:right"><div><b class="bl-price" data-price="${p.price}">${cur(p.price)}</b><span class="muted" style="font-size:12px">/mo</span></div>
+      <div style="text-align:right"><div><b class="bl-price" data-price="${p.price}">${cur(p.price)}</b><span class="muted bl-unit" style="font-size:12px">/mo</span></div>
       <button class="btn" data-plan="${p.code}" style="width:auto;padding:8px 14px;margin-top:6px">Pay</button></div></div></div>`).join('')}
-    <div class="muted" style="font-size:11.5px;text-align:center;margin-top:4px">You'll be redirected to ${esc((cfg.provider || 'the gateway'))}'s secure page to pay.</div>
-    ${cfg.subscription && cfg.subscription.enabled ? `<div class="card" style="margin-top:12px;background:var(--brand-l);border:none"><div class="row between"><div><b>Auto-renewing plan</b><div class="muted" style="font-size:12.5px">${esc(cfg.subscription.price_label)} · cancel anytime</div></div>
+    <div class="muted" id="bl-note" style="font-size:11.5px;text-align:center;margin-top:4px">You'll be redirected to ${esc((cfg.provider || 'the gateway'))}'s secure page to pay.</div>
+    ${cfg.subscription && cfg.subscription.enabled ? `<div class="card" style="margin-top:12px;background:var(--brand-l);border:none"><div class="row between"><div><b>International (USD)</b><div class="muted" style="font-size:12.5px">${esc(cfg.subscription.price_label)} · cancel anytime</div></div>
       <button class="btn ghost" id="bl-sub" style="width:auto;padding:8px 14px">Subscribe</button></div></div>` : ''}`;
-  const months = $('#bl-months', b);
-  const reprice = () => $$('.bl-price', b).forEach((el) => el.textContent = cur(+el.dataset.price * (+months.value)) );
-  months.onchange = reprice; reprice();
+  let mode = 'once';
+  const period = $('#bl-period', b), note = $('#bl-note', b);
+  const onceOpts = [[1, '1 month'], [3, '3 months'], [6, '6 months'], [12, '12 months']];
+  const autoOpts = [['monthly', 'Monthly'], ['annually', 'Annually']];
+  const render = () => {
+    period.innerHTML = (mode === 'auto' ? autoOpts : onceOpts).map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+    $('#bl-perlbl', b).textContent = mode === 'auto' ? 'Renews' : 'Billing period';
+    note.textContent = mode === 'auto'
+      ? 'Card is saved and charged automatically each period — cancel anytime.'
+      : `You'll be redirected to ${cfg.provider || 'the gateway'}'s secure page to pay.`;
+    reprice();
+  };
+  const reprice = () => {
+    const mult = mode === 'auto' ? (period.value === 'annually' ? 12 : 1) : (+period.value || 1);
+    $$('.bl-price', b).forEach((el) => el.textContent = cur(+el.dataset.price * mult));
+    $$('.bl-unit', b).forEach((el) => el.textContent = mode === 'auto' ? (period.value === 'annually' ? '/yr' : '/mo') : '');
+  };
+  period.onchange = reprice;
+  if (auto) $$('#bl-mode .seg-b', b).forEach((sb) => sb.onclick = () => { mode = sb.dataset.mode; $$('#bl-mode .seg-b', b).forEach((x) => x.classList.toggle('on', x === sb)); render(); });
+  render();
   $$('[data-plan]', b).forEach((btn) => btn.onclick = async () => {
     btn.disabled = true; const old = btn.textContent; btn.innerHTML = '<span class="spin"></span>';
     try {
-      const r = await api('/billing/checkout?tenant=' + State.tenant, { method: 'POST', body: { plan: btn.dataset.plan, months: +months.value } });
+      const r = mode === 'auto'
+        ? await api('/billing/autorenew?tenant=' + State.tenant, { method: 'POST', body: { plan: btn.dataset.plan, interval: period.value } })
+        : await api('/billing/checkout?tenant=' + State.tenant, { method: 'POST', body: { plan: btn.dataset.plan, months: +period.value } });
       window.location.href = r.authorization_url;   // hand off to the gateway's hosted checkout
     } catch (e) { btn.disabled = false; btn.textContent = old; toast(e.message, 'err'); }
   });

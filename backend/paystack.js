@@ -21,16 +21,25 @@ async function ps(path, { method = 'GET', body } = {}) {
 }
 
 // Create a hosted-checkout transaction. amountKobo in kobo. Channels mirror Otuburu.
-function initTransaction({ email, amountKobo, reference, currency, metadata, callback_url, label }) {
-  return ps('/transaction/initialize', {
-    method: 'POST',
-    body: {
-      email, amount: amountKobo, reference, currency: currency || 'NGN', metadata, callback_url,
-      channels: ['card', 'bank', 'ussd', 'bank_transfer'],
-      label: label || 'Daybook subscription',
-    },
-  });
+// When `plan` (a Paystack plan code) is set, Paystack creates an auto-renewing
+// subscription from this first charge.
+function initTransaction({ email, amountKobo, reference, currency, metadata, callback_url, label, plan }) {
+  const body = {
+    email, amount: amountKobo, reference, currency: currency || 'NGN', metadata, callback_url,
+    channels: ['card', 'bank', 'ussd', 'bank_transfer'],
+    label: label || 'Daybook subscription',
+  };
+  if (plan) body.plan = plan;               // → recurring subscription (amount comes from the plan)
+  return ps('/transaction/initialize', { method: 'POST', body });
 }
+
+// Create (or return) a recurring Plan. interval: 'monthly' | 'annually'.
+const createPlan = ({ name, amountKobo, interval }) =>
+  ps('/plan', { method: 'POST', body: { name, amount: amountKobo, interval, currency: 'NGN' } });
+
+// Disable a subscription (needs the subscription code + email token).
+const disableSubscription = ({ code, token }) =>
+  ps('/subscription/disable', { method: 'POST', body: { code, token } });
 
 const verifyTransaction = (reference) => ps(`/transaction/verify/${encodeURIComponent(reference)}`);
 
@@ -41,4 +50,4 @@ function verifySignature(rawBody, signature) {
   try { return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature)); } catch { return false; }
 }
 
-module.exports = { paystackEnabled, initTransaction, verifyTransaction, verifySignature, PUBLIC };
+module.exports = { paystackEnabled, initTransaction, createPlan, disableSubscription, verifyTransaction, verifySignature, PUBLIC };

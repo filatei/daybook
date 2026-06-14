@@ -339,6 +339,17 @@ function migrate(db) {
       raw         TEXT
     );
 
+    -- Cached gateway plan codes (Paystack Plans) keyed by planType_interval
+    CREATE TABLE IF NOT EXISTS payment_plans (
+      id          TEXT PRIMARY KEY,
+      code        TEXT UNIQUE NOT NULL,                    -- e.g. 'STANDARD_monthly'
+      provider    TEXT,
+      plan_code   TEXT,                                    -- the gateway's plan code
+      interval    TEXT,
+      amount      INTEGER,
+      created_at  INTEGER DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
       subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())
@@ -375,6 +386,9 @@ function migrate(db) {
   addCol('tenants', 'subscription_ends_at', 'INTEGER');
   addCol('tenants', 'subscription_renews_at', 'INTEGER');
   addCol('tenants', 'customer_portal_url', 'TEXT');
+  // Paystack auto-renew subscription (per tenant)
+  addCol('tenants', 'ps_customer_code', 'TEXT');
+  addCol('tenants', 'ps_subscription_code', 'TEXT');
 }
 
 module.exports = { getDb };

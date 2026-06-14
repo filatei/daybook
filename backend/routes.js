@@ -1057,7 +1057,47 @@ router.get('/billing/plans', requireAuth, (_req, res) => res.json({
   enabled: payments.paymentsEnabled(), provider: payments.activeProvider(), currency: payments.CURRENCY,
   public_key: payments.paystack.PUBLIC, plans: payments.planList(),
   subscription: { enabled: ls.subscriptionsEnabled(), price_label: ls.priceLabel() },
+  autorenew: { enabled: payments.paystack.paystackEnabled(), provider: 'paystack' }, // Paystack Plans (NGN auto-renew)
 }));
+
+// Resolve (lazily creating + caching) the Paystack plan code for planType×interval.
+async function ensurePaystackPlan(planType, interval) {
+  const meta = payments.PLANS[planType]; if (!meta) throw new Error('unknown plan');
+  const intv = interval === 'annually' ? 'annually' : 'monthly';
+  const key = `${planType}_${intv}`;
+  const cached = db.prepare('SELECT plan_code FROM payment_plans WHERE code=?').get(key);
+  if (cached && cached.plan_code) return { plan_code: cached.plan_code, interval: intv, amountKobo: (intv === 'annually' ? meta.price * 12 : meta.price) * 100 };
+  const amountKobo = (intv === 'annually' ? meta.price * 12 : meta.price) * 100;
+  const created = await payments.paystack.createPlan({ name: `Daybook ${meta.name} (${intv})`, amountKobo, interval: intv });
+  db.prepare('INSERT OR REPLACE INTO payment_plans (id,code,provider,plan_code,interval,amount) VALUES (?,?,?,?,?,?)')
+    .run(uuid(), key, 'paystack', created.plan_code, intv, amountKobo / 100);
+  return { plan_code: created.plan_code, interval: intv, amountKobo };
+}
+
+// Apply a Paystack subscription charge (first + every renewal) to its tenant. Idempotent on reference.
+function applySubscriptionCharge(data) {
+  const reference = data && data.reference; if (!reference) return;
+  if (db.prepare("SELECT 1 FROM payments WHERE reference=? AND status='SUCCESS'").get(reference)) return; // already applied
+  const meta = data.metadata || {};
+  const custCode = data.customer && data.customer.customer_code;
+  let t = meta.tenant_id ? tenantById(meta.tenant_id) : null;
+  if (!t && custCode) t = db.prepare('SELECT * FROM tenants WHERE ps_customer_code=?').get(custCode);
+  if (!t) return;
+  const interval = (data.plan && data.plan.interval) || meta.interval || 'monthly';
+  const now = Math.floor(Date.now() / 1000);
+  const add = (interval === 'annually' ? 12 : 1) * MONTH_SECS;
+  const base = Math.max(now, t.paid_until || 0);
+  const paid_until = base + add;
+  db.prepare(`UPDATE tenants SET paid_until=?, plan=COALESCE(?,plan), status='ACTIVE', subscription_status='active',
+      ps_customer_code=COALESCE(?,ps_customer_code), ps_subscription_code=COALESCE(?,ps_subscription_code), subscription_renews_at=? WHERE id=?`)
+    .run(paid_until, meta.plan || null, custCode || null, data.subscription_code || null, paid_until, t.id);
+  // Record the charge for reconciliation/idempotency.
+  db.prepare(`INSERT OR IGNORE INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,status,paid_at,raw)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(uuid(), t.id, reference, meta.plan || t.plan, interval === 'annually' ? 12 : 1,
+      Math.round((Number(data.amount) || 0) / 100), payments.CURRENCY, 'paystack', 'SUCCESS', now, JSON.stringify(data).slice(0, 8000));
+  audit(t.id, null, 'SUBSCRIBE_RENEW', 'tenant', t.id, { reference, interval, paid_until });
+  notify(t.id, tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription renewed', body: `Auto-renew · paid through ${new Date(paid_until * 1000).toLocaleDateString()}`, link: 'admin' });
+}
 
 // Start a one-off checkout (plan × months). Admin only. Routes to the active rail.
 router.post('/billing/checkout', requireAuth, needTenant('ADMIN'), async (req, res) => {
@@ -1111,6 +1151,29 @@ router.get('/billing/reconcile', requireAuth, needTenant('ADMIN'), async (req, r
   } catch (e) { return res.json({ status: 'pending' }); }
 });
 
+// ── Paystack auto-renew subscription (NGN Plans) ──────────────────────────────
+router.post('/billing/autorenew', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  if (!payments.paystack.paystackEnabled()) return res.status(503).json({ error: 'auto-renew not configured', code: 'no_paystack' });
+  const t = tenantById(req.ctx.tenant_id);
+  if (t.plan === 'OWNER') return res.status(400).json({ error: 'this workspace does not require a subscription' });
+  const b = req.body || {};
+  if (!payments.PLANS[b.plan]) return res.status(400).json({ error: 'unknown plan' });
+  const interval = b.interval === 'annually' ? 'annually' : 'monthly';
+  try {
+    const plan = await ensurePaystackPlan(b.plan, interval);
+    const reference = 'DBKSUB-' + t.id.slice(0, 8) + '-' + Date.now().toString(36) + '-' + uuid().slice(0, 6);
+    db.prepare('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,email,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(uuid(), t.id, reference, b.plan, interval === 'annually' ? 12 : 1, plan.amountKobo / 100, payments.CURRENCY, 'paystack', req.user.email, req.user.id);
+    const callback_url = (process.env.PAYMENT_CALLBACK_URL || process.env.PUBLIC_BASE_URL || '') + '/?pay=' + reference;
+    const data = await payments.paystack.initTransaction({ email: req.user.email, amountKobo: plan.amountKobo, reference,
+      plan: plan.plan_code, currency: payments.CURRENCY, callback_url, label: `Daybook ${b.plan} · auto-renew (${interval})`,
+      metadata: { tenant_id: t.id, plan: b.plan, interval, kind: 'subscription' } });
+    res.json({ authorization_url: data.authorization_url, reference, interval, plan: b.plan });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 // ── Lemon Squeezy recurring subscription (alternative to the one-off rails) ────
 router.post('/billing/subscribe', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!ls.subscriptionsEnabled()) return res.status(503).json({ error: 'subscriptions not configured', code: 'no_ls' });
@@ -1122,12 +1185,24 @@ router.post('/billing/subscribe', requireAuth, needTenant('ADMIN'), async (req, 
 });
 
 // ── Per-provider webhooks (signed; authoritative confirmation re-queries gateway)
-// Paystack — HMAC-SHA512 (x-paystack-signature)
+// Paystack — HMAC-SHA512 (x-paystack-signature). Handles one-off + subscription events.
 router.post(['/billing/webhook', '/billing/webhook/paystack'], async (req, res) => {
   if (!payments.paystack.verifySignature(req.rawBody, req.headers['x-paystack-signature'])) return res.status(401).json({ error: 'bad signature' });
   res.json({ received: true });
-  const ref = req.body && req.body.data && req.body.data.reference;
-  if (ref) confirmPayment(ref).catch((e) => console.warn('[billing] paystack webhook', ref, e.message));
+  const evt = req.body || {}; const data = evt.data || {};
+  try {
+    if (evt.event === 'charge.success') {
+      if (data.plan && data.plan.plan_code) applySubscriptionCharge(data);   // subscription first-charge / renewal
+      else if (data.reference) confirmPayment(data.reference).catch(() => {}); // one-off
+    } else if (evt.event === 'subscription.create' && data.subscription_code) {
+      const cust = data.customer && data.customer.customer_code;
+      const t = cust && db.prepare('SELECT id FROM tenants WHERE ps_customer_code=?').get(cust);
+      if (t) db.prepare("UPDATE tenants SET ps_subscription_code=?, subscription_status='active' WHERE id=?").run(data.subscription_code, t.id);
+    } else if ((evt.event === 'subscription.disable' || evt.event === 'subscription.not_renew') && data.subscription_code) {
+      const status = evt.event === 'subscription.disable' ? 'cancelled' : 'non-renewing';
+      db.prepare('UPDATE tenants SET subscription_status=? WHERE ps_subscription_code=?').run(status, data.subscription_code);
+    }
+  } catch (e) { console.warn('[billing] paystack webhook', e.message); }
 });
 // Monnify — HMAC-SHA512 of raw body with secret (monnify-signature); reference echoed as eventData.paymentReference
 router.post('/billing/webhook/monnify', (req, res) => {

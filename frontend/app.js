@@ -488,8 +488,10 @@ async function adminBilling() {
     <div style="height:10px"></div>
     ${cfg.plans.map((p) => `<div class="card" style="margin-bottom:10px"><div class="row between"><div><b>${esc(p.name)}</b><div class="muted" style="font-size:12.5px">${esc(p.blurb)}</div></div>
       <div style="text-align:right"><div><b class="bl-price" data-price="${p.price}">${cur(p.price)}</b><span class="muted" style="font-size:12px">/mo</span></div>
-      <button class="btn" data-plan="${p.code}" style="width:auto;padding:8px 14px;margin-top:6px">Subscribe</button></div></div></div>`).join('')}
-    <div class="muted" style="font-size:11.5px;text-align:center;margin-top:4px">You'll be redirected to Paystack's secure page to pay.</div>`;
+      <button class="btn" data-plan="${p.code}" style="width:auto;padding:8px 14px;margin-top:6px">Pay</button></div></div></div>`).join('')}
+    <div class="muted" style="font-size:11.5px;text-align:center;margin-top:4px">You'll be redirected to ${esc((cfg.provider || 'the gateway'))}'s secure page to pay.</div>
+    ${cfg.subscription && cfg.subscription.enabled ? `<div class="card" style="margin-top:12px;background:var(--brand-l);border:none"><div class="row between"><div><b>Auto-renewing plan</b><div class="muted" style="font-size:12.5px">${esc(cfg.subscription.price_label)} · cancel anytime</div></div>
+      <button class="btn ghost" id="bl-sub" style="width:auto;padding:8px 14px">Subscribe</button></div></div>` : ''}`;
   const months = $('#bl-months', b);
   const reprice = () => $$('.bl-price', b).forEach((el) => el.textContent = cur(+el.dataset.price * (+months.value)) );
   months.onchange = reprice; reprice();
@@ -497,13 +499,24 @@ async function adminBilling() {
     btn.disabled = true; const old = btn.textContent; btn.innerHTML = '<span class="spin"></span>';
     try {
       const r = await api('/billing/checkout?tenant=' + State.tenant, { method: 'POST', body: { plan: btn.dataset.plan, months: +months.value } });
-      window.location.href = r.authorization_url;   // hand off to Paystack's hosted checkout
+      window.location.href = r.authorization_url;   // hand off to the gateway's hosted checkout
     } catch (e) { btn.disabled = false; btn.textContent = old; toast(e.message, 'err'); }
   });
+  if ($('#bl-sub', b)) $('#bl-sub', b).onclick = async () => {
+    const btn = $('#bl-sub', b); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>';
+    try { const r = await api('/billing/subscribe?tenant=' + State.tenant, { method: 'POST', body: {} }); window.location.href = r.url; }
+    catch (e) { btn.disabled = false; btn.textContent = 'Subscribe'; toast(e.message, 'err'); }
+  };
 }
 // After returning from Paystack (?pay=REF), confirm the payment server-side.
 async function handlePaymentReturn() {
-  const u = new URL(location.href); const ref = u.searchParams.get('pay'); if (!ref) return;
+  const u = new URL(location.href);
+  if (u.searchParams.get('sub') === 'success') {     // Lemon Squeezy subscription return
+    u.searchParams.delete('sub'); history.replaceState({}, '', u.pathname + (u.search || ''));
+    toast('Subscription started 🎉 — it activates once confirmed', 'ok', 5000);
+    try { const me = await api('/auth/me'); State.tenants = me.tenants; buildTenantSelect(); applyBrand(); } catch {}
+  }
+  const ref = u.searchParams.get('pay'); if (!ref) return;
   u.searchParams.delete('pay'); history.replaceState({}, '', u.pathname + (u.search || ''));
   try {
     const r = await api('/billing/verify?reference=' + encodeURIComponent(ref) + (State.tenant ? '&tenant=' + State.tenant : ''));

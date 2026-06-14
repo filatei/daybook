@@ -366,6 +366,15 @@ function migrate(db) {
   addCol('tenants', 'paid_until', 'INTEGER');
   addCol('tenants', 'pos_source', 'TEXT');
   addCol('pos_sales', 'client_uid', 'TEXT');
+  // multi-provider payments (Monnify / Paystack) — provider + gateway reference
+  addCol('payments', 'provider', 'TEXT');
+  addCol('payments', 'provider_reference', 'TEXT');
+  // Lemon Squeezy recurring subscription (per tenant)
+  addCol('tenants', 'ls_subscription_id', 'TEXT');
+  addCol('tenants', 'subscription_status', 'TEXT');
+  addCol('tenants', 'subscription_ends_at', 'INTEGER');
+  addCol('tenants', 'subscription_renews_at', 'INTEGER');
+  addCol('tenants', 'customer_portal_url', 'TEXT');
 }
 
 module.exports = { getDb };

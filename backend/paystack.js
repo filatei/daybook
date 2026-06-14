@@ -1,30 +1,13 @@
-/* Paystack billing helper — checkout init, verify, webhook signature, pricing.
- * Test-ready: set PAYSTACK_SECRET_KEY (sk_test_… or sk_live_…) to switch on.
- * No money moves here — the customer pays on Paystack's hosted page; we only
- * initialise the transaction and react to the verified result. */
+/* Paystack gateway client (fallback NGN rail; primary is Monnify).
+ * Same env var names as every other Torama app. Charges in kobo. */
 'use strict';
 const crypto = require('crypto');
 
 const SECRET = process.env.PAYSTACK_SECRET_KEY || '';
 const PUBLIC = process.env.PAYSTACK_PUBLIC_KEY || '';
 const BASE = 'https://api.paystack.co';
-const CURRENCY = process.env.PAYSTACK_CURRENCY || 'NGN';
 
 const paystackEnabled = () => !!SECRET;
-
-// Monthly price per plan, in the major currency unit (₦). Override via env.
-const PLANS = {
-  STANDARD: { name: 'Standard', price: parseInt(process.env.PRICE_STANDARD || '15000', 10),
-    blurb: 'Daily reports, staff & generators, AI assistant' },
-  PRO: { name: 'Pro', price: parseInt(process.env.PRICE_PRO || '40000', 10),
-    blurb: 'Everything in Standard + in-app POS, receipts, payroll' },
-};
-const planList = () => Object.entries(PLANS).map(([code, p]) => ({ code, ...p, currency: CURRENCY }));
-const priceFor = (plan, months) => {
-  const p = PLANS[plan]; if (!p) return null;
-  const m = Math.max(1, Math.min(24, parseInt(months, 10) || 1));
-  return { naira: p.price * m, kobo: p.price * m * 100, months: m };
-};
 
 async function ps(path, { method = 'GET', body } = {}) {
   const res = await fetch(BASE + path, {
@@ -37,28 +20,25 @@ async function ps(path, { method = 'GET', body } = {}) {
   return json.data;
 }
 
-// Create a hosted-checkout transaction. Returns { authorization_url, reference }.
-// Channels mirror Otuburu's staking checkout so the payment experience is
-// identical across Torama apps.
-function initTransaction({ email, amountKobo, reference, metadata, callback_url, label }) {
+// Create a hosted-checkout transaction. amountKobo in kobo. Channels mirror Otuburu.
+function initTransaction({ email, amountKobo, reference, currency, metadata, callback_url, label }) {
   return ps('/transaction/initialize', {
     method: 'POST',
     body: {
-      email, amount: amountKobo, reference, currency: CURRENCY, metadata, callback_url,
+      email, amount: amountKobo, reference, currency: currency || 'NGN', metadata, callback_url,
       channels: ['card', 'bank', 'ussd', 'bank_transfer'],
       label: label || 'Daybook subscription',
     },
   });
 }
 
-// Confirm a transaction server-side (source of truth for "did they actually pay").
 const verifyTransaction = (reference) => ps(`/transaction/verify/${encodeURIComponent(reference)}`);
 
-// Validate the x-paystack-signature header (HMAC-SHA512 of the raw body, keyed by the secret).
+// Validate the x-paystack-signature header (HMAC-SHA512 of the raw body).
 function verifySignature(rawBody, signature) {
   if (!SECRET || !signature || !rawBody) return false;
   const digest = crypto.createHmac('sha512', SECRET).update(rawBody).digest('hex');
   try { return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature)); } catch { return false; }
 }
 
-module.exports = { paystackEnabled, PLANS, planList, priceFor, initTransaction, verifyTransaction, verifySignature, CURRENCY, PUBLIC };
+module.exports = { paystackEnabled, initTransaction, verifyTransaction, verifySignature, PUBLIC };

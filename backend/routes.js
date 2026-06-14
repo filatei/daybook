@@ -17,7 +17,8 @@ const { sendDailyReport, verifyConnection } = require('./mailer');
 const { callAI, callAgent, AIError, aiConfigured } = require('./aiClient');
 const sales = require('./salesSource');
 const scheduler = require('./scheduler');
-const paystack = require('./paystack');
+const payments = require('./payments');
+const ls = require('./lemonsqueezy');
 
 const router = express.Router();
 const db = getDb();
@@ -1022,7 +1023,7 @@ router.post('/tenants/:id/billing', requireAuth, (req, res) => {
   res.json(tenantById(t.id));
 });
 
-// ── SELF-SERVE SUBSCRIPTION (Paystack) ────────────────────────────────────────
+// ── SELF-SERVE SUBSCRIPTION (Monnify primary · Paystack fallback · Lemon Squeezy)
 const MONTH_SECS = 2629800; // ~30.44 days
 
 // Apply a verified successful payment to its tenant (idempotent on the reference).
@@ -1036,70 +1037,100 @@ function applyPaidPayment(reference, rawData) {
   const paid_until = base + (p.months || 1) * MONTH_SECS;
   db.prepare("UPDATE tenants SET paid_until=?, plan=?, status='ACTIVE' WHERE id=?").run(paid_until, p.plan || t.plan, t.id);
   db.prepare("UPDATE payments SET status='SUCCESS', paid_at=?, raw=? WHERE id=?").run(now, rawData ? JSON.stringify(rawData).slice(0, 8000) : p.raw, p.id);
-  audit(t.id, p.created_by, 'SUBSCRIBE', 'tenant', t.id, { reference, plan: p.plan, months: p.months, paid_until });
+  audit(t.id, p.created_by, 'SUBSCRIBE', 'tenant', t.id, { reference, provider: p.provider, plan: p.plan, months: p.months, paid_until });
   notify(t.id, tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription active', body: `${p.plan} · ${p.months} month(s)`, link: 'admin' });
   return { tenant: tenantById(t.id) };
 }
+// Confirm a one-off payment with its gateway and apply it. Shared by verify + webhooks.
+async function confirmPayment(reference) {
+  const p = db.prepare('SELECT * FROM payments WHERE reference=?').get(reference);
+  if (!p) return { status: 'unknown' };
+  if (p.status === 'SUCCESS') return { status: 'success', tenant: tenantById(p.tenant_id) };
+  const r = await payments.verifyGateway(p.provider, { reference: p.reference, providerReference: p.provider_reference, amountNaira: p.amount });
+  if (r.ok) { const a = applyPaidPayment(reference, r.data || { raw: r.raw }); return { status: 'success', tenant: a.tenant }; }
+  db.prepare("UPDATE payments SET status='FAILED' WHERE reference=? AND status<>'SUCCESS'").run(reference);
+  return { status: r.raw || 'pending' };
+}
 
-// Plans + whether self-serve checkout is available.
-router.get('/billing/plans', requireAuth, (_req, res) =>
-  res.json({ enabled: paystack.paystackEnabled(), currency: paystack.CURRENCY, public_key: paystack.PUBLIC, plans: paystack.planList() }));
+// Plans + which rails are available. Same shape every Torama app exposes.
+router.get('/billing/plans', requireAuth, (_req, res) => res.json({
+  enabled: payments.paymentsEnabled(), provider: payments.activeProvider(), currency: payments.CURRENCY,
+  public_key: payments.paystack.PUBLIC, plans: payments.planList(),
+  subscription: { enabled: ls.subscriptionsEnabled(), price_label: ls.priceLabel() },
+}));
 
-// Start a checkout. Admin of the tenant only. Returns Paystack's hosted-page URL.
+// Start a one-off checkout (plan × months). Admin only. Routes to the active rail.
 router.post('/billing/checkout', requireAuth, needTenant('ADMIN'), async (req, res) => {
-  if (!paystack.paystackEnabled()) return res.status(503).json({ error: 'billing not configured', code: 'no_paystack' });
+  const provider = payments.activeProvider();
+  if (!provider) return res.status(503).json({ error: 'billing not configured', code: 'no_provider' });
   const t = tenantById(req.ctx.tenant_id);
   if (t.plan === 'OWNER') return res.status(400).json({ error: 'this workspace does not require a subscription' });
   const b = req.body || {};
-  const price = paystack.priceFor(b.plan, b.months);
+  const price = payments.priceFor(b.plan, b.months);
   if (!price) return res.status(400).json({ error: 'unknown plan' });
   const reference = 'DBK-' + t.id.slice(0, 8) + '-' + Date.now().toString(36) + '-' + uuid().slice(0, 6);
   const email = req.user.email;
-  db.prepare('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,email,created_by) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(uuid(), t.id, reference, b.plan, price.months, price.naira, paystack.CURRENCY, email, req.user.id);
-  const callback_url = (process.env.PUBLIC_BASE_URL || '') + '/?pay=' + reference;
+  db.prepare('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,email,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .run(uuid(), t.id, reference, b.plan, price.months, price.naira, payments.CURRENCY, provider, email, req.user.id);
+  const callback_url = (process.env.PAYMENT_CALLBACK_URL || process.env.PUBLIC_BASE_URL || '') + '/?pay=' + reference;
   try {
-    const data = await paystack.initTransaction({ email, amountKobo: price.kobo, reference,
+    const g = await payments.initGateway(provider, { email, customerName: t.name, reference, price,
       metadata: { tenant_id: t.id, plan: b.plan, months: price.months, custom_fields: [{ display_name: 'Workspace', variable_name: 'workspace', value: t.name }] },
-      callback_url, label: `Daybook · ${t.name} (${b.plan})` });
-    res.json({ authorization_url: data.authorization_url, reference, amount: price.naira, currency: paystack.CURRENCY, months: price.months });
+      callback_url, label: `Daybook · ${t.name} (${b.plan})`, description: `Daybook ${b.plan} · ${price.months} month(s)` });
+    if (g.providerReference && g.providerReference !== reference)
+      db.prepare('UPDATE payments SET provider_reference=? WHERE reference=?').run(g.providerReference, reference);
+    res.json({ authorization_url: g.url, provider, reference, amount: price.naira, currency: payments.CURRENCY, months: price.months });
   } catch (e) {
     db.prepare("UPDATE payments SET status='FAILED' WHERE reference=?").run(reference);
     res.status(502).json({ error: e.message });
   }
 });
 
-// Verify a reference (called when the user returns from Paystack). Idempotent.
+// Verify a reference (called when the user returns from the gateway). Idempotent.
 router.get('/billing/verify', requireAuth, async (req, res) => {
   const reference = req.query.reference; if (!reference) return res.status(400).json({ error: 'reference required' });
   const p = db.prepare('SELECT * FROM payments WHERE reference=?').get(reference);
   if (!p) return res.status(404).json({ error: 'unknown reference' });
   if (!contextFor(req.user, p.tenant_id)) return res.status(403).json({ error: 'not your workspace' });
-  if (p.status === 'SUCCESS') return res.json({ status: 'success', tenant: tenantById(p.tenant_id) });
-  if (!paystack.paystackEnabled()) return res.status(503).json({ error: 'billing not configured' });
+  try { res.json(await confirmPayment(reference)); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ── Lemon Squeezy recurring subscription (alternative to the one-off rails) ────
+router.post('/billing/subscribe', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  if (!ls.subscriptionsEnabled()) return res.status(503).json({ error: 'subscriptions not configured', code: 'no_ls' });
   try {
-    const data = await paystack.verifyTransaction(reference);
-    if (data.status === 'success') { const r = applyPaidPayment(reference, data); return res.json({ status: 'success', tenant: r.tenant }); }
-    return res.json({ status: data.status || 'pending' });
+    const url = await ls.createCheckout({ tenantId: req.ctx.tenant_id, email: req.user.email });
+    if (!url) return res.status(502).json({ error: 'could not start subscription' });
+    res.json({ url });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// Paystack server-to-server webhook. No auth — verified by HMAC signature on the
-// raw body, then cross-verified against the Paystack API before we act (same
-// defence-in-depth as Otuburu's staking webhook).
-router.post('/billing/webhook', async (req, res) => {
-  const sig = req.headers['x-paystack-signature'];
-  if (!paystack.verifySignature(req.rawBody, sig)) return res.status(401).json({ error: 'bad signature' });
-  res.json({ received: true });                       // ack immediately; Paystack retries only on non-2xx
-  const evt = req.body || {};
-  if (evt.event === 'charge.success' && evt.data && evt.data.reference) {
-    const ref = evt.data.reference;
-    try {
-      const data = await paystack.verifyTransaction(ref);   // cross-check the gateway, don't trust the body alone
-      if (data && data.status === 'success') applyPaidPayment(ref, data);
-      else console.warn('[billing] webhook cross-verify not successful for', ref, data && data.status);
-    } catch (e) { console.warn('[billing] webhook verify failed for', ref, e.message); }
-  }
+// ── Per-provider webhooks (signed; authoritative confirmation re-queries gateway)
+// Paystack — HMAC-SHA512 (x-paystack-signature)
+router.post(['/billing/webhook', '/billing/webhook/paystack'], async (req, res) => {
+  if (!payments.paystack.verifySignature(req.rawBody, req.headers['x-paystack-signature'])) return res.status(401).json({ error: 'bad signature' });
+  res.json({ received: true });
+  const ref = req.body && req.body.data && req.body.data.reference;
+  if (ref) confirmPayment(ref).catch((e) => console.warn('[billing] paystack webhook', ref, e.message));
+});
+// Monnify — HMAC-SHA512 of raw body with secret (monnify-signature); reference echoed as eventData.paymentReference
+router.post('/billing/webhook/monnify', (req, res) => {
+  const secret = payments.monnify.SECRET_KEY;
+  if (!secret) return res.sendStatus(200);
+  const expected = require('crypto').createHmac('sha512', secret).update(req.rawBody || Buffer.from('')).digest('hex');
+  const provided = String(req.headers['monnify-signature'] || '');
+  let ok = false; try { ok = expected.length === provided.length && require('crypto').timingSafeEqual(Buffer.from(expected), Buffer.from(provided)); } catch {}
+  if (!ok) return res.status(401).json({ error: 'bad signature' });
+  res.sendStatus(200);
+  const ref = req.body && req.body.eventData && req.body.eventData.paymentReference;
+  if (ref) confirmPayment(ref).catch((e) => console.warn('[billing] monnify webhook', ref, e.message));
+});
+// Lemon Squeezy — HMAC-SHA256 (x-signature)
+router.post('/billing/webhook/lemonsqueezy', (req, res) => {
+  if (!ls.verifyWebhookSignature(req.rawBody, String(req.headers['x-signature'] || ''))) return res.status(401).json({ error: 'bad signature' });
+  res.sendStatus(200);
+  try { ls.applySubscriptionEvent(req.rawBody); } catch (e) { console.warn('[billing] ls webhook', e.message); }
 });
 
 module.exports = router;

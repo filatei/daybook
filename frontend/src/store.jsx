@@ -65,7 +65,8 @@ export function StoreProvider({ children }) {
     dispatch({ type: 'LOGOUT' });
   }, []);
 
-  const value = { ...state, login, setTenant, go, toast, openModal, closeModal, logout };
+  const setSites = useCallback((sites) => dispatch({ type: 'SET_SITES', sites }), []);
+  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, logout };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

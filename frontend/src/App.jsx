@@ -15,7 +15,7 @@ import Admin from './views/Admin.jsx';
 import Sell from './views/Sell.jsx';
 
 function Inner() {
-  const { user, token, tab, go, login, logout, toast, setTenant, tenant, tenants } = useStore();
+  const { user, tab, login, logout, toast, setTenant, setSites, tenant, tenants } = useStore();
   const [booting, setBooting] = useState(true);
 
   // ── restore session from localStorage ───────────────────────────────────────
@@ -35,11 +35,10 @@ function Inner() {
   }, []);
 
   // ── load sites whenever tenant changes ───────────────────────────────────────
-  const { setSites } = useStore();
   useEffect(() => {
     if (!tenant) return;
-    api(scoped('/sites')).then((s) => setSites?.(s)).catch(() => {});
-  }, [tenant]);
+    api(scoped('/sites')).then((s) => setSites(s)).catch(() => {});
+  }, [tenant, setSites]);
 
   // ── Google identity callback ─────────────────────────────────────────────────
   useEffect(() => {

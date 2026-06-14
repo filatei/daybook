@@ -76,7 +76,12 @@ docker ps --filter name=daybook --format 'table {{.Names}}\t{{.Status}}\t{{.Port
 echo
 curl -fsS https://daybook.torama.money/healthz && echo " ✓ public health OK" || echo " ✗ public health FAILED"
 SCRIPT
-chmod +x "${BIN}/daybook-deploy" "${BIN}/daybook-logs" "${BIN}/daybook-status"
+cat > "${BIN}/daybook-sales-test" <<'SCRIPT'
+#!/usr/bin/env bash
+# Verify the fido Mongo tunnel + read-only connection. Usage: daybook-sales-test [YYYY-MM-DD]
+exec docker exec daybook node backend/salestest.js "$@"
+SCRIPT
+chmod +x "${BIN}/daybook-deploy" "${BIN}/daybook-logs" "${BIN}/daybook-status" "${BIN}/daybook-sales-test"
 
 ok "Done. Next:"
 echo "   1. Point DNS A record ${DOMAIN} → this server"

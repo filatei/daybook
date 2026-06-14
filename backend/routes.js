@@ -389,7 +389,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
   const totals = await qone(`SELECT COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(total_cash),0) cash,
     COALESCE(SUM(total_deposit),0) deposit, COALESCE(SUM(diesel+expenses),0) costs, COUNT(*) reports FROM daily_reports r ${W}`, args);
   const bySite = await qall(`SELECT s.name site, COALESCE(SUM(r.total_sales),0) sales FROM daily_reports r JOIN sites s ON s.id=r.site_id ${W} GROUP BY s.id, s.name ORDER BY sales DESC LIMIT 20`, args);
-  const byDay = await qall(`SELECT r.report_date day, COALESCE(SUM(r.total_sales),0) sales FROM daily_reports r ${W} GROUP BY r.report_date ORDER BY r.report_date DESC LIMIT 30`, args);
+  const byDay = await qall(`SELECT r.report_date AS "day", COALESCE(SUM(r.total_sales),0) sales FROM daily_reports r ${W} GROUP BY r.report_date ORDER BY r.report_date DESC LIMIT 30`, args);
   res.json({ totals: { ...totals, reports: parseInt(totals.reports, 10) }, bySite, byDay: byDay.reverse() });
 });
 

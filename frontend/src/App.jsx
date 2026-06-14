@@ -1,0 +1,141 @@
+import React, { useEffect, useState, useCallback } from 'react';
+import { StoreProvider, useStore, useRole } from './store.jsx';
+import { api, scoped, setToken } from './api.js';
+import Nav from './components/Nav.jsx';
+import Modal from './components/Modal.jsx';
+import Toast from './components/Toast.jsx';
+
+// Views (lazy-ish — just plain imports for now; split later if bundle grows)
+import Dashboard from './views/Dashboard.jsx';
+import Reports from './views/Reports.jsx';
+import Staff from './views/Staff.jsx';
+import Expenses from './views/Expenses.jsx';
+import Documents from './views/Documents.jsx';
+import Admin from './views/Admin.jsx';
+import Sell from './views/Sell.jsx';
+
+function Inner() {
+  const { user, token, tab, go, login, logout, toast, setTenant, tenant, tenants } = useStore();
+  const [booting, setBooting] = useState(true);
+
+  // ── restore session from localStorage ───────────────────────────────────────
+  useEffect(() => {
+    const saved = localStorage.getItem('daybook_token');
+    if (!saved) { setBooting(false); return; }
+    setToken(saved);
+    api('/auth/me')
+      .then((me) => {
+        login(me.user, saved, me.tenants);
+        setBooting(false);
+      })
+      .catch(() => {
+        localStorage.removeItem('daybook_token');
+        setBooting(false);
+      });
+  }, []);
+
+  // ── load sites whenever tenant changes ───────────────────────────────────────
+  const { setSites } = useStore();
+  useEffect(() => {
+    if (!tenant) return;
+    api(scoped('/sites')).then((s) => setSites?.(s)).catch(() => {});
+  }, [tenant]);
+
+  // ── Google identity callback ─────────────────────────────────────────────────
+  useEffect(() => {
+    window.__daybookGoogleCb = async (resp) => {
+      try {
+        const data = await api('/auth/google', { method: 'POST', body: { credential: resp.credential } });
+        localStorage.setItem('daybook_token', data.token);
+        login(data.user, data.token, data.tenants);
+        toast('Welcome back!', 'ok');
+      } catch (e) {
+        toast(e.message || 'Sign-in failed', 'err');
+      }
+    };
+  }, []);
+
+  // ── dev login (non-production) ───────────────────────────────────────────────
+  const devLogin = useCallback(async () => {
+    try {
+      const data = await api('/auth/dev-login', { method: 'POST', body: {} });
+      localStorage.setItem('daybook_token', data.token);
+      login(data.user, data.token, data.tenants);
+    } catch (e) { toast(e.message, 'err'); }
+  }, []);
+
+  if (booting) return <div className="boot-screen">Loading…</div>;
+
+  if (!user) return <LoginScreen devLogin={devLogin} />;
+  if (!tenants.length) return <OnboardingScreen />;
+
+  return (
+    <>
+      <Nav />
+      <main className="main-content">
+        {tab === 'dashboard' && <Dashboard />}
+        {tab === 'reports'   && <Reports />}
+        {tab === 'staff'     && <Staff />}
+        {tab === 'expenses'  && <Expenses />}
+        {tab === 'documents' && <Documents />}
+        {tab === 'admin'     && <Admin />}
+        {tab === 'sell'      && <Sell />}
+      </main>
+      <Modal />
+      <Toast />
+    </>
+  );
+}
+
+function LoginScreen({ devLogin }) {
+  useEffect(() => {
+    const gid = window.__GOOGLE_CLIENT_ID__ || document.querySelector('meta[name="google-client-id"]')?.content;
+    if (!window.google?.accounts?.id || !gid) return;
+    window.google.accounts.id.initialize({
+      client_id: gid,
+      callback: (r) => window.__daybookGoogleCb?.(r),
+    });
+    window.google.accounts.id.renderButton(
+      document.getElementById('gsi-button'),
+      { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', width: 280 },
+    );
+  }, []);
+
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <div className="login-logo">📒</div>
+        <h1 className="login-title">Daybook</h1>
+        <p className="login-sub">Daily sales &amp; operations reporting</p>
+        <div id="gsi-button" style={{ minHeight: 44 }} />
+        {import.meta.env.DEV && (
+          <button className="btn btn-ghost" style={{ marginTop: 16 }} onClick={devLogin}>
+            Dev login
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OnboardingScreen() {
+  const { logout } = useStore();
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <div className="login-logo">📒</div>
+        <h2>No workspace yet</h2>
+        <p className="login-sub">Ask your administrator to invite you, or contact support.</p>
+        <button className="btn btn-ghost" onClick={logout}>Sign out</button>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <StoreProvider>
+      <Inner />
+    </StoreProvider>
+  );
+}

@@ -140,6 +140,40 @@ DAYBOOK_ALLOW_DEV_LOGIN=1 NODE_ENV=development npm run smoke   # end-to-end test
 > OAuth client. For automated tests, `DAYBOOK_ALLOW_DEV_LOGIN=1` enables a
 > password-less `/api/auth/dev-login` (disabled in production).
 
+## CI/CD (GitHub Actions)
+
+Two workflows on `github.com/filatei/daybook`:
+
+- **CI** (`ci.yml`) — lint + smoke test on every push/PR. No secrets needed.
+- **Deploy** (`deploy.yml`) — on push to `main`: builds a multi-arch image,
+  pushes it to GHCR, then SSHes in and runs `scripts/deploy.sh` (pull + restart).
+  The server's `/opt/daybook/backend/.env` stays the single source of truth — CI
+  never rewrites it.
+
+The Deploy job only runs when you opt in. Set it up once with the GitHub CLI:
+
+```bash
+cd ~/Documents/Claude/Projects/Daybook
+PORT=$(ssh -G otuburu | awk '/^port /{print $2}')
+KEY=$(ssh -G otuburu | awk '/^identityfile /{print $2; exit}')
+
+gh variable set DEPLOY_ON_PUSH --body true            # enables the deploy job
+gh secret set LINODE_HOST     --body 139.162.170.253
+gh secret set LINODE_USER     --body user1
+gh secret set LINODE_SSH_PORT --body "$PORT"
+gh secret set LINODE_SSH_KEY  < "${KEY/#\~/$HOME}"     # PRIVATE key file
+gh secret set GHCR_TOKEN      --body "<classic PAT with read:packages>"
+```
+
+> **GHCR_TOKEN must be a *classic* PAT with `read:packages`.** Fine-grained
+> tokens or missing-scope tokens fail with `denied: denied` at `docker login`.
+> Alternatively, make the `ghcr.io/filatei/daybook` package **public** (one click
+> in the package settings) and the server pulls without a token.
+
+Prerequisite: the server must already be provisioned once with
+`scripts/bootstrap.sh` (creates `/opt/daybook`, `.env`, the container). After
+that, `git push` (or `gh workflow run Deploy`) ships each change automatically.
+
 ## Backups
 
 Everything lives in the `daybookdata` Docker volume (`/data` inside the container):

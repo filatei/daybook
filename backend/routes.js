@@ -1096,6 +1096,21 @@ router.get('/billing/verify', requireAuth, async (req, res) => {
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// Reconcile the latest pending payment for a tenant by re-checking the gateway.
+// Safety net for a payer who closed the checkout tab before redirecting back —
+// called when the billing screen loads. Only credits on success; never fails a
+// payment (it may still complete later), mirroring VOTE's verify-on-view.
+router.get('/billing/reconcile', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  if (!payments.activeProvider()) return res.json({ status: 'none' });
+  const p = db.prepare("SELECT * FROM payments WHERE tenant_id=? AND status='PENDING' ORDER BY created_at DESC LIMIT 1").get(req.ctx.tenant_id);
+  if (!p) return res.json({ status: 'none' });
+  try {
+    const r = await payments.verifyGateway(p.provider, { reference: p.reference, providerReference: p.provider_reference, amountNaira: p.amount });
+    if (r.ok) { const a = applyPaidPayment(p.reference, r.data || { raw: r.raw }); return res.json({ status: 'success', tenant: a.tenant }); }
+    return res.json({ status: 'pending' });          // leave it pending; do not fail
+  } catch (e) { return res.json({ status: 'pending' }); }
+});
+
 // ── Lemon Squeezy recurring subscription (alternative to the one-off rails) ────
 router.post('/billing/subscribe', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!ls.subscriptionsEnabled()) return res.status(503).json({ error: 'subscriptions not configured', code: 'no_ls' });

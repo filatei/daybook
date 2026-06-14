@@ -471,6 +471,12 @@ async function viewAdmin() {
   if ($('#a-billing')) $('#a-billing').onclick = adminBilling;
 }
 async function adminBilling() {
+  // Safety net: re-check any pending payment with the gateway before showing status
+  // (covers a payer who closed the checkout tab before redirecting back).
+  try {
+    const rec = await api('/billing/reconcile?tenant=' + State.tenant);
+    if (rec.status === 'success') { toast('Payment confirmed — subscription active 🎉', 'ok', 4500); const me = await api('/auth/me'); State.tenants = me.tenants; buildTenantSelect(); applyBrand(); }
+  } catch { /* offline / transient — ignore */ }
   const t = active();
   const paidUntil = t.paid_until ? new Date(t.paid_until * 1000).toLocaleDateString() : null;
   const statusLine = paidUntil ? `Paid through <b>${paidUntil}</b>` : (t.trial_days_left != null ? `Free trial · <b>${t.trial_days_left} day(s)</b> left` : 'No active subscription');

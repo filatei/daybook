@@ -39,10 +39,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── 2. SSH deploy: copy infra, write .env from Secrets, restart ─────────────
+  # ── 2. SSH deploy: ship code + restart (server .env is source of truth) ─────
+  # Runs only when you opt in by setting repo variable DEPLOY_ON_PUSH=true AND
+  # the LINODE_* secrets. Until then it's skipped (no red failures) — deploy with
+  # scripts/bootstrap.sh instead.
   deploy:
     name: Deploy to server
     needs: build
+    if: ${{ vars.DEPLOY_ON_PUSH == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

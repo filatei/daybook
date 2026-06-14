@@ -53,22 +53,18 @@ sudo chmod 600 /home/daybooktunnel/.ssh/authorized_keys
 `restrict,permitopen="127.0.0.1:27017",port-forwarding` means this key can do
 **nothing** except forward to the local mongod — no shell, no other ports.
 
-### 2b. Create the read-only Mongo user
+### 2b. Mongo credentials
 
-Use fido's existing admin credentials (they're in `tor-pos-backend/.env`):
+fido's Mongo runs as a replica set on `127.0.0.1:27017` with auth on. The app
+authenticates as user **`user1`** (`authSource=admin`); its password is in fido's
+`tor-pos-backend/.env` on the `CONNECT_STR` line (the part between `user1:` and
+`@`). It is plain alphanumeric — no URL-encoding needed.
 
-```bash
-mongosh "mongodb://localhost:27017/?replicaSet=rs0" -u <adminUser> -p
-```
-```js
-use admin
-db.createUser({
-  user: "daybook_ro",
-  pwd:  "<STRONG_PASSWORD>",
-  roles: [ { role: "read", db: "fido_db" } ]
-})
-exit
-```
+**Chosen approach: reuse `user1` (read-only usage).** Daybook's connector only
+ever issues aggregation *reads*, never writes, so no separate Mongo user is
+required. (If you later want a dedicated read-only user, ask whoever set up Mongo
+to run `db.createUser({user:"daybook_ro", pwd:"…", roles:[{role:"read", db:"fido_db"}]})`
+as a Mongo admin, then swap it into `SALES_MONGO_URL`.)
 
 ### 2c. Confirm fido allows the Daybook server in on 2525
 
@@ -85,7 +81,8 @@ Set these (replace the password):
 
 ```ini
 FIDO_SSH_USER=daybooktunnel
-SALES_MONGO_URL=mongodb://daybook_ro:<STRONG_PASSWORD>@127.0.0.1:27018/fido_db?authSource=admin&directConnection=true&readPreference=secondaryPreferred
+# <user1_pw> = the password from fido tor-pos-backend/.env CONNECT_STR (alphanumeric, no encoding)
+SALES_MONGO_URL=mongodb://user1:<user1_pw>@127.0.0.1:27018/fido_db?authSource=admin&directConnection=true&readPreference=secondaryPreferred
 
 # optional — nightly snapshot of every site's sales into Daybook reports:
 SYNC_ENABLED=1

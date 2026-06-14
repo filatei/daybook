@@ -308,6 +308,20 @@ function migrate(db) {
       created_at  INTEGER DEFAULT (unixepoch())
     );
 
+    -- ── Feature requests (clients submit ideas; admins/superadmin triage) ──────
+    CREATE TABLE IF NOT EXISTS feature_requests (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT REFERENCES tenants(id),
+      user_id     TEXT REFERENCES users(id),
+      user_name   TEXT,
+      title       TEXT NOT NULL,
+      body        TEXT,
+      status      TEXT DEFAULT 'NEW',          -- NEW | PLANNED | IN_PROGRESS | DONE | DECLINED
+      votes       INTEGER DEFAULT 0,
+      created_at  INTEGER DEFAULT (unixepoch()),
+      updated_at  INTEGER DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
       subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())

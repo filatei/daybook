@@ -967,6 +967,46 @@ router.post('/notifications/read', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── FEATURE REQUESTS (any member submits; admins + superadmin triage) ─────────
+router.get('/feature-requests', requireAuth, (req, res) => {
+  if (req.user.is_superadmin && !requestedTenant(req)) {
+    return res.json(db.prepare(`SELECT f.*, t.name tenant_name FROM feature_requests f LEFT JOIN tenants t ON t.id=f.tenant_id ORDER BY f.created_at DESC LIMIT 200`).all());
+  }
+  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  res.json(db.prepare('SELECT * FROM feature_requests WHERE tenant_id=? ORDER BY created_at DESC LIMIT 200').all(s.ctx.tenant_id));
+});
+router.post('/feature-requests', requireAuth, (req, res) => {
+  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const b = req.body || {};
+  const title = (b.title || '').toString().trim();
+  if (!title) return res.status(400).json({ error: 'title required' });
+  const id = uuid(); const name = req.user.name || req.user.email;
+  db.prepare('INSERT INTO feature_requests (id,tenant_id,user_id,user_name,title,body) VALUES (?,?,?,?,?,?)')
+    .run(id, s.ctx.tenant_id, req.user.id, name, title.slice(0, 160), (b.body || '').toString().slice(0, 4000));
+  audit(s.ctx.tenant_id, req.user.id, 'CREATE', 'feature_request', id, { title });
+  // Notify the tenant's admins + every superadmin (the product team triages these).
+  const supers = db.prepare('SELECT id FROM users WHERE is_superadmin=1').all().map((u) => u.id);
+  notify(s.ctx.tenant_id, [...tenantUserIds(s.ctx.tenant_id, 'ADMIN'), ...supers].filter((u) => u !== req.user.id),
+    { type: 'feature', title: `Feature request — ${tenantById(s.ctx.tenant_id)?.name || ''}`, body: title.slice(0, 120), link: 'admin' });
+  res.status(201).json(db.prepare('SELECT * FROM feature_requests WHERE id=?').get(id));
+});
+router.patch('/feature-requests/:id', requireAuth, (req, res) => {
+  const fr = db.prepare('SELECT * FROM feature_requests WHERE id=?').get(req.params.id);
+  if (!fr) return res.status(404).json({ error: 'not found' });
+  const c = contextFor(req.user, fr.tenant_id);
+  const canTriage = req.user.is_superadmin || (c && atLeast(c.role, 'ADMIN'));
+  if (!canTriage) return res.status(403).json({ error: 'admins only' });
+  const b = req.body || {};
+  const ok = ['NEW', 'PLANNED', 'IN_PROGRESS', 'DONE', 'DECLINED'];
+  const status = ok.includes(b.status) ? b.status : fr.status;
+  db.prepare('UPDATE feature_requests SET status=?, updated_at=unixepoch() WHERE id=?').run(status, fr.id);
+  // Tell the requester when their idea changes state.
+  if (status !== fr.status && fr.user_id && fr.user_id !== req.user.id) {
+    notify(fr.tenant_id, [fr.user_id], { type: 'feature', title: `Your request is now ${status}`, body: fr.title, link: 'admin' });
+  }
+  res.json(db.prepare('SELECT * FROM feature_requests WHERE id=?').get(fr.id));
+});
+
 // ── BILLING (superadmin: mark a tenant paid / extend / reactivate) ────────────
 router.post('/tenants/:id/billing', requireAuth, (req, res) => {
   if (!req.user.is_superadmin) return res.status(403).json({ error: 'superadmin only' });

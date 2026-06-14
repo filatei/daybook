@@ -223,7 +223,9 @@ async function viewDashboard() {
       ${State.tenant ? `<div class="card tap" id="genCard" style="margin-top:14px"><div class="list-item" style="border:none;padding:0"><div class="av">🔌</div><div class="meta"><div class="t">Generators</div><div class="s">Diesel & maintenance logs</div></div><span>›</span></div></div>` : ''}
       <div class="card" style="margin-top:14px"><h3>Sales by site</h3><canvas id="cSite" height="190"></canvas></div>
       <div class="card"><h3>Daily sales trend</h3><canvas id="cDay" height="190"></canvas></div>
-      <div class="muted" style="text-align:center;font-size:12px">${t.reports} report(s) on record</div>`;
+      <div class="muted" style="text-align:center;font-size:12px">${t.reports} report(s) on record</div>
+      ${State.tenant ? `<div style="text-align:center;margin:14px 0 4px"><button class="btn ghost" id="dashIdea" style="width:auto;padding:9px 16px">💡 Suggest a feature</button></div>` : ''}`;
+    if ($('#dashIdea')) $('#dashIdea').onclick = () => openFeatureForm();
     if ($('#genCard')) $('#genCard').onclick = manageGenerators;
     drawBar('cSite', d.bySite.map((x) => x.site), d.bySite.map((x) => x.sales));
     drawLine('cDay', d.byDay.map((x) => x.day.slice(5)), d.byDay.map((x) => x.sales));
@@ -455,6 +457,7 @@ async function viewAdmin() {
     ${adminRow('a-recips', '✉️', 'Report recipients', 'Daily report email list')}
     ${posOn() ? adminRow('a-payroll', '💵', 'Payroll', 'Staff pay (from POS)') : ''}
     ${isAdmin() ? adminRow('a-settings', '🎨', 'Workspace settings', 'Name & branding') : ''}
+    ${adminRow('a-ideas', '💡', 'Feature requests', 'Suggest & track improvements')}
     ${State.user.is_superadmin ? adminRow('a-newco', '🏢', 'Create a company', 'Add another workspace') : ''}
     <div class="card" style="margin-top:10px"><div class="row between"><div><b>Signed in</b><div class="muted" style="font-size:13px">${esc(State.user.email)}${State.user.is_superadmin ? ' · Superadmin' : ' · ' + ROLE_LABEL[myRole()]}</div></div></div></div>`;
   $('#a-sites').onclick = adminSites; $('#a-recips').onclick = adminRecipients;
@@ -462,6 +465,46 @@ async function viewAdmin() {
   if ($('#a-settings')) $('#a-settings').onclick = adminSettings;
   if ($('#a-newco')) $('#a-newco').onclick = () => renderOnboarding(false);
   if ($('#a-payroll')) $('#a-payroll').onclick = adminPayroll;
+  if ($('#a-ideas')) $('#a-ideas').onclick = adminFeatures;
+}
+const FR_STATUS = ['NEW', 'PLANNED', 'IN_PROGRESS', 'DONE', 'DECLINED'];
+const FR_BADGE = { NEW: '#64748b', PLANNED: '#0ea5e9', IN_PROGRESS: '#d97706', DONE: '#16a34a', DECLINED: '#ef4444' };
+async function adminFeatures() {
+  const triage = isAdmin() || State.user.is_superadmin;
+  const b = modal(`<div id="fr-list"><div class="skel"></div></div>
+    <div style="height:10px"></div><button class="btn" id="fr-new">＋ Suggest a feature</button>`,
+    { title: '💡 Feature requests', sub: active() ? active().name : '' });
+  async function load() {
+    const list = $('#fr-list', b); list.innerHTML = '<div class="skel"></div>';
+    let rows; try { rows = await api(scoped('/feature-requests')); } catch (e) { list.innerHTML = errBox(e); return; }
+    if (!rows.length) { list.innerHTML = '<div class="muted" style="text-align:center;padding:18px">No requests yet — be the first 💡</div>'; return; }
+    list.innerHTML = rows.map((r) => `<div class="list-item" style="align-items:flex-start">
+      <div class="meta"><div class="t">${esc(r.title)}</div>
+        <div class="s">${r.tenant_name ? esc(r.tenant_name) + ' · ' : ''}${esc(r.user_name || '')} · ${timeAgo(r.created_at)}</div>
+        ${r.body ? `<div class="muted" style="font-size:12.5px;margin-top:3px">${esc(r.body)}</div>` : ''}</div>
+      ${triage
+        ? `<select class="fr-st input" data-id="${r.id}" style="width:auto;padding:5px 8px;font-size:12px">${FR_STATUS.map((s) => `<option ${s === r.status ? 'selected' : ''}>${s}</option>`).join('')}</select>`
+        : `<span class="pill-cat" style="background:${FR_BADGE[r.status] || '#64748b'}22;color:${FR_BADGE[r.status] || '#64748b'}">${r.status}</span>`}
+    </div>`).join('');
+    if (triage) $$('.fr-st', list).forEach((sel) => sel.onchange = async () => {
+      try { await api(scoped('/feature-requests/' + sel.dataset.id), { method: 'PATCH', body: { status: sel.value } }); toast('Updated', 'ok'); }
+      catch (e) { toast(e.message, 'err'); }
+    });
+  }
+  $('#fr-new', b).onclick = () => openFeatureForm(load);
+  load();
+}
+function openFeatureForm(after) {
+  const f = modal(`<form id="frf">
+    <label class="fl">What would you like?</label><input class="input" id="fr-t" placeholder="Short title" maxlength="160"/>
+    <label class="fl">Details (optional)</label><textarea class="input" id="fr-b" rows="4" placeholder="What problem would this solve?"></textarea>
+    <div style="height:14px"></div><button class="btn" type="submit">Send request</button></form>`, { title: '💡 Suggest a feature' });
+  $('#frf', f).onsubmit = async (e) => {
+    e.preventDefault();
+    const title = $('#fr-t', f).value.trim(); if (!title) { setErr('fr-t', true); return; }
+    try { await api(scoped('/feature-requests'), { method: 'POST', body: { title, body: $('#fr-b', f).value.trim() } }); closeModal(); toast('Thanks — request sent 💡', 'ok'); if (after) after(); }
+    catch (er) { toast(er.message, 'err'); }
+  };
 }
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 async function adminPayroll() {

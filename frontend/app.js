@@ -13,6 +13,7 @@ const State = {
   tab: 'dashboard', sites: [], charts: {},
 };
 const active = () => State.tenants.find((t) => t.id === State.tenant) || null;
+const posOn = () => !!(active() && active().pos);   // POS (live fido sales) only for linked tenants
 const myRole = () => (State.user?.is_superadmin && !active() ? 'ADMIN' : active()?.role) || null;
 const isAdmin = () => myRole() === 'ADMIN';
 const isGMup = () => ['ADMIN', 'GENERAL_MANAGER'].includes(myRole());
@@ -85,7 +86,6 @@ async function boot() {
   localStorage.setItem('daybook_tenant', State.tenant || '');
   applyBrand(); buildTenantSelect(); setupNav();
   $('.nav button[data-tab="admin"]').classList.toggle('hidden', !isGMup());
-  try { State.salesEnabled = (await api('/sales/status')).enabled; } catch { State.salesEnabled = false; }
   mountAssistant();
   go('dashboard');
 }
@@ -164,6 +164,7 @@ async function viewDashboard() {
     const d = await api(scoped('/dashboard')); const t = d.totals;
     const scopeLabel = State.tenant ? esc(active().name) : 'All companies';
     v.innerHTML = `
+      ${trialBanner()}
       <div class="section-title">${scopeLabel} · overview</div>
       <div class="stat-grid">
         <div class="stat accent"><div class="k">Total Sales</div><div class="v">${ngn(t.sales)}</div></div>
@@ -171,13 +172,15 @@ async function viewDashboard() {
         <div class="stat"><div class="k">Deposits</div><div class="v">${ngn(t.deposit)}</div></div>
         <div class="stat"><div class="k">Diesel + Costs</div><div class="v" style="color:var(--err)">${ngn(t.costs)}</div></div>
       </div>
-      ${State.salesEnabled && State.tenant ? `<div class="card" style="margin-top:14px">
+      ${posOn() ? `<div class="card" style="margin-top:14px">
         <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">⚡ Live POS sales</h3>
           <input class="input" id="posDate" type="date" value="${today()}" style="width:auto;padding:8px 10px"/></div>
         <div id="posList"><div class="skel"></div></div></div>` : ''}
+      ${State.tenant ? `<div class="card tap" id="genCard" style="margin-top:14px"><div class="list-item" style="border:none;padding:0"><div class="av">🔌</div><div class="meta"><div class="t">Generators</div><div class="s">Diesel & maintenance logs</div></div><span>›</span></div></div>` : ''}
       <div class="card" style="margin-top:14px"><h3>Sales by site</h3><canvas id="cSite" height="190"></canvas></div>
       <div class="card"><h3>Daily sales trend</h3><canvas id="cDay" height="190"></canvas></div>
       <div class="muted" style="text-align:center;font-size:12px">${t.reports} report(s) on record</div>`;
+    if ($('#genCard')) $('#genCard').onclick = manageGenerators;
     drawBar('cSite', d.bySite.map((x) => x.site), d.bySite.map((x) => x.sales));
     drawLine('cDay', d.byDay.map((x) => x.day.slice(5)), d.byDay.map((x) => x.sales));
     if ($('#posDate')) { $('#posDate').onchange = loadPosSales; loadPosSales(); }
@@ -272,7 +275,7 @@ function reportForm(existing) {
       ${isSiteMgr() ? '' : `<label class="fl">Site</label><select class="input" id="rf-site">${siteOpts}</select>`}
       <label class="fl">Report date</label><input class="input" id="rf-date" type="date" value="${ex.report_date || today()}"/>
       <div class="err-msg" id="rf-date-e">Date required</div>
-      ${State.salesEnabled ? `<button type="button" class="btn ghost sm" id="rf-pull" style="width:100%;margin-top:10px;color:#5b21b6;border-color:#ddd6fe">⤓ Pull from sales DB</button>` : ''}
+      ${posOn() ? `<button type="button" class="btn ghost sm" id="rf-pull" style="width:100%;margin-top:10px;color:#5b21b6;border-color:#ddd6fe">⤓ Pull from sales DB</button>` : ''}
       <div class="section-title" style="margin-left:0">Sales line items</div>
       <div id="rf-lines">${lines.map(lineRow).join('')}</div>
       <button type="button" class="btn ghost sm" id="rf-add">＋ Add item</button>
@@ -406,7 +409,7 @@ async function viewAdmin() {
     ${adminRow('a-sites', '📍', 'Sites', 'Manage locations')}
     ${isAdmin() ? adminRow('a-members', '👤', 'People', 'Admins, managers & site managers') : ''}
     ${adminRow('a-recips', '✉️', 'Report recipients', 'Daily report email list')}
-    ${State.salesEnabled ? adminRow('a-payroll', '💵', 'Payroll', 'Staff pay (from POS)') : ''}
+    ${posOn() ? adminRow('a-payroll', '💵', 'Payroll', 'Staff pay (from POS)') : ''}
     ${isAdmin() ? adminRow('a-settings', '🎨', 'Workspace settings', 'Name & branding') : ''}
     ${State.user.is_superadmin ? adminRow('a-newco', '🏢', 'Create a company', 'Add another workspace') : ''}
     <div class="card" style="margin-top:10px"><div class="row between"><div><b>Signed in</b><div class="muted" style="font-size:13px">${esc(State.user.email)}${State.user.is_superadmin ? ' · Superadmin' : ' · ' + ROLE_LABEL[myRole()]}</div></div></div></div>`;
@@ -523,7 +526,7 @@ async function viewStaff() {
     <div class="row" style="gap:8px;margin-bottom:10px">${siteSel}<input class="input" id="st-date" type="date" value="${staffDate}" style="flex:1"/></div>
     <div class="row between" style="margin-bottom:10px">
       <button class="btn ghost sm" id="st-summary">📊 Summary / export</button>
-      ${isGMup() && State.salesEnabled ? `<button class="btn ghost sm" id="st-import">⤓ Import from POS</button>` : ''}
+      ${isGMup() && posOn() ? `<button class="btn ghost sm" id="st-import">⤓ Import from POS</button>` : ''}
     </div>
     <div id="st-list"><div class="skel"></div><div class="skel"></div></div>`;
   if ($('#st-site')) $('#st-site').onchange = (e) => { staffSite = e.target.value; loadStaffGrid(); };
@@ -539,7 +542,7 @@ async function loadStaffGrid() {
     let tp = '/timesheets?date=' + staffDate; if (!isSiteMgr() && staffSite) tp += '&site=' + staffSite;
     const [staff, ts] = await Promise.all([api(scoped(sp)), api(scoped(tp))]);
     const byStaff = {}; ts.forEach((t) => { byStaff[t.staff_id] = t; });
-    if (!staff.length) { list.innerHTML = emptyBox('👷', 'No staff yet', 'Add staff below' + (isGMup() && State.salesEnabled ? ' or import from the POS.' : '.')) + addBtns(); bindStaffBtns(); return; }
+    if (!staff.length) { list.innerHTML = emptyBox('👷', 'No staff yet', 'Add staff below' + (isGMup() && posOn() ? ' or import from the POS.' : '.')) + addBtns(); bindStaffBtns(); return; }
     list.innerHTML = staff.map((s) => {
       const t = byStaff[s.id] || { present: 1 };
       return `<div class="card" data-sid="${s.id}" style="padding:12px">
@@ -606,6 +609,62 @@ async function staffSummary() {
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `timesheets-${$('#su-from', b).value}_${$('#su-to', b).value}.csv`; a.click(); URL.revokeObjectURL(a.href);
       toast('CSV downloaded', 'ok'); } catch (e) { toast(e.message, 'err'); }
   };
+}
+
+/* ── TRIAL BANNER ────────────────────────────────────── */
+function trialBanner() {
+  const t = active(); if (!t || t.plan === 'OWNER' || t.trial_days_left == null) return '';
+  const d = t.trial_days_left;
+  if (d > 3) return `<div class="card" style="background:#ecfdf5;border-color:#a7f3d0;margin-bottom:12px;padding:11px 14px"><div class="row between"><b style="color:#065f46">✨ Free trial · ${d} days left</b></div></div>`;
+  if (d > 0) return `<div class="card" style="background:#fffbeb;border-color:#fde68a;margin-bottom:12px;padding:11px 14px"><b style="color:#92400e">⏳ Trial ends in ${d} day(s)</b><div class="muted" style="font-size:12px">Subscribe to keep your data — contact Torama.</div></div>`;
+  return `<div class="card" style="background:#fef2f2;border-color:#fecaca;margin-bottom:12px;padding:11px 14px"><b style="color:#991b1b">Trial ended</b><div class="muted" style="font-size:12px">Workspace suspended. Contact Torama to reactivate before data is removed.</div></div>`;
+}
+
+/* ── GENERATORS ──────────────────────────────────────── */
+async function manageGenerators() {
+  await loadSites();
+  let gens = []; try { gens = await api(scoped('/generators')); } catch {}
+  const siteOpts = State.sites.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  const b = modal(`<div id="genList">${gens.length ? gens.map(genRow).join('') : '<div class="muted" style="padding:8px">No generators yet</div>'}</div>
+    <div style="height:12px"></div><button class="btn" id="addGen">＋ Register generator</button>`, { title: '🔌 Generators', sub: active()?.name });
+  $$('[data-gen]', b).forEach((el) => el.onclick = () => genDetail(el.dataset.gen, gens.find((g) => g.id === el.dataset.gen)));
+  $('#addGen', b).onclick = () => {
+    const f = modal(`<form id="gf">
+      ${isSiteMgr() ? '' : `<label class="fl">Site</label><select class="input" id="g-site">${siteOpts}</select>`}
+      <label class="fl">Name / label</label><input class="input" id="g-name" placeholder="e.g. 100KVA Cummins"/>
+      <label class="fl">Fuel</label><select class="input" id="g-fuel"><option>DIESEL</option><option>PETROL</option><option>GAS</option></select>
+      <div class="grid2"><div><label class="fl">Make / model</label><input class="input" id="g-model"/></div><div><label class="fl">Capacity (KVA)</label><input class="input" id="g-kva" type="number" inputmode="decimal"/></div></div>
+      <div class="grid2"><div><label class="fl">Serial no</label><input class="input" id="g-serial"/></div><div><label class="fl">Bought date</label><input class="input" id="g-date" type="date"/></div></div>
+      <label class="fl">Purchase cost (₦)</label><input class="input" id="g-cost" type="number" inputmode="decimal"/>
+      <div style="height:14px"></div><button class="btn" type="submit">Register</button></form>`, { title: 'Register generator' });
+    $('#gf', f).onsubmit = async (e) => { e.preventDefault(); const name = $('#g-name', f).value.trim(); if (!name) { toast('Name required', 'err'); return; }
+      try { await api('/generators?tenant=' + State.tenant, { method: 'POST', body: { name, fuel_type: $('#g-fuel', f).value, make_model: $('#g-model', f).value.trim(), capacity_kva: +$('#g-kva', f).value || null, serial_no: $('#g-serial', f).value.trim(), purchase_date: $('#g-date', f).value || null, purchase_cost: +$('#g-cost', f).value || null, site_id: isSiteMgr() ? active().site_id : ($('#g-site', f) && $('#g-site', f).value) } });
+        toast('Generator registered', 'ok'); closeModal(); manageGenerators(); } catch (er) { toast(er.message, 'err'); } };
+  };
+}
+const genRow = (g) => `<div class="card tap" data-gen="${g.id}" style="padding:12px"><div class="list-item" style="border:none;padding:0"><div class="av">🔌</div><div class="meta"><div class="t">${esc(g.name)}</div><div class="s">${esc(g.fuel_type)}${g.capacity_kva ? ' · ' + g.capacity_kva + 'KVA' : ''}${g.site_id ? ' · ' + esc(siteName(g.site_id)) : ''}</div></div><span>›</span></div></div>`;
+async function genDetail(id, g) {
+  let data = { logs: [], diesel_total: { litres: 0, cost: 0 } }; try { data = await api('/generators/' + id + '/logs'); } catch {}
+  const logs = data.logs.map((l) => `<div class="list-item"><div class="av">${l.type === 'DIESEL' ? '⛽' : l.type === 'MAINTENANCE' ? '🔧' : '📝'}</div>
+    <div class="meta"><div class="t">${l.type === 'DIESEL' ? (l.litres || 0) + ' L' : esc(l.detail || l.type)}</div>
+    <div class="s">${l.log_date}${l.cost ? ' · ' + ngn(l.cost) : ''}${l.runtime_hours ? ' · ' + l.runtime_hours + 'h' : ''}</div></div></div>`).join('') || '<div class="muted">No logs yet</div>';
+  const b = modal(`<div class="card" style="background:var(--brand-l);border:none"><div class="row between"><b>Total diesel</b><b>${data.diesel_total.litres || 0} L · ${ngn(data.diesel_total.cost || 0)}</b></div></div>
+    <div class="grid2" style="margin:10px 0"><button class="btn sm" id="logDiesel">⛽ Add diesel</button><button class="btn ghost sm" id="logMaint">🔧 Maintenance</button></div>
+    <div class="section-title" style="margin-left:0">History</div>${logs}`, { title: g.name, sub: `${g.fuel_type}${g.make_model ? ' · ' + g.make_model : ''}` });
+  $('#logDiesel', b).onclick = () => genLogForm(id, 'DIESEL');
+  $('#logMaint', b).onclick = () => genLogForm(id, 'MAINTENANCE');
+}
+function genLogForm(id, type) {
+  const isD = type === 'DIESEL';
+  const f = modal(`<form id="lf"><label class="fl">Date</label><input class="input" id="l-date" type="date" value="${today()}"/>
+    ${isD ? `<div class="grid2"><div><label class="fl">Litres</label><input class="input" id="l-litres" type="number" inputmode="decimal"/></div><div><label class="fl">Cost (₦)</label><input class="input" id="l-cost" type="number" inputmode="decimal"/></div></div><label class="fl">Runtime hours (optional)</label><input class="input" id="l-hours" type="number" inputmode="decimal"/>`
+    : `<label class="fl">Maintenance detail</label><textarea class="input" id="l-detail" rows="3" placeholder="What was done / required"></textarea><label class="fl">Cost (₦, optional)</label><input class="input" id="l-cost" type="number" inputmode="decimal"/>`}
+    <div style="height:14px"></div><button class="btn" type="submit">Save ${isD ? 'diesel' : 'maintenance'}</button></form>`, { title: isD ? 'Add diesel' : 'Maintenance' });
+  $('#lf', f).onsubmit = async (e) => { e.preventDefault();
+    const body = { type, log_date: $('#l-date', f).value, cost: +($('#l-cost', f) && $('#l-cost', f).value) || null };
+    if (isD) { body.litres = +$('#l-litres', f).value || null; body.runtime_hours = +($('#l-hours', f) && $('#l-hours', f).value) || null; } else { body.detail = $('#l-detail', f).value.trim(); }
+    try { await api('/generators/' + id + '/logs?tenant=' + State.tenant, { method: 'POST', body }); toast('Logged', 'ok'); closeModal(); }
+    catch (er) { toast(er.message, 'err'); } };
 }
 
 /* ── AI ASSISTANT ────────────────────────────────────── */

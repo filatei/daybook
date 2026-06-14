@@ -45,6 +45,9 @@ function migrate(db) {
       industry     TEXT,
       plan         TEXT CHECK(plan IN ('FREE','STANDARD','PRO','OWNER')) DEFAULT 'FREE',
       status       TEXT CHECK(status IN ('ACTIVE','SUSPENDED')) DEFAULT 'ACTIVE',
+      trial_ends_at INTEGER,                               -- end of 30-day trial (NULL = OWNER, no trial)
+      paid_until    INTEGER,                               -- subscription paid through (epoch)
+      pos_source    TEXT,                                  -- e.g. 'FIDO' → connect to fido POS; NULL = self-contained
       created_by   TEXT,
       created_at   INTEGER DEFAULT (unixepoch())
     );
@@ -184,6 +187,40 @@ function migrate(db) {
       UNIQUE(staff_id, work_date)
     );
 
+    -- GENERATORS — a power generator asset at a site (spec registered once)
+    CREATE TABLE IF NOT EXISTS generators (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+      site_id       TEXT REFERENCES sites(id),
+      name          TEXT NOT NULL,
+      fuel_type     TEXT CHECK(fuel_type IN ('DIESEL','PETROL','GAS')) DEFAULT 'DIESEL',
+      make_model    TEXT,
+      capacity_kva  REAL,
+      serial_no     TEXT,
+      purchase_date TEXT,
+      purchase_cost REAL,
+      status        TEXT CHECK(status IN ('ACTIVE','RETIRED')) DEFAULT 'ACTIVE',
+      notes         TEXT,
+      created_by    TEXT REFERENCES users(id),
+      created_at    INTEGER DEFAULT (unixepoch())
+    );
+
+    -- GENERATOR LOGS — periodic diesel fills + maintenance entries
+    CREATE TABLE IF NOT EXISTS generator_logs (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+      generator_id  TEXT NOT NULL REFERENCES generators(id) ON DELETE CASCADE,
+      site_id       TEXT REFERENCES sites(id),
+      log_date      TEXT NOT NULL,
+      type          TEXT CHECK(type IN ('DIESEL','MAINTENANCE','NOTE')) NOT NULL,
+      litres        REAL,                                  -- for DIESEL
+      cost          REAL,                                  -- diesel or maintenance cost
+      runtime_hours REAL,
+      detail        TEXT,                                  -- maintenance/note detail
+      recorded_by   TEXT REFERENCES users(id),
+      created_at    INTEGER DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
       subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())
@@ -198,7 +235,14 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_reports_td    ON daily_reports(tenant_id, report_date);
     CREATE INDEX IF NOT EXISTS idx_docs_tc       ON documents(tenant_id, category);
     CREATE INDEX IF NOT EXISTS idx_sites_tenant  ON sites(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_genlogs       ON generator_logs(tenant_id, generator_id, log_date);
   `);
+
+  // Idempotent column adds for databases created before these columns existed.
+  const addCol = (table, col, def) => { try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); } catch (e) { /* already exists */ } };
+  addCol('tenants', 'trial_ends_at', 'INTEGER');
+  addCol('tenants', 'paid_until', 'INTEGER');
+  addCol('tenants', 'pos_source', 'TEXT');
 }
 
 module.exports = { getDb };

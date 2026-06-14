@@ -16,10 +16,40 @@
  */
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { v4: uuid } = require('uuid');
 const { getDb } = require('./db');
 const sales = require('./salesSource');
 const { sendDailyReport } = require('./mailer');
+
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../data/uploads');
+
+// ── Trial enforcement: suspend lapsed trials; expunge long-suspended (opt-in) ──
+function expungeTenant(db, id) {
+  try { for (const d of db.prepare('SELECT stored_name FROM documents WHERE tenant_id=?').all(id)) { try { fs.unlinkSync(path.join(UPLOAD_DIR, d.stored_name)); } catch {} } } catch {}
+  for (const tbl of ['generator_logs', 'generators', 'timesheets', 'staff', 'documents', 'daily_reports', 'recipients', 'invites', 'memberships', 'sites', 'email_log', 'audit_log']) {
+    try { db.prepare(`DELETE FROM ${tbl} WHERE tenant_id=?`).run(id); } catch {}
+  }
+  db.prepare('DELETE FROM tenants WHERE id=?').run(id);
+}
+function enforceTrials() {
+  const db = getDb(); const now = Math.floor(Date.now() / 1000);
+  const out = { suspended: 0, expunged: 0 };
+  const paidOk = (t) => t.paid_until && t.paid_until >= now;
+  // Suspend active non-OWNER tenants whose trial has lapsed and aren't paid.
+  for (const t of db.prepare("SELECT * FROM tenants WHERE status='ACTIVE' AND plan!='OWNER' AND trial_ends_at IS NOT NULL").all()) {
+    if (t.trial_ends_at < now && !paidOk(t)) { db.prepare("UPDATE tenants SET status='SUSPENDED' WHERE id=?").run(t.id); out.suspended++; }
+  }
+  // Expunge long-suspended unpaid tenants — only when explicitly enabled.
+  if (process.env.EXPUNGE_ENABLED === '1') {
+    const cutoff = now - parseInt(process.env.EXPUNGE_GRACE_DAYS || '30', 10) * 86400;
+    for (const t of db.prepare("SELECT * FROM tenants WHERE status='SUSPENDED' AND plan!='OWNER'").all()) {
+      if ((t.trial_ends_at || 0) < cutoff && !paidOk(t)) { expungeTenant(db, t.id); out.expunged++; }
+    }
+  }
+  return out;
+}
 
 function paymentNote(data) {
   const pm = (data.payments || []).map((p) => `${p.method} ₦${Math.round(p.amount).toLocaleString()}`).join(' · ');
@@ -78,13 +108,22 @@ async function syncDay(dateStr, { email = false } = {}) {
 }
 
 function start() {
-  if (process.env.SYNC_ENABLED !== '1') { console.log('[sync] disabled (set SYNC_ENABLED=1 to enable nightly POS sync)'); return; }
   const cron = require('node-cron');
-  const expr = process.env.SYNC_CRON || '30 22 * * *';
   const tz = process.env.SYNC_TZ || 'Africa/Lagos';
+
+  // Daily trial enforcement (always on — suspension is safe; expunge is opt-in).
+  const tcron = process.env.TRIAL_CRON || '0 2 * * *';
+  if (cron.validate(tcron)) {
+    cron.schedule(tcron, () => { try { console.log('[trials]', JSON.stringify(enforceTrials())); } catch (e) { console.error('[trials] failed:', e.message); } }, { timezone: tz });
+    console.log(`[trials] enforcement scheduled '${tcron}' (${tz})${process.env.EXPUNGE_ENABLED === '1' ? ' + expunge' : ''}`);
+  }
+
+  // Nightly POS → Daybook sync (opt-in).
+  if (process.env.SYNC_ENABLED !== '1') { console.log('[sync] disabled (set SYNC_ENABLED=1 to enable nightly POS sync)'); return; }
+  const expr = process.env.SYNC_CRON || '30 22 * * *';
   if (!cron.validate(expr)) { console.error('[sync] invalid SYNC_CRON:', expr); return; }
   cron.schedule(expr, () => {
-    const d = new Date().toLocaleDateString('en-CA', { timeZone: tz }); // YYYY-MM-DD in business TZ
+    const d = new Date().toLocaleDateString('en-CA', { timeZone: tz });
     syncDay(d, { email: process.env.SYNC_EMAIL === '1' })
       .then((r) => console.log('[sync]', JSON.stringify(r)))
       .catch((e) => console.error('[sync] failed:', e.message));
@@ -92,4 +131,4 @@ function start() {
   console.log(`[sync] nightly POS sync scheduled '${expr}' (${tz})${process.env.SYNC_EMAIL === '1' ? ' + email' : ''}`);
 }
 
-module.exports = { syncDay, start };
+module.exports = { syncDay, enforceTrials, start };

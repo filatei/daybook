@@ -55,10 +55,13 @@ function ensureSeed() {
     let tenant = db.prepare('SELECT * FROM tenants WHERE slug=?').get(t.slug);
     if (!tenant) {
       const id = uuid();
-      db.prepare('INSERT INTO tenants (id,slug,name,brand_color,industry,plan) VALUES (?,?,?,?,?,?)')
-        .run(id, t.slug, t.name, t.brand_color, t.industry, 'OWNER');
+      db.prepare('INSERT INTO tenants (id,slug,name,brand_color,industry,plan,pos_source) VALUES (?,?,?,?,?,?,?)')
+        .run(id, t.slug, t.name, t.brand_color, t.industry, 'OWNER', 'FIDO');
       tenant = { id };
       console.log(`[seed] tenant ${t.name}`);
+    } else if (!tenant.pos_source) {
+      // backfill existing Fido/Fiafia rows with the POS link + owner plan
+      db.prepare("UPDATE tenants SET pos_source='FIDO', plan='OWNER' WHERE id=?").run(tenant.id);
     }
     for (const s of t.sites) {
       if (!db.prepare('SELECT 1 FROM sites WHERE tenant_id=? AND code=?').get(tenant.id, s.code))

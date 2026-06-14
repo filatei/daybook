@@ -43,6 +43,9 @@ function audit(tenant_id, user_id, action, entity, entity_id, meta) {
 }
 const tenantById = (id) => db.prepare('SELECT * FROM tenants WHERE id=?').get(id);
 const siteById = (id) => db.prepare('SELECT * FROM sites WHERE id=?').get(id);
+// POS (live fido sales) is available only to tenants explicitly linked to it
+// (pos_source set, i.e. Fido/Fiafia) AND when the Mongo source is configured.
+const posEnabled = (tenant_id) => sales.salesEnabled() && !!tenant_id && !!(tenantById(tenant_id) || {}).pos_source;
 const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, photo_url: u.photo_url, is_superadmin: !!u.is_superadmin });
 
 // Resolve the access scope for list/read endpoints.
@@ -127,9 +130,11 @@ router.post('/onboard', requireAuth, (req, res) => {
   if (!name) return res.status(400).json({ error: 'company name required' });
   const realSlug = (slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || ('co-' + uuid().slice(0, 6));
   const id = uuid();
+  const trialDays = parseInt(process.env.TRIAL_DAYS || '30', 10);
+  const trialEnds = Math.floor(Date.now() / 1000) + trialDays * 86400;
   try {
-    db.prepare('INSERT INTO tenants (id,slug,name,brand_color,currency,industry,plan,created_by) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id, realSlug, name, brand_color || '#0ea5e9', currency || 'NGN', industry || null, 'FREE', req.user.id);
+    db.prepare('INSERT INTO tenants (id,slug,name,brand_color,currency,industry,plan,trial_ends_at,created_by) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(id, realSlug, name, brand_color || '#0ea5e9', currency || 'NGN', industry || null, 'FREE', trialEnds, req.user.id);
   } catch { return res.status(409).json({ error: 'a workspace with that name/slug already exists' }); }
   db.prepare('INSERT INTO memberships (id,user_id,tenant_id,role) VALUES (?,?,?,?)').run(uuid(), req.user.id, id, 'ADMIN');
   // seed a default recipient (the creator) so reports can be emailed immediately
@@ -447,7 +452,7 @@ ${JSON.stringify(ctx)}`;
   // When the live POS sales DB is reachable, give the assistant a tool to query
   // it directly — so it can answer ANY question about the real sales data.
   const sc = scope(req);
-  const posReady = sales.salesEnabled() && sc.ctx; // a specific tenant is selected
+  const posReady = sc.ctx && posEnabled(sc.ctx.tenant_id); // POS-linked tenant selected
   try {
     if (posReady) {
       // Site codes this caller may see (tenant isolation; site managers → own site only).
@@ -494,15 +499,15 @@ function siteAccess(req, siteId) {
   return { site, ctx: c };
 }
 
-router.get('/sales/status', requireAuth, (_req, res) => res.json({ enabled: sales.salesEnabled() }));
+router.get('/sales/status', requireAuth, (req, res) => res.json({ enabled: posEnabled(requestedTenant(req)) }));
 
 // Pull a site+date's real sales from the POS for the manager to review/confirm.
 router.get('/sales/preview', requireAuth, async (req, res) => {
-  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
   const { site: siteId, date } = req.query;
   if (!siteId || !date) return res.status(400).json({ error: 'site and date required' });
   const a = siteAccess(req, siteId);
   if (!a) return res.status(403).json({ error: 'no access to this site' });
+  if (!posEnabled(a.site.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   try {
     const s = await sales.getSales(a.site.code, date);
     let expenses = { total: 0, count: 0 };
@@ -513,9 +518,9 @@ router.get('/sales/preview', requireAuth, async (req, res) => {
 
 // All of a company's sites' POS sales for ANY single date (live aggregate).
 router.get('/sales/by-date', requireAuth, async (req, res) => {
-  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
   const s = scope(req);
   if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+  if (!posEnabled(s.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   const date = req.query.date;
   if (!date) return res.status(400).json({ error: 'date required' });
   let codes = db.prepare('SELECT code FROM sites WHERE tenant_id=?').all(s.ctx.tenant_id).map((x) => x.code);
@@ -529,7 +534,7 @@ router.get('/sales/by-date', requireAuth, async (req, res) => {
 
 // Read computed payroll (already finalised in the POS) for a month/year.
 router.get('/payroll', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
-  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
+  if (!posEnabled(req.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   try {
     const rows = await sales.getPayroll({ month: req.query.month, year: req.query.year, siteName: req.query.site });
     res.json(rows);
@@ -543,7 +548,7 @@ router.post('/ai/analyse', requireAuth, async (req, res) => {
   const a = siteAccess(req, siteId);
   if (!a) return res.status(403).json({ error: 'no access to this site' });
   let posData = null;
-  if (sales.salesEnabled()) { try { posData = await sales.getSales(a.site.code, date); } catch {} }
+  if (posEnabled(a.site.tenant_id)) { try { posData = await sales.getSales(a.site.code, date); } catch {} }
   const existing = db.prepare('SELECT * FROM daily_reports WHERE tenant_id=? AND site_id=? AND report_date=?').get(a.site.tenant_id, siteId, date);
   const system = `You are Daybook Assistant analysing one site's day for a water business. Be concise and practical: state total sales, cash vs transfer split, top products, and flag anything unusual (a payment method missing, a product with zero sales, sales far from typical). End with one recommended action. Money is Naira (₦).`;
   const payload = { site: a.site.name, date, pos_sales: posData, saved_report: existing ? { total_sales: existing.total_sales, total_cash: existing.total_cash, total_deposit: existing.total_deposit, diesel: existing.diesel, expenses: existing.expenses, balance: existing.balance } : null };
@@ -583,7 +588,7 @@ router.patch('/staff/:id', requireAuth, needTenant('SITE_MANAGER'), (req, res) =
 });
 // Import staff from the POS `peoples` collection, matched to this tenant's sites.
 router.post('/staff/import', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
-  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
+  if (!posEnabled(req.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   try {
     const people = await sales.getStaff();
     const sites = db.prepare('SELECT * FROM sites WHERE tenant_id=?').all(req.ctx.tenant_id);
@@ -662,6 +667,73 @@ router.post('/sync/run', requireAuth, async (req, res) => {
   const date = (req.body && req.body.date) || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SYNC_TZ || 'Africa/Lagos' });
   try { res.json(await scheduler.syncDay(date, { email: !!(req.body && req.body.email) })); }
   catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ── GENERATORS (per-site power assets + diesel/maintenance logs) ──────────────
+router.get('/generators', requireAuth, (req, res) => {
+  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  if (s.all) return res.json(db.prepare('SELECT * FROM generators ORDER BY name').all());
+  if (s.ctx.role === 'SITE_MANAGER') return res.json(db.prepare("SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name").all(s.ctx.tenant_id, s.ctx.site_id));
+  const site = req.query.site;
+  res.json(site ? db.prepare('SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name').all(s.ctx.tenant_id, site)
+    : db.prepare('SELECT * FROM generators WHERE tenant_id=? ORDER BY name').all(s.ctx.tenant_id));
+});
+router.post('/generators', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const b = req.body || {};
+  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
+  if (!b.name) return res.status(400).json({ error: 'name required' });
+  if (site_id) { const site = siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' }); }
+  const id = uuid();
+  db.prepare(`INSERT INTO generators (id,tenant_id,site_id,name,fuel_type,make_model,capacity_kva,serial_no,purchase_date,purchase_cost,notes,created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, req.ctx.tenant_id, site_id, b.name.trim(), (b.fuel_type || 'DIESEL'), b.make_model || null, b.capacity_kva || null, b.serial_no || null, b.purchase_date || null, b.purchase_cost || null, b.notes || null, req.user.id);
+  audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'generator', id, { name: b.name });
+  res.status(201).json(db.prepare('SELECT * FROM generators WHERE id=?').get(id));
+});
+router.patch('/generators/:id', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const g = db.prepare('SELECT * FROM generators WHERE id=?').get(req.params.id);
+  if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (req.ctx.role === 'SITE_MANAGER' && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const f = req.body || {};
+  db.prepare(`UPDATE generators SET name=?,fuel_type=?,make_model=?,capacity_kva=?,serial_no=?,purchase_date=?,purchase_cost=?,status=?,notes=? WHERE id=?`)
+    .run(f.name ?? g.name, f.fuel_type ?? g.fuel_type, f.make_model ?? g.make_model, f.capacity_kva ?? g.capacity_kva, f.serial_no ?? g.serial_no, f.purchase_date ?? g.purchase_date, f.purchase_cost ?? g.purchase_cost, f.status ?? g.status, f.notes ?? g.notes, g.id);
+  res.json(db.prepare('SELECT * FROM generators WHERE id=?').get(g.id));
+});
+router.get('/generators/:id/logs', requireAuth, (req, res) => {
+  const g = db.prepare('SELECT * FROM generators WHERE id=?').get(req.params.id);
+  if (!g) return res.status(404).json({ error: 'not found' });
+  const c = contextFor(req.user, g.tenant_id);
+  if (!c || (c.role === 'SITE_MANAGER' && g.site_id && g.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
+  const { from, to } = req.query; const where = ['generator_id=?'], args = [g.id];
+  if (from) { where.push('log_date>=?'); args.push(from); }
+  if (to) { where.push('log_date<=?'); args.push(to); }
+  const logs = db.prepare(`SELECT * FROM generator_logs WHERE ${where.join(' AND ')} ORDER BY log_date DESC, created_at DESC LIMIT 500`).all(...args);
+  const tot = db.prepare(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE ${where.join(' AND ')} AND type='DIESEL'`).get(...args);
+  res.json({ logs, diesel_total: tot });
+});
+router.post('/generators/:id/logs', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+  const g = db.prepare('SELECT * FROM generators WHERE id=?').get(req.params.id);
+  if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (req.ctx.role === 'SITE_MANAGER' && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const b = req.body || {}; const type = (b.type || 'DIESEL').toUpperCase();
+  if (!['DIESEL', 'MAINTENANCE', 'NOTE'].includes(type)) return res.status(400).json({ error: 'invalid type' });
+  const id = uuid();
+  db.prepare(`INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,cost,runtime_hours,detail,recorded_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, g.tenant_id, g.id, g.site_id, b.log_date || new Date().toISOString().slice(0, 10), type, b.litres ?? null, b.cost ?? null, b.runtime_hours ?? null, b.detail || null, req.user.id);
+  res.status(201).json(db.prepare('SELECT * FROM generator_logs WHERE id=?').get(id));
+});
+
+// ── BILLING (superadmin: mark a tenant paid / extend / reactivate) ────────────
+router.post('/tenants/:id/billing', requireAuth, (req, res) => {
+  if (!req.user.is_superadmin) return res.status(403).json({ error: 'superadmin only' });
+  const t = tenantById(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const now = Math.floor(Date.now() / 1000);
+  const paid_until = b.paid_until ? parseInt(b.paid_until, 10)
+    : (b.months ? now + parseInt(b.months, 10) * 2629800 : t.paid_until);
+  db.prepare('UPDATE tenants SET paid_until=?, plan=?, status=? WHERE id=?')
+    .run(paid_until, b.plan ?? t.plan, b.status ?? 'ACTIVE', t.id);
+  audit(t.id, req.user.id, 'BILLING', 'tenant', t.id, { paid_until, plan: b.plan });
+  res.json(tenantById(t.id));
 });
 
 module.exports = router;

@@ -428,12 +428,28 @@ function aiContext(req) {
   return { company: t.name, currency: t.currency, role: s.ctx.role, totals, sites, recent_reports: recent };
 }
 
+// AI tool: read this tenant's own Daybook data (tenant- and site-scoped).
+function daybookMetric(tenant_id, ctx, input) {
+  const args = { tenant: tenant_id }; let siteF = '';
+  if (ctx.role === 'SITE_MANAGER') { siteF = ' AND site_id=@site'; args.site = ctx.site_id; }
+  const dateW = (col) => { let w = ''; if (input.from) { w += ` AND ${col}>=@from`; args.from = input.from; } if (input.to) { w += ` AND ${col}<=@to`; args.to = input.to; } return w; };
+  switch (input.metric) {
+    case 'reports': return { metric: 'reports', ...db.prepare(`SELECT COUNT(*) reports, COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(diesel+expenses),0) costs, COALESCE(SUM(balance),0) balance FROM daily_reports WHERE tenant_id=@tenant${siteF}${dateW('report_date')}`).get(args) };
+    case 'staff': return { metric: 'staff', count: db.prepare(`SELECT COUNT(*) c FROM staff WHERE tenant_id=@tenant AND status='ACTIVE'${siteF}`).get(args).c };
+    case 'staff_hours': return { metric: 'staff_hours', ...db.prepare(`SELECT COUNT(CASE WHEN present=1 THEN 1 END) days_present, COALESCE(SUM(hours),0) hours, COALESCE(SUM(bags_bagged),0) bags_bagged, COALESCE(SUM(bags_loaded),0) bags_loaded FROM timesheets WHERE tenant_id=@tenant${siteF}${dateW('work_date')}`).get(args) };
+    case 'generators': return { metric: 'generators', rows: db.prepare(`SELECT name, fuel_type, capacity_kva FROM generators WHERE tenant_id=@tenant${siteF} ORDER BY name`).all(args) };
+    case 'generator_diesel': return { metric: 'generator_diesel', ...db.prepare(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE tenant_id=@tenant AND type='DIESEL'${siteF}${dateW('log_date')}`).get(args) };
+    case 'pos_sales': return { metric: 'pos_sales', ...db.prepare(`SELECT COUNT(*) sales, COALESCE(SUM(total),0) total FROM pos_sales WHERE tenant_id=@tenant${siteF}${dateW('sale_date')}`).get(args) };
+    default: return { error: 'unknown metric' };
+  }
+}
+
 router.post('/ai/chat', requireAuth, async (req, res) => {
   const question = (req.body && req.body.message || '').toString().slice(0, 4000);
   if (!question.trim()) return res.status(400).json({ error: 'message required' });
   const history = Array.isArray(req.body.history) ? req.body.history.slice(-8) : [];
   const ctx = aiContext(req);
-  const system = `You are Daybook Assistant, a concise analyst inside Daybook — a daily sales & operations reporting app for businesses (e.g. water producers Fido Water and Fiafia Water). Help the signed-in user understand and act on THEIR company's reporting data.
+  const system = `You are Daybook Assistant, a concise analyst inside Daybook — a daily sales & operations app for multi-site businesses. Help the signed-in user understand and act on THEIR OWN company's data only.
 
 Rules:
 - Use only the data provided in CONTEXT below; if something isn't there, say you don't have it yet rather than inventing numbers.
@@ -449,35 +465,47 @@ ${JSON.stringify(ctx)}`;
     { role: 'user', content: question },
   ];
 
-  // When the live POS sales DB is reachable, give the assistant a tool to query
-  // it directly — so it can answer ANY question about the real sales data.
+  // Give the assistant tools to read live data so it can answer ANY question —
+  // the fido Mongo (sales, expenses, payroll, staff) for POS-linked companies,
+  // plus this tenant's own Daybook data (reports, staff hours, generators, POS).
   const sc = scope(req);
-  const posReady = sc.ctx && posEnabled(sc.ctx.tenant_id); // POS-linked tenant selected
   try {
-    if (posReady) {
-      // Site codes this caller may see (tenant isolation; site managers → own site only).
-      let allowed = db.prepare('SELECT code FROM sites WHERE tenant_id=?').all(sc.ctx.tenant_id).map((s) => s.code);
+    if (sc.ctx) {
+      const tenant_id = sc.ctx.tenant_id;
+      let allowed = db.prepare('SELECT code FROM sites WHERE tenant_id=?').all(tenant_id).map((s) => s.code);
       if (sc.ctx.role === 'SITE_MANAGER') { const me = siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
-      const sysT = system + `\n\nTODAY is ${new Date().toISOString().slice(0, 10)}. You can call query_pos_sales to read the LIVE point-of-sale database for this company. You may ONLY see these sites: ${allowed.join(', ')}. Always pass a date range. Summarise results in ₦ with clear takeaways.`;
-      const tools = [{
-        name: 'query_pos_sales',
-        description: 'Query the live POS sales database for this company. Returns aggregated real sales (amount in ₦, order counts, product qty). Use for any question about sales by site, payment method, product, or day over a date range.',
-        input_schema: { type: 'object', properties: {
-          from: { type: 'string', description: 'start date YYYY-MM-DD' },
-          to: { type: 'string', description: 'end date YYYY-MM-DD inclusive' },
-          site: { type: 'string', description: 'optional single site code, e.g. SWALI' },
-          groupBy: { type: 'string', enum: ['site', 'paymentMethod', 'product', 'day'], description: 'how to group results' },
-        }, required: ['from', 'to'] },
-      }];
-      const runTool = async (name, input) => {
-        if (name !== 'query_pos_sales') return { error: 'unknown tool' };
-        let sitesArg = allowed;
-        if (input.site) { const want = String(input.site).toUpperCase().replace(/[^A-Z0-9]/g, ''); sitesArg = allowed.filter((c) => c.toUpperCase().replace(/[^A-Z0-9]/g, '') === want); if (!sitesArg.length) return { error: 'site not accessible', allowed }; }
-        if (!sitesArg.length) return { error: 'no accessible sites' };
-        const rows = await sales.query({ from: input.from, to: input.to, sites: sitesArg, groupBy: input.groupBy || 'site' });
-        return { groupBy: input.groupBy || 'site', from: input.from, to: input.to, rows };
+      const pos = posEnabled(tenant_id);
+      const resolveSites = (input) => {
+        if (!input.site) return allowed;
+        const want = String(input.site).toUpperCase().replace(/[^A-Z0-9]/g, '');
+        return allowed.filter((c) => c.toUpperCase().replace(/[^A-Z0-9]/g, '') === want);
       };
-      const reply = await callAgent({ system: sysT, messages, tools, runTool, maxTokens: 900 });
+      const tools = [{
+        name: 'query_daybook',
+        description: "Read this company's data entered in the Daybook app. metric: reports (daily report totals), staff (headcount), staff_hours (timesheet days/hours), generators (list), generator_diesel (litres+cost), pos_sales (in-app sales). Optional from/to date range (YYYY-MM-DD).",
+        input_schema: { type: 'object', properties: {
+          metric: { type: 'string', enum: ['reports', 'staff', 'staff_hours', 'generators', 'generator_diesel', 'pos_sales'] },
+          from: { type: 'string' }, to: { type: 'string' },
+        }, required: ['metric'] },
+      }];
+      if (pos) tools.push(
+        { name: 'query_pos_sales', description: 'Live POS sales (fido) aggregated by site/paymentMethod/product/day over a date range. Amounts in ₦.', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, site: { type: 'string' }, groupBy: { type: 'string', enum: ['site', 'paymentMethod', 'product', 'day'] } }, required: ['from', 'to'] } },
+        { name: 'query_expenses', description: 'Live expenses (fido) aggregated by site/category/day over a date range. Amounts in ₦.', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, site: { type: 'string' }, groupBy: { type: 'string', enum: ['site', 'category', 'day'] } }, required: ['from', 'to'] } },
+        { name: 'query_payroll', description: 'Live payroll (fido) gross/net totals by site for a given month + year.', input_schema: { type: 'object', properties: { month: { type: 'string', description: 'full month name e.g. May' }, year: { type: 'string' }, site: { type: 'string' } }, required: ['month', 'year'] } },
+        { name: 'count_staff', description: 'Live active staff headcount (fido) by site.', input_schema: { type: 'object', properties: { site: { type: 'string' } } } },
+      );
+      const sysT = system + `\n\nTODAY is ${new Date().toISOString().slice(0, 10)}. ${pos ? `This company is connected to its LIVE operational database — use query_pos_sales, query_expenses, query_payroll, count_staff for real figures. You may only see these sites: ${allowed.join(', ')}.` : ''} Use query_daybook for anything entered in this Daybook app. Call tools as needed (you can call several) and answer precisely in ₦.`;
+      const runTool = async (name, input) => {
+        try {
+          if (name === 'query_pos_sales') { const s = resolveSites(input); return s.length ? { rows: await sales.query({ from: input.from, to: input.to, sites: s, groupBy: input.groupBy || 'site' }) } : { error: 'site not accessible', allowed }; }
+          if (name === 'query_expenses') { const s = resolveSites(input); return s.length ? { rows: await sales.queryExpenses({ from: input.from, to: input.to, sites: s, groupBy: input.groupBy || 'site' }) } : { error: 'site not accessible', allowed }; }
+          if (name === 'query_payroll') { const s = resolveSites(input); return { rows: await sales.payrollAgg({ month: input.month, year: input.year, sites: s }) }; }
+          if (name === 'count_staff') { const s = resolveSites(input); return { rows: await sales.staffCount({ sites: s }) }; }
+          if (name === 'query_daybook') return daybookMetric(tenant_id, sc.ctx, input);
+          return { error: 'unknown tool' };
+        } catch (e) { return { error: e.message }; }
+      };
+      const reply = await callAgent({ system: sysT, messages, tools, runTool, maxTokens: 1000 });
       return res.json({ reply });
     }
     const reply = await callAI({ system, messages, maxTokens: 700 });

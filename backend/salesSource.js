@@ -144,9 +144,50 @@ async function query({ from, to, site, sites, groupBy = 'site' }) {
   return rows.map((r) => ({ group: r._id, amount: Math.round(r.amount || 0), orders: r.orders, qty: r.qty }));
 }
 
+/** Aggregate fido `expenses` by site / category / day for a date range. */
+async function queryExpenses({ from, to, site, sites, groupBy = 'site' }) {
+  const db = await getDb();
+  const start = new Date(`${from}T00:00:00.000${TZ()}`);
+  const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
+  const match = { createdAt: { $gte: start, $lt: end } };
+  if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
+  else if (site) match.site = siteRegex(site);
+  const key = groupBy === 'category' ? '$category'
+    : groupBy === 'day' ? { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: TZ() } } : '$site';
+  const rows = await db.collection('expenses').aggregate([
+    { $match: match }, { $group: { _id: key, amount: { $sum: num('$txn_amount') }, count: { $sum: 1 } } },
+    { $sort: { amount: -1 } }, { $limit: 100 },
+  ]).toArray();
+  return rows.map((r) => ({ group: r._id || 'UNKNOWN', amount: Math.round(r.amount || 0), count: r.count }));
+}
+
+/** Aggregate fido `payrolls` (gross/net) by site for a month+year. */
+async function payrollAgg({ month, year, sites }) {
+  const db = await getDb();
+  const q = {}; if (month) q.month = month; if (year) q.year = String(year);
+  const pipeline = [{ $match: q },
+    { $lookup: { from: 'sites', localField: 'site', foreignField: '_id', as: 's' } },
+    { $addFields: { siteName: { $arrayElemAt: ['$s.name', 0] } } }];
+  if (Array.isArray(sites) && sites.length) pipeline.push({ $match: { $or: sites.map((c) => ({ siteName: siteRegex(c) })) } });
+  pipeline.push({ $group: { _id: '$siteName', gross: { $sum: num('$grossPay') }, net: { $sum: num('$netPay') }, staff: { $sum: 1 } } }, { $sort: { net: -1 } }, { $limit: 100 });
+  const rows = await db.collection('payrolls').aggregate(pipeline).toArray();
+  return rows.map((r) => ({ group: r._id || 'UNKNOWN', gross: Math.round(r.gross || 0), net: Math.round(r.net || 0), staff: r.staff }));
+}
+
+/** Count active staff (`peoples`) by site. */
+async function staffCount({ sites }) {
+  const db = await getDb();
+  const pipeline = [{ $lookup: { from: 'sites', localField: 'site', foreignField: '_id', as: 's' } },
+    { $addFields: { siteName: { $arrayElemAt: ['$s.name', 0] } } }];
+  if (Array.isArray(sites) && sites.length) pipeline.push({ $match: { $or: sites.map((c) => ({ siteName: siteRegex(c) })) } });
+  pipeline.push({ $group: { _id: '$siteName', count: { $sum: 1 } } }, { $sort: { count: -1 } });
+  const rows = await db.collection('peoples').aggregate(pipeline).toArray();
+  return rows.map((r) => ({ group: r._id || 'UNKNOWN', count: r.count }));
+}
+
 async function ping() {
   try { await getDb(); await _client.db(DBNAME()).command({ ping: 1 }); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getSales, getExpensesTotal, getPayroll, getStaff, query, ping };
+module.exports = { salesEnabled, getSales, getExpensesTotal, getPayroll, getStaff, query, queryExpenses, payrollAgg, staffCount, ping };

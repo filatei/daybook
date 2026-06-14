@@ -63,9 +63,9 @@ async function syncOutbox() {
   const synced = o.length - remain.length; setOutbox(remain);
   if (synced > 0) { toast(`Synced ${synced} offline sale(s)`, 'ok'); if (State.tab === 'sell') viewSell(); }
 }
-window.addEventListener('online', () => { State.online = true; updatePill(); syncOutbox(); });
+window.addEventListener('online', () => { State.online = true; updatePill(); syncOutbox(); syncChatOutbox(); });
 window.addEventListener('offline', () => { State.online = false; updatePill(); });
-setInterval(() => { if (State.online) syncOutbox(); }, 30000);
+setInterval(() => { if (State.online) { syncOutbox(); syncChatOutbox(); } }, 30000);
 
 /* ── Toast / Modal / Validation (shared) ─────────────── */
 function toast(msg, kind = 'info', ms = 3200) {
@@ -108,6 +108,9 @@ function logout() {
   State.token = null; localStorage.removeItem('daybook_token'); aiHistory = [];
   if (window.google?.accounts?.id) google.accounts.id.disableAutoSelect();
   const f = $('#aiFab'); if (f) f.remove();
+  clearInterval(State.notifTimer); clearInterval(ChatUI.timer); ChatUI.open = false;
+  ['#chatBtn', '#bellBtn'].forEach((s) => { const b = $(s); if (b) b.classList.add('hidden'); });
+  const bb = $('#bellBadge'); if (bb) bb.classList.add('hidden');
   $('#app').classList.add('hidden'); $('#login').classList.remove('hidden');
 }
 
@@ -126,8 +129,8 @@ async function boot() {
   if (!State.tenant || !State.tenants.find((t) => t.id === State.tenant)) State.tenant = State.tenants[0].id;
   localStorage.setItem('daybook_tenant', State.tenant || '');
   applyBrand(); buildTenantSelect(); setupNav();
-  updateTabs(); mountAssistant(); updatePill();
-  syncOutbox();
+  updateTabs(); mountAssistant(); mountChat(); mountNotifications(); updatePill();
+  syncOutbox(); syncChatOutbox(); pollNotifs();
   go(!State.online && internalPos() ? 'sell' : 'dashboard');  // offline → straight to selling
 }
 function applyBrand() {
@@ -889,6 +892,118 @@ async function openAssistant() {
   setTimeout(() => input.focus(), 100);
 }
 const renderBub = (m) => `<div class="bub ${m.role === 'user' ? 'u' : 'a'}">${esc(m.content)}</div>`;
+
+/* ── STAFF CHAT (WhatsApp-style; team + per-site channels; offline-safe) ────── */
+const chatOutbox = () => lsGet('daybook_chat_outbox', []);
+const setChatOutbox = (a) => localStorage.setItem('daybook_chat_outbox', JSON.stringify(a));
+const ChatUI = { open: false, channel: 'team', last: 0, timer: null, channels: [] };
+function mountChat() {
+  const btn = $('#chatBtn'); if (!btn) return;
+  btn.classList.remove('hidden'); btn.onclick = openChat;
+}
+async function openChat() {
+  try { ChatUI.channels = await api(scoped('/chat/channels')); }
+  catch { ChatUI.channels = [{ id: 'team', name: 'Team', kind: 'team' }]; }
+  if (!ChatUI.channels.find((c) => c.id === ChatUI.channel)) ChatUI.channel = 'team';
+  const chips = ChatUI.channels.map((c) => `<button class="chan ${c.id === ChatUI.channel ? 'on' : ''}" data-ch="${c.id}">${c.kind === 'team' ? '👥 ' : '📍 '}${esc(c.name)}</button>`).join('');
+  const body = modal(`
+    <div class="chan-bar" id="chanBar">${chips}</div>
+    <div class="chat" id="cChat"><div class="skel"></div></div>
+    <div class="chat-input">
+      <textarea class="input" id="cInput" rows="1" placeholder="Message your team…"></textarea>
+      <button class="btn" id="cSend" style="width:auto;padding:13px 16px">➤</button>
+    </div>`, { title: '💬 Staff chat', sub: active() ? active().name : '' });
+  ChatUI.open = true; ChatUI.last = 0;
+  const chat = $('#cChat', body), input = $('#cInput', body), send = $('#cSend', body);
+  $$('#chanBar .chan', body).forEach((c) => c.onclick = () => { ChatUI.channel = c.dataset.ch; ChatUI.last = 0; chat.innerHTML = ''; $$('#chanBar .chan', body).forEach((x) => x.classList.toggle('on', x === c)); loadChat(chat, true); });
+  const grow = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 110) + 'px'; };
+  input.oninput = grow;
+  const submit = async () => {
+    const txt = input.value.trim(); if (!txt) return;
+    input.value = ''; grow();
+    const cuid = uuidv4();
+    appendMsgs(chat, [{ id: cuid, body: txt, user_name: 'You', mine: true, created_at: Math.floor(Date.now() / 1000), pending: true }]);
+    const payload = { channel: ChatUI.channel, body: txt, client_uid: cuid };
+    try {
+      await api(scoped('/chat/messages'), { method: 'POST', body: payload });
+      const node = $(`[data-mid="${cuid}"]`, chat); if (node) node.classList.remove('pending');
+    } catch (e) {
+      if (isNetErr(e)) { const o = chatOutbox(); o.push({ tenant: State.tenant, payload }); setChatOutbox(o); toast('Offline — message queued', 'info'); }
+      else toast(e.message, 'err');
+    }
+  };
+  send.onclick = submit;
+  input.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } };
+  chat.innerHTML = '';
+  await loadChat(chat, true);
+  // Mark chat notifications read on open.
+  api(scoped('/notifications/read'), { method: 'POST', body: {} }).then(pollNotifs).catch(() => {});
+  clearInterval(ChatUI.timer);
+  ChatUI.timer = setInterval(() => { if (ChatUI.open && $('#cChat')) loadChat($('#cChat'), false); else { clearInterval(ChatUI.timer); ChatUI.open = false; } }, 4000);
+  setTimeout(() => input.focus(), 100);
+}
+async function loadChat(chat, scrollEnd) {
+  try {
+    const msgs = await api(scoped(`/chat/messages?channel=${encodeURIComponent(ChatUI.channel)}&since=${ChatUI.last}`));
+    if (msgs.length) { ChatUI.last = msgs[msgs.length - 1].created_at; appendMsgs(chat, msgs, scrollEnd); }
+    else if (scrollEnd && !chat.children.length) chat.innerHTML = '<div class="bub sys">No messages yet — say hello 👋</div>';
+  } catch (e) { if (scrollEnd && !chat.children.length) chat.innerHTML = `<div class="bub sys">${esc(isNetErr(e) ? 'Offline — messages will load when reconnected.' : e.message)}</div>`; }
+}
+const clock = (s) => new Date((s || 0) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+function appendMsgs(chat, msgs, scrollEnd = true) {
+  const sys = $('.bub.sys', chat); if (sys) sys.remove();
+  for (const m of msgs) {
+    if (m.id && $(`[data-mid="${m.id}"]`, chat)) continue;
+    chat.insertAdjacentHTML('beforeend', `<div class="msg ${m.mine ? 'me' : ''} ${m.pending ? 'pending' : ''}" data-mid="${m.id || ''}">${m.mine ? '' : `<div class="who">${esc(m.user_name || '')}</div>`}<div class="bub ${m.mine ? 'u' : 'a'}">${esc(m.body)}</div><div class="tm">${clock(m.created_at)}</div></div>`);
+  }
+  if (scrollEnd) chat.scrollTop = chat.scrollHeight;
+}
+async function syncChatOutbox() {
+  if (!State.token || !State.online) return;
+  const o = chatOutbox(); if (!o.length) return;
+  const remain = [];
+  for (const it of o) { try { await api('/chat/messages?tenant=' + it.tenant, { method: 'POST', body: it.payload }); } catch { remain.push(it); } }
+  setChatOutbox(remain);
+}
+
+/* ── NOTIFICATIONS (bell) ──────────────────────────────── */
+function mountNotifications() {
+  const btn = $('#bellBtn'); if (!btn) return;
+  btn.classList.remove('hidden'); btn.onclick = openNotifs;
+  clearInterval(State.notifTimer);
+  State.notifTimer = setInterval(() => { if (State.online && State.token) pollNotifs(); }, 30000);
+}
+async function pollNotifs() {
+  try {
+    const r = await api(scoped('/notifications'));
+    State.notifs = r.list || [];
+    const badge = $('#bellBadge'); if (!badge) return;
+    badge.textContent = r.unread > 99 ? '99+' : r.unread;
+    badge.classList.toggle('hidden', !r.unread);
+  } catch { /* offline — leave as-is */ }
+}
+async function openNotifs() {
+  const body = modal('<div id="ntfList"><div class="skel"></div></div>', { title: '🔔 Notifications' });
+  let r; try { r = await api(scoped('/notifications')); } catch (e) { $('#ntfList', body).innerHTML = `<div class="empty">${esc(isNetErr(e) ? 'Offline' : e.message)}</div>`; return; }
+  const list = r.list || [];
+  $('#ntfList', body).innerHTML = list.length ? list.map((n) => `
+    <button class="ntf ${n.read ? '' : 'unread'}" data-link="${esc(n.link || '')}">
+      <div class="ntf-ic">${n.type === 'chat' ? '💬' : n.type === 'report' ? '🧾' : '🔔'}</div>
+      <div class="ntf-tx"><div class="ntf-t">${esc(n.title || '')}</div><div class="ntf-b">${esc(n.body || '')}</div><div class="ntf-d">${timeAgo(n.created_at)}</div></div>
+    </button>`).join('') : '<div class="empty">No notifications yet.</div>';
+  $$('#ntfList .ntf', body).forEach((el) => el.onclick = () => {
+    const link = el.dataset.link || '';
+    closeModal();
+    if (link.startsWith('chat:')) { ChatUI.channel = link.slice(5) || 'team'; openChat(); }
+    else if (link) go(link);
+  });
+  if (r.unread) api(scoped('/notifications/read'), { method: 'POST', body: {} }).then(pollNotifs).catch(() => {});
+}
+function timeAgo(s) {
+  const d = Math.floor(Date.now() / 1000) - (s || 0);
+  if (d < 60) return 'just now'; if (d < 3600) return Math.floor(d / 60) + 'm ago';
+  if (d < 86400) return Math.floor(d / 3600) + 'h ago'; return Math.floor(d / 86400) + 'd ago';
+}
 
 /* ── start ───────────────────────────────────────────── */
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

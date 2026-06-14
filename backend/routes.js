@@ -48,6 +48,25 @@ const siteById = (id) => db.prepare('SELECT * FROM sites WHERE id=?').get(id);
 const posEnabled = (tenant_id) => sales.salesEnabled() && !!tenant_id && !!(tenantById(tenant_id) || {}).pos_source;
 const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, photo_url: u.photo_url, is_superadmin: !!u.is_superadmin });
 
+// Create in-app notifications for a set of users (de-duped, skips empties).
+function notify(tenant_id, userIds, { type, title, body, link } = {}) {
+  const ins = db.prepare('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)');
+  for (const u of [...new Set((userIds || []).filter(Boolean))]) {
+    ins.run(uuid(), tenant_id || null, u, type || null, title || null, body || null, link || null);
+  }
+}
+// User IDs in a tenant having at least `minRole` (for routing notifications).
+function tenantUserIds(tenant_id, minRole) {
+  return db.prepare('SELECT user_id, role FROM memberships WHERE tenant_id=? AND user_id IS NOT NULL').all(tenant_id)
+    .filter((r) => !minRole || atLeast(r.role, minRole)).map((r) => r.user_id);
+}
+// Can the caller read/post in this chat channel? 'team' = any member; else a site they can access.
+function channelAllowed(ctx, channel) {
+  if (!channel || channel === 'team') return true;
+  if (ctx.role === 'SITE_MANAGER') return channel === ctx.site_id;
+  return !!db.prepare('SELECT 1 FROM sites WHERE id=? AND tenant_id=?').get(channel, ctx.tenant_id);
+}
+
 // Resolve the access scope for list/read endpoints.
 //  { ctx }      → operating inside one tenant (with role/site)
 //  { all:true } → superadmin viewing across every tenant
@@ -295,6 +314,10 @@ router.post('/reports', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
       submitted_at: status === 'SUBMITTED' ? nowS() : (existing ? existing.submitted_at : null),
     });
   audit(req.ctx.tenant_id, req.user.id, existing ? 'UPDATE' : 'CREATE', 'report', id, { date: b.report_date, status });
+  if (status === 'SUBMITTED') {
+    notify(req.ctx.tenant_id, tenantUserIds(req.ctx.tenant_id, 'GENERAL_MANAGER').filter((u) => u !== req.user.id),
+      { type: 'report', title: `Report submitted — ${site.name}`, body: `${b.report_date} · sales ₦${(totals.total_sales || 0).toLocaleString()}`, link: 'reports' });
+  }
   res.status(existing ? 200 : 201).json(reportView(db.prepare('SELECT * FROM daily_reports WHERE id=?').get(id)));
 });
 
@@ -874,6 +897,74 @@ router.get('/pos/summary', requireAuth, (req, res) => {
   const cash = pay.CASH || 0;
   res.json({ date, total, orders: rows.length, total_cash: cash, total_deposit: total - cash,
     payments: Object.entries(pay).map(([method, amount]) => ({ method, amount })), lines: Object.values(prod) });
+});
+
+// ── STAFF CHAT (WhatsApp-style, per company; channel = 'team' or a site_id) ───
+router.get('/chat/channels', requireAuth, (req, res) => {
+  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const out = [{ id: 'team', name: 'Team', kind: 'team' }];
+  let sites = db.prepare('SELECT id, name, code FROM sites WHERE tenant_id=? ORDER BY name').all(s.ctx.tenant_id);
+  if (s.ctx.role === 'SITE_MANAGER') sites = sites.filter((x) => x.id === s.ctx.site_id);
+  for (const x of sites) out.push({ id: x.id, name: x.name, code: x.code, kind: 'site' });
+  res.json(out);
+});
+router.get('/chat/messages', requireAuth, (req, res) => {
+  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const channel = req.query.channel || 'team';
+  if (!channelAllowed(s.ctx, channel)) return res.status(403).json({ error: 'no access to this channel' });
+  const since = parseInt(req.query.since, 10) || 0;
+  const rows = db.prepare(`SELECT id, channel, user_id, user_name, body, created_at FROM messages
+    WHERE tenant_id=? AND channel=? AND created_at>? ORDER BY created_at ASC, id ASC LIMIT 200`)
+    .all(s.ctx.tenant_id, channel, since);
+  res.json(rows.map((m) => ({ ...m, mine: m.user_id === req.user.id })));
+});
+router.post('/chat/messages', requireAuth, (req, res) => {
+  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const b = req.body || {};
+  const channel = b.channel || 'team';
+  const body = (b.body || '').toString().trim();
+  if (!body) return res.status(400).json({ error: 'empty message' });
+  if (!channelAllowed(s.ctx, channel)) return res.status(403).json({ error: 'no access to this channel' });
+  // Idempotent on client_uid so offline re-sends don't duplicate.
+  if (b.client_uid) {
+    const dup = db.prepare('SELECT id FROM messages WHERE tenant_id=? AND client_uid=?').get(s.ctx.tenant_id, b.client_uid);
+    if (dup) return res.json({ id: dup.id, duplicate: true });
+  }
+  const id = uuid();
+  const name = req.user.name || req.user.email;
+  db.prepare('INSERT INTO messages (id,tenant_id,channel,user_id,user_name,body,client_uid) VALUES (?,?,?,?,?,?,?)')
+    .run(id, s.ctx.tenant_id, channel, req.user.id, name, body.slice(0, 2000), b.client_uid || null);
+  // Notify the rest of the channel audience (skip self) so the bell lights up.
+  let audience = tenantUserIds(s.ctx.tenant_id, 'SITE_MANAGER');
+  if (channel !== 'team') {
+    const siteUsers = db.prepare("SELECT user_id, role, site_id FROM memberships WHERE tenant_id=? AND user_id IS NOT NULL").all(s.ctx.tenant_id)
+      .filter((m) => atLeast(m.role, 'GENERAL_MANAGER') || m.site_id === channel).map((m) => m.user_id);
+    audience = siteUsers;
+  }
+  const label = channel === 'team' ? 'Team chat' : (siteById(channel) || {}).name || 'Site chat';
+  notify(s.ctx.tenant_id, audience.filter((u) => u !== req.user.id),
+    { type: 'chat', title: `${name} · ${label}`, body: body.slice(0, 120), link: `chat:${channel}` });
+  res.status(201).json({ id, channel, user_id: req.user.id, user_name: name, body, created_at: nowS(), mine: true });
+});
+
+// ── NOTIFICATIONS (in-app bell) ───────────────────────────────────────────────
+router.get('/notifications', requireAuth, (req, res) => {
+  const tid = requestedTenant(req);
+  const args = [req.user.id]; let tw = '';
+  if (tid) { tw = ' AND (tenant_id=? OR tenant_id IS NULL)'; args.push(tid); }
+  const list = db.prepare(`SELECT * FROM notifications WHERE user_id=?${tw} ORDER BY created_at DESC LIMIT 60`).all(...args);
+  const unread = db.prepare(`SELECT COUNT(*) n FROM notifications WHERE user_id=? AND read=0${tw}`).get(...args).n;
+  res.json({ unread, list });
+});
+router.post('/notifications/read', requireAuth, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+  if (ids && ids.length) {
+    const q = db.prepare('UPDATE notifications SET read=1 WHERE user_id=? AND id=?');
+    for (const i of ids) q.run(req.user.id, i);
+  } else {
+    db.prepare('UPDATE notifications SET read=1 WHERE user_id=?').run(req.user.id);
+  }
+  res.json({ ok: true });
 });
 
 // ── BILLING (superadmin: mark a tenant paid / extend / reactivate) ────────────

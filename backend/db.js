@@ -283,6 +283,31 @@ function migrate(db) {
       created_at  INTEGER DEFAULT (unixepoch())
     );
 
+    -- ── Staff chat (WhatsApp-style channels per company) ──────────────────────
+    CREATE TABLE IF NOT EXISTS messages (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      channel     TEXT NOT NULL,                           -- 'team' or a site_id
+      user_id     TEXT REFERENCES users(id),
+      user_name   TEXT,
+      body        TEXT NOT NULL,
+      client_uid  TEXT,
+      created_at  INTEGER DEFAULT (unixepoch())
+    );
+
+    -- ── In-app notifications ──────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS notifications (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT REFERENCES tenants(id),
+      user_id     TEXT NOT NULL REFERENCES users(id),
+      type        TEXT,
+      title       TEXT,
+      body        TEXT,
+      link        TEXT,
+      read        INTEGER DEFAULT 0,
+      created_at  INTEGER DEFAULT (unixepoch())
+    );
+
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
       subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())

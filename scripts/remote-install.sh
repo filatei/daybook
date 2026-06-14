@@ -211,6 +211,10 @@ if [ ! -f "${KEYDIR}/fido_tunnel" ]; then
   log "Generating fido tunnel SSH key…"
   sudo -u daybookuser ssh-keygen -t ed25519 -N "" -f "${KEYDIR}/fido_tunnel" -C "daybook-mongo-tunnel" >/dev/null
 fi
+# Always tighten — server-setup's `chmod -R g+rwX /opt/daybook` widens the key to
+# 0660, which ssh refuses ("private key too open"). ssh requires 0600.
+chown daybookuser:daybookuser "${KEYDIR}/fido_tunnel" "${KEYDIR}/fido_tunnel.pub" 2>/dev/null || true
+chmod 700 "${KEYDIR}"; chmod 600 "${KEYDIR}/fido_tunnel"; chmod 644 "${KEYDIR}/fido_tunnel.pub" 2>/dev/null || true
 cp "${BACKEND}/infra/systemd/daybook-mongo-tunnel.service" /etc/systemd/system/daybook-mongo-tunnel.service
 systemctl daemon-reload
 FIDO_USER="$(grep -E '^FIDO_SSH_USER=' "${ENV_FILE}" | head -1 | cut -d= -f2- || true)"

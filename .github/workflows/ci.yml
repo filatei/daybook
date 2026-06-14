@@ -10,6 +10,22 @@ jobs:
   node:
     name: Lint & smoke test
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: daybook_ci
+          POSTGRES_USER: daybook
+          POSTGRES_PASSWORD: ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U daybook -d daybook_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,7 +35,16 @@ jobs:
       - name: Install
         run: npm ci || npm install
       - name: Syntax check
-        run: node --check backend/server.js && node --check backend/routes.js && node --check backend/db.js && node --check backend/mailer.js && node --check backend/auth.js && node --check backend/seed.js
+        run: |
+          node --check backend/server.js
+          node --check backend/routes.js
+          node --check backend/db.js
+          node --check backend/mailer.js
+          node --check backend/auth.js
+          node --check backend/seed.js
+          node --check backend/routes_expenses.js
+          node --check backend/routes_logistics.js
+          node --check backend/routes_payroll.js
       - name: Boot + smoke test
         env:
           JWT_SECRET: ci-test-secret
@@ -27,8 +52,8 @@ jobs:
           DAYBOOK_ALLOW_DEV_LOGIN: "1"
           GOOGLE_CLIENT_ID: ci-test-client
           PORT: "8090"
-          DAYBOOK_DB_PATH: /tmp/ci.db
+          DATABASE_URL: postgres://daybook:ci-password@localhost:5432/daybook_ci
           UPLOAD_DIR: /tmp/ci-uploads
         run: |
-          node backend/server.js & sleep 4
+          node backend/server.js & sleep 6
           node backend/smoke.js

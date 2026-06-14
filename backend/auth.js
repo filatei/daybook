@@ -16,7 +16,7 @@
 
 const jwt = require('jsonwebtoken');
 const { OAuth2Client } = require('google-auth-library');
-const { getDb } = require('./db');
+const { qone, qall } = require('./db');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
@@ -44,12 +44,12 @@ function readToken(req) {
   return null;
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const token = readToken(req);
   if (!token) return res.status(401).json({ error: 'authentication required' });
   try {
     const claims = jwt.verify(token, JWT_SECRET);
-    const u = getDb().prepare('SELECT * FROM users WHERE id=?').get(claims.sub);
+    const u = await qone('SELECT * FROM users WHERE id=?', [claims.sub]);
     if (!u || u.status !== 'ACTIVE') return res.status(401).json({ error: 'session user not found' });
     req.user = u;
     next();
@@ -59,13 +59,14 @@ function requireAuth(req, res, next) {
 }
 
 // ── Membership / tenant context resolution ────────────────────────────────────
-function membershipsFor(userId) {
-  return getDb().prepare(
+async function membershipsFor(userId) {
+  return qall(
     `SELECT m.*, t.name tenant_name, t.slug tenant_slug, t.brand_color, t.pos_source, t.plan, t.trial_ends_at, t.paid_until
        FROM memberships m JOIN tenants t ON t.id = m.tenant_id
       WHERE m.user_id = ? AND m.status='ACTIVE' AND t.status='ACTIVE'
-      ORDER BY t.name`
-  ).all(userId);
+      ORDER BY t.name`,
+    [userId]
+  );
 }
 
 /**
@@ -74,15 +75,15 @@ function membershipsFor(userId) {
  *  - everyone else → the tenants they hold a membership in, with that role.
  * Returns [{ id, name, slug, brand_color, role, site_id }]
  */
-function accessibleTenants(user) {
-  const db = getDb();
+async function accessibleTenants(user) {
   const trialDays = (t) => (t.trial_ends_at && (!t.paid_until || t.paid_until < t.trial_ends_at) && t.plan !== 'OWNER')
     ? Math.ceil((t.trial_ends_at - Math.floor(Date.now() / 1000)) / 86400) : null;
   if (user.is_superadmin) {
-    return db.prepare("SELECT * FROM tenants WHERE status='ACTIVE' ORDER BY name").all()
-      .map((t) => ({ id: t.id, name: t.name, slug: t.slug, brand_color: t.brand_color, role: 'ADMIN', site_id: null, super: true, pos: !!t.pos_source, plan: t.plan, trial_days_left: trialDays(t) }));
+    const rows = await qall("SELECT * FROM tenants WHERE status='ACTIVE' ORDER BY name");
+    return rows.map((t) => ({ id: t.id, name: t.name, slug: t.slug, brand_color: t.brand_color, role: 'ADMIN', site_id: null, super: true, pos: !!t.pos_source, plan: t.plan, trial_days_left: trialDays(t) }));
   }
-  return membershipsFor(user.id).map((m) => ({
+  const list = await membershipsFor(user.id);
+  return list.map((m) => ({
     id: m.tenant_id, name: m.tenant_name, slug: m.tenant_slug, brand_color: m.brand_color,
     role: m.role, site_id: m.site_id, pos: !!m.pos_source, plan: m.plan, trial_days_left: trialDays(m),
   }));
@@ -93,15 +94,15 @@ function accessibleTenants(user) {
  * Returns { tenant_id, role, site_id } or null if no access.
  * role is one of ADMIN | GENERAL_MANAGER | SITE_MANAGER (superadmin → ADMIN).
  */
-function contextFor(user, tenantId) {
+async function contextFor(user, tenantId) {
   if (!tenantId) return null;
   if (user.is_superadmin) {
-    const t = getDb().prepare('SELECT id FROM tenants WHERE id=?').get(tenantId);
+    const t = await qone('SELECT id FROM tenants WHERE id=?', [tenantId]);
     return t ? { tenant_id: tenantId, role: 'ADMIN', site_id: null, super: true } : null;
   }
-  const t = getDb().prepare("SELECT status FROM tenants WHERE id=?").get(tenantId);
-  if (!t || t.status !== 'ACTIVE') return null; // suspended/expunged → no access for members
-  const m = getDb().prepare("SELECT * FROM memberships WHERE user_id=? AND tenant_id=? AND status='ACTIVE'").get(user.id, tenantId);
+  const t = await qone('SELECT status FROM tenants WHERE id=?', [tenantId]);
+  if (!t || t.status !== 'ACTIVE') return null;
+  const m = await qone("SELECT * FROM memberships WHERE user_id=? AND tenant_id=? AND status='ACTIVE'", [user.id, tenantId]);
   return m ? { tenant_id: tenantId, role: m.role, site_id: m.site_id } : null;
 }
 

@@ -1,5 +1,6 @@
 /**
  * Daybook — REST API routes (multi-client SaaS, Google sign-in, memberships)
+ * Postgres/async port: all route handlers are async; db calls use qone/qall/qrun.
  */
 'use strict';
 
@@ -8,7 +9,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuid } = require('uuid');
-const { getDb } = require('./db');
+const { qone, qall, qrun } = require('./db');
 const {
   verifyGoogleToken, signSession, requireAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, GOOGLE_CLIENT_ID,
@@ -21,7 +22,6 @@ const payments = require('./payments');
 const ls = require('./lemonsqueezy');
 
 const router = express.Router();
-const db = getDb();
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../data/uploads');
 const MAX_MB = parseInt(process.env.MAX_UPLOAD_MB || '25', 10);
@@ -39,69 +39,63 @@ const upload = multer({
 
 const J = (s, f) => { try { return s ? JSON.parse(s) : f; } catch { return f; } };
 const nowS = () => Math.floor(Date.now() / 1000);
-function audit(tenant_id, user_id, action, entity, entity_id, meta) {
-  db.prepare('INSERT INTO audit_log (id,tenant_id,user_id,action,entity,entity_id,meta) VALUES (?,?,?,?,?,?,?)')
-    .run(uuid(), tenant_id || null, user_id || null, action, entity, entity_id || null, meta ? JSON.stringify(meta) : null);
+
+async function audit(tenant_id, user_id, action, entity, entity_id, meta) {
+  await qrun('INSERT INTO audit_log (id,tenant_id,user_id,action,entity,entity_id,meta) VALUES (?,?,?,?,?,?,?)',
+    [uuid(), tenant_id || null, user_id || null, action, entity, entity_id || null, meta ? JSON.stringify(meta) : null]);
 }
-const tenantById = (id) => db.prepare('SELECT * FROM tenants WHERE id=?').get(id);
-const siteById = (id) => db.prepare('SELECT * FROM sites WHERE id=?').get(id);
-// POS (live fido sales) is available only to tenants explicitly linked to it
-// (pos_source set, i.e. Fido/Fiafia) AND when the Mongo source is configured.
-const posEnabled = (tenant_id) => sales.salesEnabled() && !!tenant_id && !!(tenantById(tenant_id) || {}).pos_source;
+const tenantById = (id) => qone('SELECT * FROM tenants WHERE id=?', [id]);
+const siteById = (id) => qone('SELECT * FROM sites WHERE id=?', [id]);
+const posEnabled = async (tenant_id) => {
+  if (!sales.salesEnabled() || !tenant_id) return false;
+  const t = await tenantById(tenant_id);
+  return !!(t && t.pos_source);
+};
 const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, photo_url: u.photo_url, is_superadmin: !!u.is_superadmin });
 
-// Create in-app notifications for a set of users (de-duped, skips empties).
-function notify(tenant_id, userIds, { type, title, body, link } = {}) {
-  const ins = db.prepare('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)');
+async function notify(tenant_id, userIds, { type, title, body, link } = {}) {
   for (const u of [...new Set((userIds || []).filter(Boolean))]) {
-    ins.run(uuid(), tenant_id || null, u, type || null, title || null, body || null, link || null);
+    await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
+      [uuid(), tenant_id || null, u, type || null, title || null, body || null, link || null]);
   }
 }
-// User IDs in a tenant having at least `minRole` (for routing notifications).
-function tenantUserIds(tenant_id, minRole) {
-  return db.prepare('SELECT user_id, role FROM memberships WHERE tenant_id=? AND user_id IS NOT NULL').all(tenant_id)
-    .filter((r) => !minRole || atLeast(r.role, minRole)).map((r) => r.user_id);
+async function tenantUserIds(tenant_id, minRole) {
+  const rows = await qall('SELECT user_id, role FROM memberships WHERE tenant_id=? AND user_id IS NOT NULL', [tenant_id]);
+  return rows.filter((r) => !minRole || atLeast(r.role, minRole)).map((r) => r.user_id);
 }
-// Can the caller read/post in this chat channel? 'team' = any member; else a site they can access.
-function channelAllowed(ctx, channel) {
+async function channelAllowed(ctx, channel) {
   if (!channel || channel === 'team') return true;
   if (ctx.role === 'SITE_MANAGER') return channel === ctx.site_id;
-  return !!db.prepare('SELECT 1 FROM sites WHERE id=? AND tenant_id=?').get(channel, ctx.tenant_id);
+  return !!(await qone('SELECT 1 FROM sites WHERE id=? AND tenant_id=?', [channel, ctx.tenant_id]));
 }
 
-// Resolve the access scope for list/read endpoints.
-//  { ctx }      → operating inside one tenant (with role/site)
-//  { all:true } → superadmin viewing across every tenant
-//  { error }    → no access / must pick a workspace
-function scope(req) {
+async function scope(req) {
   const tid = requestedTenant(req);
-  if (tid) { const c = contextFor(req.user, tid); return c ? { ctx: c } : { error: 'no access to this workspace' }; }
+  if (tid) { const c = await contextFor(req.user, tid); return c ? { ctx: c } : { error: 'no access to this workspace' }; }
   if (req.user.is_superadmin) return { all: true };
   return { error: 'select a workspace' };
 }
-// Guard middleware: require active-tenant context with a minimum role.
 function needTenant(minRole) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const tid = requestedTenant(req) || req.body?.tenant_id;
-    const c = contextFor(req.user, tid);
+    const c = await contextFor(req.user, tid);
     if (!c) return res.status(403).json({ error: 'no access to this workspace' });
     if (minRole && !atLeast(c.role, minRole)) return res.status(403).json({ error: 'insufficient role' });
     req.ctx = c; next();
   };
 }
 
-// ── PUBLIC config (for the Google Sign-In button) ─────────────────────────────
+// ── PUBLIC config ──────────────────────────────────────────────────────────────
 router.get('/config', (_req, res) => res.json({ google_client_id: GOOGLE_CLIENT_ID }));
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
-function loginResponse(res, req, user) {
-  db.prepare('UPDATE users SET last_login=unixepoch() WHERE id=?').run(user.id);
+async function loginResponse(res, req, user) {
+  await qrun('UPDATE users SET last_login=? WHERE id=?', [nowS(), user.id]);
   const token = signSession(user);
   res.cookie('daybook_token', token, { httpOnly: true, sameSite: 'Lax', secure: req.secure, maxAge: 12 * 3600 * 1000 });
-  return res.json({ token, user: publicUser(user), tenants: accessibleTenants(user) });
+  return res.json({ token, user: publicUser(user), tenants: await accessibleTenants(user) });
 }
 
-// Sign in with Google. Verified email → upsert user, attach any pending invites.
 router.post('/auth/google', async (req, res) => {
   const { credential } = req.body || {};
   if (!credential) return res.status(400).json({ error: 'missing Google credential' });
@@ -109,44 +103,46 @@ router.post('/auth/google', async (req, res) => {
   try { g = await verifyGoogleToken(credential); }
   catch (e) { return res.status(401).json({ error: 'Google verification failed', detail: e.message }); }
 
-  let user = db.prepare('SELECT * FROM users WHERE lower(email)=lower(?)').get(g.email);
+  let user = await qone('SELECT * FROM users WHERE lower(email)=lower(?)', [g.email]);
   if (!user) {
     const id = uuid();
-    db.prepare('INSERT INTO users (id,email,google_sub,name,photo_url) VALUES (?,?,?,?,?)')
-      .run(id, g.email, g.sub, g.name || null, g.picture || null);
-    user = db.prepare('SELECT * FROM users WHERE id=?').get(id);
+    await qrun('INSERT INTO users (id,email,google_sub,name,photo_url) VALUES (?,?,?,?,?)',
+      [id, g.email, g.sub, g.name || null, g.picture || null]);
+    user = await qone('SELECT * FROM users WHERE id=?', [id]);
   } else if (!user.google_sub) {
-    db.prepare('UPDATE users SET google_sub=?, name=COALESCE(name,?), photo_url=COALESCE(photo_url,?) WHERE id=?')
-      .run(g.sub, g.name || null, g.picture || null, user.id);
+    await qrun('UPDATE users SET google_sub=?, name=COALESCE(name,?), photo_url=COALESCE(photo_url,?) WHERE id=?',
+      [g.sub, g.name || null, g.picture || null, user.id]);
   }
-  // Convert any pending invites for this email into memberships.
-  const invites = db.prepare('SELECT * FROM invites WHERE lower(email)=lower(?)').all(g.email);
+  const invites = await qall('SELECT * FROM invites WHERE lower(email)=lower(?)', [g.email]);
   for (const inv of invites) {
     try {
-      db.prepare('INSERT OR IGNORE INTO memberships (id,user_id,tenant_id,role,site_id) VALUES (?,?,?,?,?)')
-        .run(uuid(), user.id, inv.tenant_id, inv.role, inv.site_id);
+      await qrun('INSERT INTO memberships (id,user_id,tenant_id,role,site_id) VALUES (?,?,?,?,?) ON CONFLICT (user_id,tenant_id) DO NOTHING',
+        [uuid(), user.id, inv.tenant_id, inv.role, inv.site_id]);
     } catch {}
-    db.prepare('DELETE FROM invites WHERE id=?').run(inv.id);
+    await qrun('DELETE FROM invites WHERE id=?', [inv.id]);
   }
   if (user.status !== 'ACTIVE') return res.status(403).json({ error: 'account disabled' });
   return loginResponse(res, req, user);
 });
 
-// Dev-only password-less login for automated tests (never enabled in production).
-router.post('/auth/dev-login', (req, res) => {
+router.post('/auth/dev-login', async (req, res) => {
   if (process.env.NODE_ENV === 'production' || process.env.DAYBOOK_ALLOW_DEV_LOGIN !== '1')
     return res.status(404).json({ error: 'not found' });
   const email = (req.body?.email || '').toLowerCase();
-  let user = db.prepare('SELECT * FROM users WHERE lower(email)=lower(?)').get(email);
-  if (!user) { const id = uuid(); db.prepare('INSERT INTO users (id,email,name) VALUES (?,?,?)').run(id, email, req.body?.name || email); user = db.prepare('SELECT * FROM users WHERE id=?').get(id); }
+  let user = await qone('SELECT * FROM users WHERE lower(email)=lower(?)', [email]);
+  if (!user) {
+    const id = uuid();
+    await qrun('INSERT INTO users (id,email,name) VALUES (?,?,?)', [id, email, req.body?.name || email]);
+    user = await qone('SELECT * FROM users WHERE id=?', [id]);
+  }
   return loginResponse(res, req, user);
 });
 
 router.post('/auth/logout', (_req, res) => { res.clearCookie('daybook_token'); res.json({ ok: true }); });
-router.get('/auth/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user), tenants: accessibleTenants(req.user) }));
+router.get('/auth/me', requireAuth, async (req, res) => res.json({ user: publicUser(req.user), tenants: await accessibleTenants(req.user) }));
 
-// ── ONBOARDING — any signed-in user can create a new company workspace ────────
-router.post('/onboard', requireAuth, (req, res) => {
+// ── ONBOARDING ────────────────────────────────────────────────────────────────
+router.post('/onboard', requireAuth, async (req, res) => {
   const { name, slug, brand_color, industry, currency } = req.body || {};
   if (!name) return res.status(400).json({ error: 'company name required' });
   const realSlug = (slug || name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || ('co-' + uuid().slice(0, 6));
@@ -154,121 +150,121 @@ router.post('/onboard', requireAuth, (req, res) => {
   const trialDays = parseInt(process.env.TRIAL_DAYS || '30', 10);
   const trialEnds = Math.floor(Date.now() / 1000) + trialDays * 86400;
   try {
-    db.prepare('INSERT INTO tenants (id,slug,name,brand_color,currency,industry,plan,trial_ends_at,created_by) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(id, realSlug, name, brand_color || '#0ea5e9', currency || 'NGN', industry || null, 'FREE', trialEnds, req.user.id);
+    await qrun('INSERT INTO tenants (id,slug,name,brand_color,currency,industry,plan,trial_ends_at,created_by) VALUES (?,?,?,?,?,?,?,?,?)',
+      [id, realSlug, name, brand_color || '#0ea5e9', currency || 'NGN', industry || null, 'FREE', trialEnds, req.user.id]);
   } catch { return res.status(409).json({ error: 'a workspace with that name/slug already exists' }); }
-  db.prepare('INSERT INTO memberships (id,user_id,tenant_id,role) VALUES (?,?,?,?)').run(uuid(), req.user.id, id, 'ADMIN');
-  // seed a default recipient (the creator) so reports can be emailed immediately
-  db.prepare('INSERT OR IGNORE INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?)').run(uuid(), id, req.user.email, req.user.name || null);
-  audit(id, req.user.id, 'CREATE', 'tenant', id, { name });
-  res.status(201).json({ tenant: tenantById(id), tenants: accessibleTenants(req.user) });
+  await qrun('INSERT INTO memberships (id,user_id,tenant_id,role) VALUES (?,?,?,?)', [uuid(), req.user.id, id, 'ADMIN']);
+  await qrun('INSERT INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?) ON CONFLICT (tenant_id,email) DO NOTHING',
+    [uuid(), id, req.user.email, req.user.name || null]);
+  await audit(id, req.user.id, 'CREATE', 'tenant', id, { name });
+  res.status(201).json({ tenant: await tenantById(id), tenants: await accessibleTenants(req.user) });
 });
 
 // ── TENANTS ────────────────────────────────────────────────────────────────────
-router.get('/tenants', requireAuth, (req, res) => res.json(accessibleTenants(req.user)));
-router.patch('/tenants/:id', requireAuth, (req, res) => {
-  const c = contextFor(req.user, req.params.id);
+router.get('/tenants', requireAuth, async (req, res) => res.json(await accessibleTenants(req.user)));
+router.patch('/tenants/:id', requireAuth, async (req, res) => {
+  const c = await contextFor(req.user, req.params.id);
   if (!c || !atLeast(c.role, 'ADMIN')) return res.status(403).json({ error: 'forbidden' });
-  const t = tenantById(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
+  const t = await tenantById(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
   const f = req.body || {};
-  db.prepare('UPDATE tenants SET name=?,brand_color=?,currency=?,industry=?,plan=?,status=? WHERE id=?')
-    .run(f.name ?? t.name, f.brand_color ?? t.brand_color, f.currency ?? t.currency, f.industry ?? t.industry,
-      req.user.is_superadmin ? (f.plan ?? t.plan) : t.plan, req.user.is_superadmin ? (f.status ?? t.status) : t.status, t.id);
-  res.json(tenantById(t.id));
+  await qrun('UPDATE tenants SET name=?,brand_color=?,currency=?,industry=?,plan=?,status=? WHERE id=?',
+    [f.name ?? t.name, f.brand_color ?? t.brand_color, f.currency ?? t.currency, f.industry ?? t.industry,
+      req.user.is_superadmin ? (f.plan ?? t.plan) : t.plan, req.user.is_superadmin ? (f.status ?? t.status) : t.status, t.id]);
+  res.json(await tenantById(t.id));
 });
 
 // ── SITES ────────────────────────────────────────────────────────────────────
-router.get('/sites', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
-  if (s.all) return res.json(db.prepare('SELECT * FROM sites ORDER BY tenant_id,name').all());
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(db.prepare('SELECT * FROM sites WHERE id=?').all(s.ctx.site_id));
-  res.json(db.prepare('SELECT * FROM sites WHERE tenant_id=? ORDER BY name').all(s.ctx.tenant_id));
+router.get('/sites', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  if (s.all) return res.json(await qall('SELECT * FROM sites ORDER BY tenant_id,name'));
+  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall('SELECT * FROM sites WHERE id=?', [s.ctx.site_id]));
+  res.json(await qall('SELECT * FROM sites WHERE tenant_id=? ORDER BY name', [s.ctx.tenant_id]));
 });
-router.post('/sites', requireAuth, needTenant('ADMIN'), (req, res) => {
+router.post('/sites', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const { code, name, address, is_hq } = req.body || {};
   if (!code || !name) return res.status(400).json({ error: 'code and name required' });
   const id = uuid();
   try {
-    db.prepare('INSERT INTO sites (id,tenant_id,code,name,address,is_hq) VALUES (?,?,?,?,?,?)')
-      .run(id, req.ctx.tenant_id, code.toUpperCase(), name, address || null, is_hq ? 1 : 0);
+    await qrun('INSERT INTO sites (id,tenant_id,code,name,address,is_hq) VALUES (?,?,?,?,?,?)',
+      [id, req.ctx.tenant_id, code.toUpperCase(), name, address || null, is_hq ? 1 : 0]);
   } catch { return res.status(409).json({ error: 'site code already exists' }); }
-  audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'site', id, { code });
-  res.status(201).json(siteById(id));
+  await audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'site', id, { code });
+  res.status(201).json(await siteById(id));
 });
-router.patch('/sites/:id', requireAuth, (req, res) => {
-  const site = siteById(req.params.id); if (!site) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, site.tenant_id);
+router.patch('/sites/:id', requireAuth, async (req, res) => {
+  const site = await siteById(req.params.id); if (!site) return res.status(404).json({ error: 'not found' });
+  const c = await contextFor(req.user, site.tenant_id);
   if (!c || !atLeast(c.role, 'ADMIN')) return res.status(403).json({ error: 'forbidden' });
   const f = req.body || {};
-  db.prepare('UPDATE sites SET name=?,address=?,is_hq=?,status=? WHERE id=?')
-    .run(f.name ?? site.name, f.address ?? site.address, f.is_hq != null ? (f.is_hq ? 1 : 0) : site.is_hq, f.status ?? site.status, site.id);
-  res.json(siteById(site.id));
+  await qrun('UPDATE sites SET name=?,address=?,is_hq=?,status=? WHERE id=?',
+    [f.name ?? site.name, f.address ?? site.address, f.is_hq != null ? (f.is_hq ? 1 : 0) : site.is_hq, f.status ?? site.status, site.id]);
+  res.json(await siteById(site.id));
 });
 
-// ── MEMBERS (users within a tenant) ───────────────────────────────────────────
-router.get('/members', requireAuth, needTenant('GENERAL_MANAGER'), (req, res) => {
-  const rows = db.prepare(
+// ── MEMBERS ───────────────────────────────────────────────────────────────────
+router.get('/members', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+  const rows = await qall(
     `SELECT m.id, m.role, m.site_id, m.status, u.email, u.name, u.last_login, (u.google_sub IS NOT NULL) AS active_login
-       FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.role DESC, u.email`
-  ).all(req.ctx.tenant_id);
-  const pending = db.prepare('SELECT id,email,role,site_id FROM invites WHERE tenant_id=?').all(req.ctx.tenant_id);
+       FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.role DESC, u.email`,
+    [req.ctx.tenant_id]);
+  const pending = await qall('SELECT id,email,role,site_id FROM invites WHERE tenant_id=?', [req.ctx.tenant_id]);
   res.json({ members: rows, invites: pending });
 });
 
-router.post('/members', requireAuth, needTenant('ADMIN'), (req, res) => {
-  const { email, role, site_id, name } = req.body || {};
+router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const { email, role, site_id } = req.body || {};
   if (!email || !role) return res.status(400).json({ error: 'email and role required' });
   if (!['ADMIN', 'GENERAL_MANAGER', 'SITE_MANAGER'].includes(role)) return res.status(400).json({ error: 'invalid role' });
   if (role === 'SITE_MANAGER' && !site_id) return res.status(400).json({ error: 'site required for a Site Manager' });
   const lower = email.toLowerCase();
-  const existing = db.prepare('SELECT * FROM users WHERE lower(email)=lower(?)').get(lower);
+  const existing = await qone('SELECT * FROM users WHERE lower(email)=lower(?)', [lower]);
   if (existing) {
     try {
-      db.prepare('INSERT INTO memberships (id,user_id,tenant_id,role,site_id) VALUES (?,?,?,?,?)')
-        .run(uuid(), existing.id, req.ctx.tenant_id, role, role === 'SITE_MANAGER' ? site_id : null);
+      await qrun('INSERT INTO memberships (id,user_id,tenant_id,role,site_id) VALUES (?,?,?,?,?) ON CONFLICT (user_id,tenant_id) DO NOTHING',
+        [uuid(), existing.id, req.ctx.tenant_id, role, role === 'SITE_MANAGER' ? site_id : null]);
     } catch { return res.status(409).json({ error: 'this user is already a member' }); }
-    audit(req.ctx.tenant_id, req.user.id, 'ADD_MEMBER', 'membership', existing.id, { email, role });
+    await audit(req.ctx.tenant_id, req.user.id, 'ADD_MEMBER', 'membership', existing.id, { email, role });
     return res.status(201).json({ added: true, email });
   }
-  // No account yet → store an invite; converts to a membership on first Google sign-in.
   try {
-    db.prepare('INSERT INTO invites (id,tenant_id,email,role,site_id,invited_by) VALUES (?,?,?,?,?,?)')
-      .run(uuid(), req.ctx.tenant_id, lower, role, role === 'SITE_MANAGER' ? site_id : null, req.user.id);
+    await qrun('INSERT INTO invites (id,tenant_id,email,role,site_id,invited_by) VALUES (?,?,?,?,?,?) ON CONFLICT (tenant_id,email) DO NOTHING',
+      [uuid(), req.ctx.tenant_id, lower, role, role === 'SITE_MANAGER' ? site_id : null, req.user.id]);
   } catch { return res.status(409).json({ error: 'already invited' }); }
-  audit(req.ctx.tenant_id, req.user.id, 'INVITE', 'invite', lower, { role });
+  await audit(req.ctx.tenant_id, req.user.id, 'INVITE', 'invite', lower, { role });
   res.status(201).json({ invited: true, email: lower });
 });
 
-// Active-admin count — used to stop a company from locking itself out.
-const activeAdminCount = (tenant_id) =>
-  db.prepare("SELECT COUNT(*) n FROM memberships WHERE tenant_id=? AND role='ADMIN' AND status='ACTIVE'").get(tenant_id).n;
+const activeAdminCount = async (tenant_id) => {
+  const r = await qone("SELECT COUNT(*) n FROM memberships WHERE tenant_id=? AND role='ADMIN' AND status='ACTIVE'", [tenant_id]);
+  return parseInt(r.n, 10);
+};
 
-router.patch('/members/:id', requireAuth, needTenant('ADMIN'), (req, res) => {
-  const m = db.prepare('SELECT * FROM memberships WHERE id=? AND tenant_id=?').get(req.params.id, req.ctx.tenant_id);
+router.patch('/members/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const m = await qone('SELECT * FROM memberships WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   if (!m) return res.status(404).json({ error: 'not found' });
   const f = req.body || {};
   const newRole = f.role ?? m.role;
   const newStatus = f.status ?? m.status;
   const wasActiveAdmin = m.role === 'ADMIN' && m.status === 'ACTIVE';
   const willBeActiveAdmin = newRole === 'ADMIN' && newStatus === 'ACTIVE';
-  if (wasActiveAdmin && !willBeActiveAdmin && activeAdminCount(req.ctx.tenant_id) <= 1)
+  if (wasActiveAdmin && !willBeActiveAdmin && await activeAdminCount(req.ctx.tenant_id) <= 1)
     return res.status(400).json({ error: 'This is the last active admin — promote another admin before dismissing or changing this one.' });
-  db.prepare('UPDATE memberships SET role=?,site_id=?,status=? WHERE id=?')
-    .run(newRole, f.site_id !== undefined ? f.site_id : m.site_id, newStatus, m.id);
-  if (newStatus !== m.status) audit(req.ctx.tenant_id, req.user.id, newStatus === 'DISABLED' ? 'DISMISS_MEMBER' : 'RESTORE_MEMBER', 'membership', m.id);
+  await qrun('UPDATE memberships SET role=?,site_id=?,status=? WHERE id=?',
+    [newRole, f.site_id !== undefined ? f.site_id : m.site_id, newStatus, m.id]);
+  if (newStatus !== m.status) await audit(req.ctx.tenant_id, req.user.id, newStatus === 'DISABLED' ? 'DISMISS_MEMBER' : 'RESTORE_MEMBER', 'membership', m.id);
   res.json({ ok: true });
 });
-router.delete('/members/:id', requireAuth, needTenant('ADMIN'), (req, res) => {
-  const m = db.prepare('SELECT * FROM memberships WHERE id=? AND tenant_id=?').get(req.params.id, req.ctx.tenant_id);
+router.delete('/members/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const m = await qone('SELECT * FROM memberships WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   if (!m) return res.status(404).json({ error: 'not found' });
-  if (m.role === 'ADMIN' && m.status === 'ACTIVE' && activeAdminCount(req.ctx.tenant_id) <= 1)
+  if (m.role === 'ADMIN' && m.status === 'ACTIVE' && await activeAdminCount(req.ctx.tenant_id) <= 1)
     return res.status(400).json({ error: 'This is the last active admin — promote another admin before removing this one.' });
-  db.prepare('DELETE FROM memberships WHERE id=?').run(m.id);
-  audit(req.ctx.tenant_id, req.user.id, 'REMOVE_MEMBER', 'membership', m.id);
+  await qrun('DELETE FROM memberships WHERE id=?', [m.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'REMOVE_MEMBER', 'membership', m.id);
   res.json({ ok: true });
 });
-router.delete('/invites/:id', requireAuth, needTenant('ADMIN'), (req, res) => {
-  db.prepare('DELETE FROM invites WHERE id=? AND tenant_id=?').run(req.params.id, req.ctx.tenant_id);
+router.delete('/invites/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  await qrun('DELETE FROM invites WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   res.json({ ok: true });
 });
 
@@ -282,214 +278,229 @@ function computeTotals(b) {
   return { total_sales, balance };
 }
 
-router.get('/reports', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+router.get('/reports', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   const { site, from, to } = req.query; const where = [], args = [];
-  if (s.ctx) { where.push('r.tenant_id=?'); args.push(s.ctx.tenant_id);
+  if (s.ctx) {
+    where.push('r.tenant_id=?'); args.push(s.ctx.tenant_id);
     if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
-    else if (site) { where.push('r.site_id=?'); args.push(site); } }
+    else if (site) { where.push('r.site_id=?'); args.push(site); }
+  }
   if (from) { where.push('r.report_date>=?'); args.push(from); }
   if (to) { where.push('r.report_date<=?'); args.push(to); }
   const sql = `SELECT r.*, s.name site_name, s.code site_code, t.name tenant_name
     FROM daily_reports r JOIN sites s ON s.id=r.site_id JOIN tenants t ON t.id=r.tenant_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY r.report_date DESC, s.name LIMIT 500`;
-  res.json(db.prepare(sql).all(...args).map(reportView));
+  res.json((await qall(sql, args)).map(reportView));
 });
 
-router.get('/reports/:id', requireAuth, (req, res) => {
-  const r = db.prepare('SELECT * FROM daily_reports WHERE id=?').get(req.params.id);
+router.get('/reports/:id', requireAuth, async (req, res) => {
+  const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, r.tenant_id);
+  const c = await contextFor(req.user, r.tenant_id);
   if (!c || (c.role === 'SITE_MANAGER' && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
   res.json(reportView(r));
 });
-// Delete a report — its creator, or a GM/Admin of the company.
-router.delete('/reports/:id', requireAuth, (req, res) => {
-  const r = db.prepare('SELECT * FROM daily_reports WHERE id=?').get(req.params.id);
+router.delete('/reports/:id', requireAuth, async (req, res) => {
+  const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, r.tenant_id);
+  const c = await contextFor(req.user, r.tenant_id);
   if (!c || (c.role === 'SITE_MANAGER' && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
   const allowed = r.created_by === req.user.id || req.user.is_superadmin || atLeast(c.role, 'GENERAL_MANAGER');
-  if (!allowed) return res.status(403).json({ error: 'only the report’s creator or a manager can delete it' });
-  db.prepare('DELETE FROM daily_reports WHERE id=?').run(r.id);
-  audit(r.tenant_id, req.user.id, 'DELETE', 'report', r.id, { date: r.report_date, site: r.site_id });
+  if (!allowed) return res.status(403).json({ error: "only the report's creator or a manager can delete it" });
+  await qrun('DELETE FROM daily_reports WHERE id=?', [r.id]);
+  await audit(r.tenant_id, req.user.id, 'DELETE', 'report', r.id, { date: r.report_date, site: r.site_id });
   res.json({ ok: true });
 });
 
-router.post('/reports', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+router.post('/reports', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {};
   const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
   if (!site_id || !b.report_date) return res.status(400).json({ error: 'site_id and report_date required' });
-  const site = siteById(site_id);
+  const site = await siteById(site_id);
   if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
   const totals = computeTotals(b);
-  const existing = db.prepare('SELECT * FROM daily_reports WHERE tenant_id=? AND site_id=? AND report_date=?').get(req.ctx.tenant_id, site_id, b.report_date);
+  const existing = await qone('SELECT * FROM daily_reports WHERE tenant_id=? AND site_id=? AND report_date=?',
+    [req.ctx.tenant_id, site_id, b.report_date]);
   const id = existing ? existing.id : uuid();
   const status = b.submit ? 'SUBMITTED' : (existing ? existing.status : 'DRAFT');
-  db.prepare(`INSERT INTO daily_reports
-    (id,tenant_id,site_id,report_date,total_sales,total_cash,total_deposit,diesel,expenses,balance,sales_json,production_json,notes,status,created_by,submitted_at)
-    VALUES (@id,@tenant_id,@site_id,@report_date,@total_sales,@total_cash,@total_deposit,@diesel,@expenses,@balance,@sales_json,@production_json,@notes,@status,@created_by,@submitted_at)
-    ON CONFLICT(tenant_id,site_id,report_date) DO UPDATE SET
-      total_sales=@total_sales,total_cash=@total_cash,total_deposit=@total_deposit,diesel=@diesel,expenses=@expenses,
-      balance=@balance,sales_json=@sales_json,production_json=@production_json,notes=@notes,status=@status,submitted_at=@submitted_at`)
-    .run({
-      id, tenant_id: req.ctx.tenant_id, site_id, report_date: b.report_date,
-      total_sales: totals.total_sales, total_cash: +b.total_cash || 0, total_deposit: +b.total_deposit || 0,
-      diesel: +b.diesel || 0, expenses: +b.expenses || 0, balance: totals.balance,
-      sales_json: JSON.stringify(b.sales || []), production_json: JSON.stringify(b.production || {}),
-      notes: b.notes || null, status, created_by: req.user.id,
-      submitted_at: status === 'SUBMITTED' ? nowS() : (existing ? existing.submitted_at : null),
-    });
-  audit(req.ctx.tenant_id, req.user.id, existing ? 'UPDATE' : 'CREATE', 'report', id, { date: b.report_date, status });
+  const submitted_at = status === 'SUBMITTED' ? nowS() : (existing ? existing.submitted_at : null);
+  await qrun(
+    `INSERT INTO daily_reports
+      (id,tenant_id,site_id,report_date,total_sales,total_cash,total_deposit,diesel,expenses,balance,sales_json,production_json,notes,status,created_by,submitted_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(tenant_id,site_id,report_date) DO UPDATE SET
+        total_sales=EXCLUDED.total_sales, total_cash=EXCLUDED.total_cash, total_deposit=EXCLUDED.total_deposit,
+        diesel=EXCLUDED.diesel, expenses=EXCLUDED.expenses, balance=EXCLUDED.balance,
+        sales_json=EXCLUDED.sales_json, production_json=EXCLUDED.production_json,
+        notes=EXCLUDED.notes, status=EXCLUDED.status, submitted_at=EXCLUDED.submitted_at`,
+    [id, req.ctx.tenant_id, site_id, b.report_date,
+      totals.total_sales, +b.total_cash || 0, +b.total_deposit || 0,
+      +b.diesel || 0, +b.expenses || 0, totals.balance,
+      JSON.stringify(b.sales || []), JSON.stringify(b.production || {}),
+      b.notes || null, status, req.user.id, submitted_at]);
+  await audit(req.ctx.tenant_id, req.user.id, existing ? 'UPDATE' : 'CREATE', 'report', id, { date: b.report_date, status });
   if (status === 'SUBMITTED') {
-    notify(req.ctx.tenant_id, tenantUserIds(req.ctx.tenant_id, 'GENERAL_MANAGER').filter((u) => u !== req.user.id),
+    const uids = (await tenantUserIds(req.ctx.tenant_id, 'GENERAL_MANAGER')).filter((u) => u !== req.user.id);
+    await notify(req.ctx.tenant_id, uids,
       { type: 'report', title: `Report submitted — ${site.name}`, body: `${b.report_date} · sales ₦${(totals.total_sales || 0).toLocaleString()}`, link: 'reports' });
   }
-  res.status(existing ? 200 : 201).json(reportView(db.prepare('SELECT * FROM daily_reports WHERE id=?').get(id)));
+  res.status(existing ? 200 : 201).json(reportView(await qone('SELECT * FROM daily_reports WHERE id=?', [id])));
 });
 
 router.post('/reports/:id/email', requireAuth, async (req, res) => {
-  const r = db.prepare('SELECT * FROM daily_reports WHERE id=?').get(req.params.id);
+  const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, r.tenant_id);
+  const c = await contextFor(req.user, r.tenant_id);
   if (!c || !atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'forbidden' });
-  const tenant = tenantById(r.tenant_id), site = siteById(r.site_id);
-  const recs = db.prepare('SELECT email FROM recipients WHERE tenant_id=? AND active=1').all(r.tenant_id).map((x) => x.email);
+  const tenant = await tenantById(r.tenant_id), site = await siteById(r.site_id);
+  const recs = (await qall('SELECT email FROM recipients WHERE tenant_id=? AND active=1', [r.tenant_id])).map((x) => x.email);
   const extra = Array.isArray(req.body?.extra) ? req.body.extra : [];
   const fallback = (process.env.DEFAULT_REPORT_RECIPIENTS || '').split(',').map((s) => s.trim()).filter(Boolean);
   const to = [...new Set([...recs, ...extra, ...(recs.length ? [] : fallback)])].filter(Boolean);
   if (!to.length) return res.status(400).json({ error: 'no recipients configured' });
-  const docs = db.prepare('SELECT * FROM documents WHERE report_id=?').all(r.id)
+  const docs = (await qall('SELECT * FROM documents WHERE report_id=?', [r.id]))
     .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));
   try {
     const sent = await sendDailyReport({ tenant, site, report: r, to, attachments: docs });
-    db.prepare('UPDATE daily_reports SET status=?, emailed_at=unixepoch() WHERE id=?').run('EMAILED', r.id);
-    db.prepare('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)').run(uuid(), r.tenant_id, r.id, to.join(','), sent.subject, 'SENT');
-    audit(r.tenant_id, req.user.id, 'EMAIL', 'report', r.id, { to });
+    await qrun('UPDATE daily_reports SET status=?, emailed_at=? WHERE id=?', ['EMAILED', nowS(), r.id]);
+    await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)',
+      [uuid(), r.tenant_id, r.id, to.join(','), sent.subject, 'SENT']);
+    await audit(r.tenant_id, req.user.id, 'EMAIL', 'report', r.id, { to });
     res.json({ ok: true, to, subject: sent.subject });
   } catch (e) {
-    db.prepare('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?,?)').run(uuid(), r.tenant_id, r.id, to.join(','), 'Daily report', 'FAILED', e.message);
+    await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?,?)',
+      [uuid(), r.tenant_id, r.id, to.join(','), 'Daily report', 'FAILED', e.message]);
     res.status(502).json({ error: 'email failed', detail: e.message });
   }
 });
 
 // ── DASHBOARD ──────────────────────────────────────────────────────────────────
-router.get('/dashboard', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+router.get('/dashboard', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   const { from, to } = req.query; const where = [], args = [];
-  if (s.ctx) { where.push('r.tenant_id=?'); args.push(s.ctx.tenant_id);
-    if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); } }
+  if (s.ctx) {
+    where.push('r.tenant_id=?'); args.push(s.ctx.tenant_id);
+    if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
+  }
   if (from) { where.push('r.report_date>=?'); args.push(from); }
   if (to) { where.push('r.report_date<=?'); args.push(to); }
   const W = where.length ? 'WHERE ' + where.join(' AND ') : '';
-  const totals = db.prepare(`SELECT COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(total_cash),0) cash,
-    COALESCE(SUM(total_deposit),0) deposit, COALESCE(SUM(diesel+expenses),0) costs, COUNT(*) reports FROM daily_reports r ${W}`).get(...args);
-  const bySite = db.prepare(`SELECT s.name site, COALESCE(SUM(r.total_sales),0) sales FROM daily_reports r JOIN sites s ON s.id=r.site_id ${W} GROUP BY s.id ORDER BY sales DESC LIMIT 20`).all(...args);
-  const byDay = db.prepare(`SELECT r.report_date day, COALESCE(SUM(r.total_sales),0) sales FROM daily_reports r ${W} GROUP BY r.report_date ORDER BY r.report_date DESC LIMIT 30`).all(...args);
-  res.json({ totals, bySite, byDay: byDay.reverse() });
+  const totals = await qone(`SELECT COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(total_cash),0) cash,
+    COALESCE(SUM(total_deposit),0) deposit, COALESCE(SUM(diesel+expenses),0) costs, COUNT(*) reports FROM daily_reports r ${W}`, args);
+  const bySite = await qall(`SELECT s.name site, COALESCE(SUM(r.total_sales),0) sales FROM daily_reports r JOIN sites s ON s.id=r.site_id ${W} GROUP BY s.id, s.name ORDER BY sales DESC LIMIT 20`, args);
+  const byDay = await qall(`SELECT r.report_date day, COALESCE(SUM(r.total_sales),0) sales FROM daily_reports r ${W} GROUP BY r.report_date ORDER BY r.report_date DESC LIMIT 30`, args);
+  res.json({ totals: { ...totals, reports: parseInt(totals.reports, 10) }, bySite, byDay: byDay.reverse() });
 });
 
 // ── DOCUMENTS ──────────────────────────────────────────────────────────────────
-router.get('/documents', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+router.get('/documents', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   const { category, site } = req.query; const where = [], args = [];
-  if (s.ctx) { where.push('d.tenant_id=?'); args.push(s.ctx.tenant_id);
-    if (s.ctx.role === 'SITE_MANAGER') { where.push('(d.site_id=? OR d.site_id IS NULL)'); args.push(s.ctx.site_id); } }
+  if (s.ctx) {
+    where.push('d.tenant_id=?'); args.push(s.ctx.tenant_id);
+    if (s.ctx.role === 'SITE_MANAGER') { where.push('(d.site_id=? OR d.site_id IS NULL)'); args.push(s.ctx.site_id); }
+  }
   if (category) { where.push('d.category=?'); args.push(category); }
   if (site) { where.push('d.site_id=?'); args.push(site); }
   const sql = `SELECT d.*, s.name site_name, u.name uploader FROM documents d
     LEFT JOIN sites s ON s.id=d.site_id LEFT JOIN users u ON u.id=d.uploaded_by
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY d.created_at DESC LIMIT 500`;
-  res.json(db.prepare(sql).all(...args));
+  res.json(await qall(sql, args));
 });
 
-router.post('/documents', requireAuth, needTenant('SITE_MANAGER'), upload.array('files', 10), (req, res) => {
+router.post('/documents', requireAuth, needTenant('SITE_MANAGER'), upload.array('files', 10), async (req, res) => {
   const files = req.files || []; if (!files.length) return res.status(400).json({ error: 'no files uploaded' });
   const b = req.body || {};
   const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
-  const ins = db.prepare(`INSERT INTO documents (id,tenant_id,site_id,report_id,category,title,description,file_name,stored_name,mime,size,uploaded_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
   const out = [];
   for (const f of files) {
     const id = uuid();
-    ins.run(id, req.ctx.tenant_id, site_id, b.report_id || null, (b.category || 'OTHER').toUpperCase(),
-      b.title || f.originalname, b.description || null, f.originalname, f.filename, f.mimetype, f.size, req.user.id);
-    out.push(db.prepare('SELECT * FROM documents WHERE id=?').get(id));
+    await qrun(`INSERT INTO documents (id,tenant_id,site_id,report_id,category,title,description,file_name,stored_name,mime,size,uploaded_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, req.ctx.tenant_id, site_id, b.report_id || null, (b.category || 'OTHER').toUpperCase(),
+        b.title || f.originalname, b.description || null, f.originalname, f.filename, f.mimetype, f.size, req.user.id]);
+    out.push(await qone('SELECT * FROM documents WHERE id=?', [id]));
   }
-  audit(req.ctx.tenant_id, req.user.id, 'UPLOAD', 'document', out[0].id, { count: files.length, category: b.category });
+  await audit(req.ctx.tenant_id, req.user.id, 'UPLOAD', 'document', out[0].id, { count: files.length, category: b.category });
   res.status(201).json(out);
 });
 
-router.get('/documents/:id/download', requireAuth, (req, res) => {
-  const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
+router.get('/documents/:id/download', requireAuth, async (req, res) => {
+  const d = await qone('SELECT * FROM documents WHERE id=?', [req.params.id]);
   if (!d) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, d.tenant_id);
+  const c = await contextFor(req.user, d.tenant_id);
   if (!c || (c.role === 'SITE_MANAGER' && d.site_id && d.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
   const p = path.join(UPLOAD_DIR, d.stored_name);
   if (!fs.existsSync(p)) return res.status(410).json({ error: 'file missing on disk' });
   res.download(p, d.file_name);
 });
 
-router.delete('/documents/:id', requireAuth, (req, res) => {
-  const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
+router.delete('/documents/:id', requireAuth, async (req, res) => {
+  const d = await qone('SELECT * FROM documents WHERE id=?', [req.params.id]);
   if (!d) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, d.tenant_id);
+  const c = await contextFor(req.user, d.tenant_id);
   if (!c || !atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'forbidden' });
   try { fs.unlinkSync(path.join(UPLOAD_DIR, d.stored_name)); } catch {}
-  db.prepare('DELETE FROM documents WHERE id=?').run(d.id);
-  audit(d.tenant_id, req.user.id, 'DELETE', 'document', d.id);
+  await qrun('DELETE FROM documents WHERE id=?', [d.id]);
+  await audit(d.tenant_id, req.user.id, 'DELETE', 'document', d.id);
   res.json({ ok: true });
 });
 
-// ── RECIPIENTS ──────────────────────────────────────────────────────────────────
-router.get('/recipients', requireAuth, needTenant('GENERAL_MANAGER'), (req, res) =>
-  res.json(db.prepare('SELECT * FROM recipients WHERE tenant_id=? ORDER BY email').all(req.ctx.tenant_id)));
-router.post('/recipients', requireAuth, needTenant('ADMIN'), (req, res) => {
+// ── RECIPIENTS ────────────────────────────────────────────────────────────────
+router.get('/recipients', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) =>
+  res.json(await qall('SELECT * FROM recipients WHERE tenant_id=? ORDER BY email', [req.ctx.tenant_id])));
+router.post('/recipients', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const { email, name } = req.body || {}; if (!email) return res.status(400).json({ error: 'email required' });
   const id = uuid();
-  try { db.prepare('INSERT INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?)').run(id, req.ctx.tenant_id, email, name || null); }
+  try { await qrun('INSERT INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?)', [id, req.ctx.tenant_id, email, name || null]); }
   catch { return res.status(409).json({ error: 'recipient already exists' }); }
-  res.status(201).json(db.prepare('SELECT * FROM recipients WHERE id=?').get(id));
+  res.status(201).json(await qone('SELECT * FROM recipients WHERE id=?', [id]));
 });
-router.delete('/recipients/:id', requireAuth, needTenant('ADMIN'), (req, res) => {
-  db.prepare('DELETE FROM recipients WHERE id=? AND tenant_id=?').run(req.params.id, req.ctx.tenant_id);
+router.delete('/recipients/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  await qrun('DELETE FROM recipients WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   res.json({ ok: true });
 });
 
 router.get('/mail/health', requireAuth, async (_req, res) => res.json(await verifyConnection()));
 
-// ── AI ASSISTANT ────────────────────────────────────────────────────────────
+// ── AI ASSISTANT ──────────────────────────────────────────────────────────────
 router.get('/ai/health', requireAuth, (_req, res) => res.json({ configured: aiConfigured() }));
 
-// Build a compact context snapshot for the active tenant so the assistant can
-// answer questions about the business's own numbers.
-function aiContext(req) {
-  const s = scope(req);
+async function aiContext(req) {
+  const s = await scope(req);
   if (s.error || s.all) return { scope: 'all companies', note: 'pick a workspace for company-specific figures' };
-  const t = tenantById(s.ctx.tenant_id);
+  const t = await tenantById(s.ctx.tenant_id);
   const where = ['r.tenant_id=?']; const args = [s.ctx.tenant_id];
   if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
   const W = 'WHERE ' + where.join(' AND ');
-  const totals = db.prepare(`SELECT COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(total_cash),0) cash,
-    COALESCE(SUM(total_deposit),0) deposit, COALESCE(SUM(diesel+expenses),0) costs, COUNT(*) reports FROM daily_reports r ${W}`).get(...args);
-  const recent = db.prepare(`SELECT r.report_date, s.name site, r.total_sales, r.balance FROM daily_reports r
-    JOIN sites s ON s.id=r.site_id ${W} ORDER BY r.report_date DESC LIMIT 15`).all(...args);
-  const sites = db.prepare('SELECT name, code FROM sites WHERE tenant_id=?').all(s.ctx.tenant_id);
+  const totals = await qone(`SELECT COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(total_cash),0) cash,
+    COALESCE(SUM(total_deposit),0) deposit, COALESCE(SUM(diesel+expenses),0) costs, COUNT(*) reports FROM daily_reports r ${W}`, args);
+  const recent = await qall(`SELECT r.report_date, s.name site, r.total_sales, r.balance FROM daily_reports r
+    JOIN sites s ON s.id=r.site_id ${W} ORDER BY r.report_date DESC LIMIT 15`, args);
+  const sites = await qall('SELECT name, code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id]);
   return { company: t.name, currency: t.currency, role: s.ctx.role, totals, sites, recent_reports: recent };
 }
 
-// AI tool: read this tenant's own Daybook data (tenant- and site-scoped).
-function daybookMetric(tenant_id, ctx, input) {
-  const args = { tenant: tenant_id }; let siteF = '';
-  if (ctx.role === 'SITE_MANAGER') { siteF = ' AND site_id=@site'; args.site = ctx.site_id; }
-  const dateW = (col) => { let w = ''; if (input.from) { w += ` AND ${col}>=@from`; args.from = input.from; } if (input.to) { w += ` AND ${col}<=@to`; args.to = input.to; } return w; };
+async function daybookMetric(tenant_id, ctx, input) {
+  const args = [tenant_id]; let siteF = '';
+  if (ctx.role === 'SITE_MANAGER') { siteF = ' AND site_id=$2'; args.push(ctx.site_id); }
+  const n = args.length;
+  const dateW = (col) => {
+    let w = ''; let i = args.length;
+    if (input.from) { i++; w += ` AND ${col}>=$${i}`; args.push(input.from); }
+    if (input.to) { i++; w += ` AND ${col}<=$${i}`; args.push(input.to); }
+    return w;
+  };
+  // Note: uses direct $N params since we build the SQL manually here
+  const base = `tenant_id=$1${siteF}`;
   switch (input.metric) {
-    case 'reports': return { metric: 'reports', ...db.prepare(`SELECT COUNT(*) reports, COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(diesel+expenses),0) costs, COALESCE(SUM(balance),0) balance FROM daily_reports WHERE tenant_id=@tenant${siteF}${dateW('report_date')}`).get(args) };
-    case 'staff': return { metric: 'staff', count: db.prepare(`SELECT COUNT(*) c FROM staff WHERE tenant_id=@tenant AND status='ACTIVE'${siteF}`).get(args).c };
-    case 'staff_hours': return { metric: 'staff_hours', ...db.prepare(`SELECT COUNT(CASE WHEN present=1 THEN 1 END) days_present, COALESCE(SUM(hours),0) hours, COALESCE(SUM(bags_bagged),0) bags_bagged, COALESCE(SUM(bags_loaded),0) bags_loaded FROM timesheets WHERE tenant_id=@tenant${siteF}${dateW('work_date')}`).get(args) };
-    case 'generators': return { metric: 'generators', rows: db.prepare(`SELECT name, fuel_type, capacity_kva FROM generators WHERE tenant_id=@tenant${siteF} ORDER BY name`).all(args) };
-    case 'generator_diesel': return { metric: 'generator_diesel', ...db.prepare(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE tenant_id=@tenant AND type='DIESEL'${siteF}${dateW('log_date')}`).get(args) };
-    case 'pos_sales': return { metric: 'pos_sales', ...db.prepare(`SELECT COUNT(*) sales, COALESCE(SUM(total),0) total FROM pos_sales WHERE tenant_id=@tenant${siteF}${dateW('sale_date')}`).get(args) };
+    case 'reports': return { metric: 'reports', ...(await qone(`SELECT COUNT(*) reports, COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(diesel+expenses),0) costs, COALESCE(SUM(balance),0) balance FROM daily_reports WHERE ${base}${dateW('report_date')}`, args)) };
+    case 'staff': return { metric: 'staff', count: parseInt((await qone(`SELECT COUNT(*) c FROM staff WHERE ${base} AND status='ACTIVE'`, args)).c, 10) };
+    case 'staff_hours': return { metric: 'staff_hours', ...(await qone(`SELECT COUNT(CASE WHEN present=1 THEN 1 END) days_present, COALESCE(SUM(hours),0) hours, COALESCE(SUM(bags_bagged),0) bags_bagged, COALESCE(SUM(bags_loaded),0) bags_loaded FROM timesheets WHERE ${base}${dateW('work_date')}`, args)) };
+    case 'generators': return { metric: 'generators', rows: await qall(`SELECT name, fuel_type, capacity_kva FROM generators WHERE ${base} ORDER BY name`, args) };
+    case 'generator_diesel': return { metric: 'generator_diesel', ...(await qone(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE ${base} AND type='DIESEL'${dateW('log_date')}`, args)) };
+    case 'pos_sales': return { metric: 'pos_sales', ...(await qone(`SELECT COUNT(*) sales, COALESCE(SUM(total),0) total FROM pos_sales WHERE ${base}${dateW('sale_date')}`, args)) };
     default: return { error: 'unknown metric' };
   }
 }
@@ -498,7 +509,7 @@ router.post('/ai/chat', requireAuth, async (req, res) => {
   const question = (req.body && req.body.message || '').toString().slice(0, 4000);
   if (!question.trim()) return res.status(400).json({ error: 'message required' });
   const history = Array.isArray(req.body.history) ? req.body.history.slice(-8) : [];
-  const ctx = aiContext(req);
+  const ctx = await aiContext(req);
   const system = `You are Daybook Assistant, a concise analyst inside Daybook — a daily sales & operations app for multi-site businesses. Help the signed-in user understand and act on THEIR OWN company's data only.
 
 Rules:
@@ -514,17 +525,13 @@ ${JSON.stringify(ctx)}`;
       .map((m) => ({ role: m.role, content: String(m.content).slice(0, 2000) })),
     { role: 'user', content: question },
   ];
-
-  // Give the assistant tools to read live data so it can answer ANY question —
-  // the fido Mongo (sales, expenses, payroll, staff) for POS-linked companies,
-  // plus this tenant's own Daybook data (reports, staff hours, generators, POS).
-  const sc = scope(req);
+  const sc = await scope(req);
   try {
     if (sc.ctx) {
       const tenant_id = sc.ctx.tenant_id;
-      let allowed = db.prepare('SELECT code FROM sites WHERE tenant_id=?').all(tenant_id).map((s) => s.code);
-      if (sc.ctx.role === 'SITE_MANAGER') { const me = siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
-      const pos = posEnabled(tenant_id);
+      let allowed = (await qall('SELECT code FROM sites WHERE tenant_id=?', [tenant_id])).map((s) => s.code);
+      if (sc.ctx.role === 'SITE_MANAGER') { const me = await siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
+      const pos = await posEnabled(tenant_id);
       const resolveSites = (input) => {
         if (!input.site) return allowed;
         const want = String(input.site).toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -532,19 +539,19 @@ ${JSON.stringify(ctx)}`;
       };
       const tools = [{
         name: 'query_daybook',
-        description: "Read this company's data entered in the Daybook app. metric: reports (daily report totals), staff (headcount), staff_hours (timesheet days/hours), generators (list), generator_diesel (litres+cost), pos_sales (in-app sales). Optional from/to date range (YYYY-MM-DD).",
+        description: "Read this company's data entered in the Daybook app. metric: reports, staff, staff_hours, generators, generator_diesel, pos_sales. Optional from/to date range (YYYY-MM-DD).",
         input_schema: { type: 'object', properties: {
           metric: { type: 'string', enum: ['reports', 'staff', 'staff_hours', 'generators', 'generator_diesel', 'pos_sales'] },
           from: { type: 'string' }, to: { type: 'string' },
         }, required: ['metric'] },
       }];
       if (pos) tools.push(
-        { name: 'query_pos_sales', description: 'Live POS sales (fido) aggregated by site/paymentMethod/product/day over a date range. Amounts in ₦.', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, site: { type: 'string' }, groupBy: { type: 'string', enum: ['site', 'paymentMethod', 'product', 'day'] } }, required: ['from', 'to'] } },
-        { name: 'query_expenses', description: 'Live expenses (fido) aggregated by site/category/day over a date range. Amounts in ₦.', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, site: { type: 'string' }, groupBy: { type: 'string', enum: ['site', 'category', 'day'] } }, required: ['from', 'to'] } },
-        { name: 'query_payroll', description: 'Live payroll (fido) gross/net totals by site for a given month + year.', input_schema: { type: 'object', properties: { month: { type: 'string', description: 'full month name e.g. May' }, year: { type: 'string' }, site: { type: 'string' } }, required: ['month', 'year'] } },
-        { name: 'count_staff', description: 'Live active staff headcount (fido) by site.', input_schema: { type: 'object', properties: { site: { type: 'string' } } } },
+        { name: 'query_pos_sales', description: 'Live POS sales (fido) aggregated.', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, site: { type: 'string' }, groupBy: { type: 'string', enum: ['site', 'paymentMethod', 'product', 'day'] } }, required: ['from', 'to'] } },
+        { name: 'query_expenses', description: 'Live expenses (fido).', input_schema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, site: { type: 'string' }, groupBy: { type: 'string', enum: ['site', 'category', 'day'] } }, required: ['from', 'to'] } },
+        { name: 'query_payroll', description: 'Live payroll (fido).', input_schema: { type: 'object', properties: { month: { type: 'string' }, year: { type: 'string' }, site: { type: 'string' } }, required: ['month', 'year'] } },
+        { name: 'count_staff', description: 'Live staff headcount (fido).', input_schema: { type: 'object', properties: { site: { type: 'string' } } } },
       );
-      const sysT = system + `\n\nTODAY is ${new Date().toISOString().slice(0, 10)}. ${pos ? `This company is connected to its LIVE operational database — use query_pos_sales, query_expenses, query_payroll, count_staff for real figures. You may only see these sites: ${allowed.join(', ')}.` : ''} Use query_daybook for anything entered in this Daybook app. Call tools as needed (you can call several) and answer precisely in ₦.`;
+      const sysT = system + `\n\nTODAY is ${new Date().toISOString().slice(0, 10)}. ${pos ? `This company is connected to its LIVE operational database — use query_pos_sales, query_expenses, query_payroll, count_staff for real figures. You may only see these sites: ${allowed.join(', ')}.` : ''} Use query_daybook for anything entered in this Daybook app.`;
       const runTool = async (name, input) => {
         try {
           if (name === 'query_pos_sales') { const s = resolveSites(input); return s.length ? { rows: await sales.query({ from: input.from, to: input.to, sites: s, groupBy: input.groupBy || 'site' }) } : { error: 'site not accessible', allowed }; }
@@ -566,26 +573,21 @@ ${JSON.stringify(ctx)}`;
   }
 });
 
-// ── SALES SOURCE (read-only fido POS Mongo) ───────────────────────────────────
-// Resolve the caller's access to a Daybook site; returns {site, ctx} or null.
-function siteAccess(req, siteId) {
-  const site = siteById(siteId);
-  if (!site) return null;
-  const c = contextFor(req.user, site.tenant_id);
-  if (!c) return null;
+// ── SALES SOURCE ──────────────────────────────────────────────────────────────
+async function siteAccess(req, siteId) {
+  const site = await siteById(siteId); if (!site) return null;
+  const c = await contextFor(req.user, site.tenant_id); if (!c) return null;
   if (c.role === 'SITE_MANAGER' && c.site_id !== site.id) return null;
   return { site, ctx: c };
 }
 
-router.get('/sales/status', requireAuth, (req, res) => res.json({ enabled: posEnabled(requestedTenant(req)) }));
+router.get('/sales/status', requireAuth, async (req, res) => res.json({ enabled: await posEnabled(requestedTenant(req)) }));
 
-// Pull a site+date's real sales from the POS for the manager to review/confirm.
 router.get('/sales/preview', requireAuth, async (req, res) => {
   const { site: siteId, date } = req.query;
   if (!siteId || !date) return res.status(400).json({ error: 'site and date required' });
-  const a = siteAccess(req, siteId);
-  if (!a) return res.status(403).json({ error: 'no access to this site' });
-  if (!posEnabled(a.site.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
+  const a = await siteAccess(req, siteId); if (!a) return res.status(403).json({ error: 'no access to this site' });
+  if (!await posEnabled(a.site.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   try {
     const s = await sales.getSales(a.site.code, date);
     let expenses = { total: 0, count: 0 };
@@ -594,15 +596,13 @@ router.get('/sales/preview', requireAuth, async (req, res) => {
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
 });
 
-// All of a company's sites' POS sales for ANY single date (live aggregate).
 router.get('/sales/by-date', requireAuth, async (req, res) => {
-  const s = scope(req);
-  if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
-  if (!posEnabled(s.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
-  const date = req.query.date;
-  if (!date) return res.status(400).json({ error: 'date required' });
-  let codes = db.prepare('SELECT code FROM sites WHERE tenant_id=?').all(s.ctx.tenant_id).map((x) => x.code);
-  if (s.ctx.role === 'SITE_MANAGER') { const me = siteById(s.ctx.site_id); codes = me ? [me.code] : []; }
+  const s = await scope(req);
+  if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  if (!await posEnabled(s.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
+  const date = req.query.date; if (!date) return res.status(400).json({ error: 'date required' });
+  let codes = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((x) => x.code);
+  if (s.ctx.role === 'SITE_MANAGER') { const me = await siteById(s.ctx.site_id); codes = me ? [me.code] : []; }
   if (!codes.length) return res.json({ date, rows: [], total: 0 });
   try {
     const rows = await sales.query({ from: date, to: date, sites: codes, groupBy: 'site' });
@@ -610,25 +610,22 @@ router.get('/sales/by-date', requireAuth, async (req, res) => {
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
 });
 
-// Read computed payroll (already finalised in the POS) for a month/year.
 router.get('/payroll', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
-  if (!posEnabled(req.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
+  if (!await posEnabled(req.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   try {
     const rows = await sales.getPayroll({ month: req.query.month, year: req.query.year, siteName: req.query.site });
     res.json(rows);
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
 });
 
-// AI analysis of a site+date (pulls POS sales when available).
 router.post('/ai/analyse', requireAuth, async (req, res) => {
   const { site: siteId, date } = req.body || {};
   if (!siteId || !date) return res.status(400).json({ error: 'site and date required' });
-  const a = siteAccess(req, siteId);
-  if (!a) return res.status(403).json({ error: 'no access to this site' });
+  const a = await siteAccess(req, siteId); if (!a) return res.status(403).json({ error: 'no access to this site' });
   let posData = null;
-  if (posEnabled(a.site.tenant_id)) { try { posData = await sales.getSales(a.site.code, date); } catch {} }
-  const existing = db.prepare('SELECT * FROM daily_reports WHERE tenant_id=? AND site_id=? AND report_date=?').get(a.site.tenant_id, siteId, date);
-  const system = `You are Daybook Assistant analysing one site's day for a water business. Be concise and practical: state total sales, cash vs transfer split, top products, and flag anything unusual (a payment method missing, a product with zero sales, sales far from typical). End with one recommended action. Money is Naira (₦).`;
+  if (await posEnabled(a.site.tenant_id)) { try { posData = await sales.getSales(a.site.code, date); } catch {} }
+  const existing = await qone('SELECT * FROM daily_reports WHERE tenant_id=? AND site_id=? AND report_date=?', [a.site.tenant_id, siteId, date]);
+  const system = `You are Daybook Assistant analysing one site's day for a water business. Be concise and practical: state total sales, cash vs transfer split, top products, and flag anything unusual. End with one recommended action. Money is Naira (₦).`;
   const payload = { site: a.site.name, date, pos_sales: posData, saved_report: existing ? { total_sales: existing.total_sales, total_cash: existing.total_cash, total_deposit: existing.total_deposit, diesel: existing.diesel, expenses: existing.expenses, balance: existing.balance } : null };
   try {
     const reply = await callAI({ system, messages: [{ role: 'user', content: 'Analyse this day:\n' + JSON.stringify(payload) }], maxTokens: 600 });
@@ -636,106 +633,102 @@ router.post('/ai/analyse', requireAuth, async (req, res) => {
   } catch (e) { res.status(e instanceof AIError ? e.httpStatus : 502).json({ error: e.userMessage || e.message, code: e.code }); }
 });
 
-// ── STAFF & TIMESHEETS (live staff-hours; Daybook-owned) ──────────────────────
-router.get('/staff', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
-  if (s.all) return res.json(db.prepare('SELECT * FROM staff ORDER BY full_name').all());
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(db.prepare("SELECT * FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name").all(s.ctx.tenant_id, s.ctx.site_id));
+// ── STAFF & TIMESHEETS ────────────────────────────────────────────────────────
+router.get('/staff', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  if (s.all) return res.json(await qall('SELECT * FROM staff ORDER BY full_name'));
+  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall("SELECT * FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name", [s.ctx.tenant_id, s.ctx.site_id]));
   const site = req.query.site;
-  res.json(site ? db.prepare('SELECT * FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name').all(s.ctx.tenant_id, site)
-    : db.prepare('SELECT * FROM staff WHERE tenant_id=? ORDER BY full_name').all(s.ctx.tenant_id));
+  res.json(site ? await qall('SELECT * FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name', [s.ctx.tenant_id, site])
+    : await qall('SELECT * FROM staff WHERE tenant_id=? ORDER BY full_name', [s.ctx.tenant_id]));
 });
-router.post('/staff', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+router.post('/staff', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {};
   const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
   if (!b.full_name || !site_id) return res.status(400).json({ error: 'full_name and site_id required' });
-  const site = siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
+  const site = await siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
   const id = uuid();
-  try { db.prepare('INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext_people_id) VALUES (?,?,?,?,?,?,?,?)').run(id, req.ctx.tenant_id, site_id, b.full_name.trim(), b.role_title || null, b.phone || null, b.pay_type || 'DAILY', b.ext_people_id || null); }
+  try { await qrun('INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext_people_id) VALUES (?,?,?,?,?,?,?,?)',
+    [id, req.ctx.tenant_id, site_id, b.full_name.trim(), b.role_title || null, b.phone || null, b.pay_type || 'DAILY', b.ext_people_id || null]); }
   catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
-  res.status(201).json(db.prepare('SELECT * FROM staff WHERE id=?').get(id));
+  res.status(201).json(await qone('SELECT * FROM staff WHERE id=?', [id]));
 });
-router.patch('/staff/:id', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
-  const st = db.prepare('SELECT * FROM staff WHERE id=?').get(req.params.id);
+router.patch('/staff/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const st = await qone('SELECT * FROM staff WHERE id=?', [req.params.id]);
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const f = req.body || {};
-  db.prepare('UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,status=?,site_id=? WHERE id=?')
-    .run(f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, f.pay_type ?? st.pay_type, f.status ?? st.status, req.ctx.role === 'SITE_MANAGER' ? st.site_id : (f.site_id ?? st.site_id), st.id);
-  res.json(db.prepare('SELECT * FROM staff WHERE id=?').get(st.id));
+  await qrun('UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,status=?,site_id=? WHERE id=?',
+    [f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, f.pay_type ?? st.pay_type, f.status ?? st.status, req.ctx.role === 'SITE_MANAGER' ? st.site_id : (f.site_id ?? st.site_id), st.id]);
+  res.json(await qone('SELECT * FROM staff WHERE id=?', [st.id]));
 });
-// Import staff from the POS `peoples` collection, matched to this tenant's sites.
 router.post('/staff/import', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
-  if (!posEnabled(req.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
+  if (!await posEnabled(req.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   try {
     const people = await sales.getStaff();
-    const sites = db.prepare('SELECT * FROM sites WHERE tenant_id=?').all(req.ctx.tenant_id);
+    const sites = await qall('SELECT * FROM sites WHERE tenant_id=?', [req.ctx.tenant_id]);
     const norm = (x) => String(x || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const ins = db.prepare('INSERT OR IGNORE INTO staff (id,tenant_id,site_id,full_name,ext_people_id) VALUES (?,?,?,?,?)');
     let added = 0;
     for (const p of people) {
       if (!p.name || !p.siteName) continue;
       const site = sites.find((s) => norm(s.code) === norm(p.siteName) || norm(s.name) === norm(p.siteName));
       if (!site) continue;
-      if (ins.run(uuid(), req.ctx.tenant_id, site.id, p.name, p.ext_id).changes) added++;
+      const r = await qrun('INSERT INTO staff (id,tenant_id,site_id,full_name,ext_people_id) VALUES (?,?,?,?,?) ON CONFLICT (tenant_id,site_id,full_name) DO NOTHING',
+        [uuid(), req.ctx.tenant_id, site.id, p.name, p.ext_id]);
+      if (r.rowCount) added++;
     }
-    audit(req.ctx.tenant_id, req.user.id, 'IMPORT', 'staff', null, { added });
+    await audit(req.ctx.tenant_id, req.user.id, 'IMPORT', 'staff', null, { added });
     res.json({ imported: added, scanned: people.length });
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
 });
 
-// ── TYPE-AHEAD SUGGESTIONS (staff + customers) ────────────────────────────────
-// Fido/Fiafia (pos_source) draw from the live fido directory; other companies
-// suggest from their own previously-entered records.
+// ── TYPE-AHEAD ────────────────────────────────────────────────────────────────
 router.get('/suggest/staff', requireAuth, async (req, res) => {
-  const s = scope(req); if (!s.ctx) return res.json([]);
+  const s = await scope(req); if (!s.ctx) return res.json([]);
   const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
-  if (posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchStaff(q)); } catch { /* fall back to local */ } }
-  res.json(db.prepare("SELECT DISTINCT full_name AS name, role_title AS role, phone FROM staff WHERE tenant_id=? AND full_name LIKE ? ORDER BY full_name LIMIT 8").all(s.ctx.tenant_id, `%${q}%`));
+  if (await posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchStaff(q)); } catch {} }
+  res.json(await qall("SELECT DISTINCT full_name AS name, role_title AS role, phone FROM staff WHERE tenant_id=? AND full_name LIKE ? ORDER BY full_name LIMIT 8", [s.ctx.tenant_id, `%${q}%`]));
 });
 router.get('/suggest/customers', requireAuth, async (req, res) => {
-  const s = scope(req); if (!s.ctx) return res.json([]);
+  const s = await scope(req); if (!s.ctx) return res.json([]);
   const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
-  if (posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchCustomers(q)); } catch { /* fall back to local */ } }
-  res.json(db.prepare('SELECT DISTINCT name, phone FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 8').all(s.ctx.tenant_id, `%${q}%`));
+  if (await posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchCustomers(q)); } catch {} }
+  res.json(await qall('SELECT DISTINCT name, phone FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 8', [s.ctx.tenant_id, `%${q}%`]));
 });
 
-// ── STAFF ATTENDANCE (shared-device clock-in: photo + signature + GPS) ────────
+// ── ATTENDANCE ────────────────────────────────────────────────────────────────
 const ATT_DIR = path.join(UPLOAD_DIR, 'attendance');
 fs.mkdirSync(ATT_DIR, { recursive: true });
-// Persist a small base64 data-URL (camera frame / signature) to disk. Returns filename.
 function saveDataUrl(dataUrl, tag) {
   if (typeof dataUrl !== 'string') return null;
   const m = dataUrl.match(/^data:image\/(png|jpe?g|webp);base64,(.+)$/);
   if (!m) return null;
   const buf = Buffer.from(m[2], 'base64');
-  if (buf.length > 4 * 1024 * 1024) throw new Error('image too large');     // cap ~4MB
+  if (buf.length > 4 * 1024 * 1024) throw new Error('image too large');
   const ext = m[1] === 'jpg' ? 'jpeg' : m[1];
   const name = `${tag}-${Date.now()}-${uuid().slice(0, 8)}.${ext}`;
   fs.writeFileSync(path.join(ATT_DIR, name), buf);
   return name;
 }
-// Today's attendance for a tenant/site, with staff names. Site managers see their site only.
-router.get('/attendance', requireAuth, (req, res) => {
-  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+router.get('/attendance', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const where = ['a.tenant_id=?', 'a.work_date=?'], args = [s.ctx.tenant_id, date];
   if (s.ctx.role === 'SITE_MANAGER') { where.push('a.site_id=?'); args.push(s.ctx.site_id); }
   else if (req.query.site) { where.push('a.site_id=?'); args.push(req.query.site); }
-  const rows = db.prepare(`SELECT a.*, st.full_name, si.name site_name FROM attendance a
+  const rows = await qall(`SELECT a.*, st.full_name, si.name site_name FROM attendance a
     LEFT JOIN staff st ON st.id=a.staff_id LEFT JOIN sites si ON si.id=a.site_id
-    WHERE ${where.join(' AND ')} ORDER BY a.clock_in DESC, st.full_name`).all(...args);
+    WHERE ${where.join(' AND ')} ORDER BY a.clock_in DESC, st.full_name`, args);
   res.json(rows.map((r) => ({
     id: r.id, staff_id: r.staff_id, staff: r.full_name, site_id: r.site_id, site: r.site_name, work_date: r.work_date,
     clock_in: r.clock_in, clock_out: r.clock_out, has_photo_in: !!r.photo_in, has_photo_out: !!r.photo_out, has_signature: !!r.signature,
     in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
   })));
 });
-// Clock a staff member in/out with a captured photo, signature and GPS fix.
-router.post('/attendance/clock', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+router.post('/attendance/clock', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {};
   const kind = b.kind === 'out' ? 'out' : 'in';
-  const st = db.prepare('SELECT * FROM staff WHERE id=?').get(b.staff_id);
+  const st = await qone('SELECT * FROM staff WHERE id=?', [b.staff_id]);
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid staff' });
   if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const date = (b.work_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
@@ -743,29 +736,30 @@ router.post('/attendance/clock', requireAuth, needTenant('SITE_MANAGER'), (req, 
   try { photo = saveDataUrl(b.photo, kind === 'out' ? 'out' : 'in'); sig = saveDataUrl(b.signature, 'sig'); }
   catch (e) { return res.status(400).json({ error: e.message }); }
   const now = nowS();
-  const existing = db.prepare('SELECT * FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=?').get(req.ctx.tenant_id, st.id, date);
+  const existing = await qone('SELECT * FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=?', [req.ctx.tenant_id, st.id, date]);
   const id = existing ? existing.id : uuid();
   const lat = b.lat != null ? Number(b.lat) : null, lng = b.lng != null ? Number(b.lng) : null, acc = b.accuracy != null ? Number(b.accuracy) : null;
   if (!existing) {
-    db.prepare(`INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,photo_in,signature,in_lat,in_lng,in_acc,captured_by)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, req.ctx.tenant_id, st.site_id, st.id, date,
-      kind === 'in' ? now : null, kind === 'in' ? photo : null, sig, kind === 'in' ? lat : null, kind === 'in' ? lng : null, kind === 'in' ? acc : null, req.user.id);
-    if (kind === 'out') db.prepare('UPDATE attendance SET clock_out=?, photo_out=?, out_lat=?, out_lng=?, out_acc=? WHERE id=?').run(now, photo, lat, lng, acc, id);
+    await qrun(`INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,photo_in,signature,in_lat,in_lng,in_acc,captured_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, req.ctx.tenant_id, st.site_id, st.id, date,
+        kind === 'in' ? now : null, kind === 'in' ? photo : null, sig,
+        kind === 'in' ? lat : null, kind === 'in' ? lng : null, kind === 'in' ? acc : null, req.user.id]);
+    if (kind === 'out') await qrun('UPDATE attendance SET clock_out=?, photo_out=?, out_lat=?, out_lng=?, out_acc=? WHERE id=?', [now, photo, lat, lng, acc, id]);
   } else if (kind === 'in') {
-    db.prepare('UPDATE attendance SET clock_in=?, photo_in=COALESCE(?,photo_in), signature=COALESCE(?,signature), in_lat=?, in_lng=?, in_acc=?, updated_at=? WHERE id=?')
-      .run(now, photo, sig, lat, lng, acc, now, id);
+    await qrun('UPDATE attendance SET clock_in=?, photo_in=COALESCE(?,photo_in), signature=COALESCE(?,signature), in_lat=?, in_lng=?, in_acc=?, updated_at=? WHERE id=?',
+      [now, photo, sig, lat, lng, acc, now, id]);
   } else {
-    db.prepare('UPDATE attendance SET clock_out=?, photo_out=COALESCE(?,photo_out), signature=COALESCE(?,signature), out_lat=?, out_lng=?, out_acc=?, updated_at=? WHERE id=?')
-      .run(now, photo, sig, lat, lng, acc, now, id);
+    await qrun('UPDATE attendance SET clock_out=?, photo_out=COALESCE(?,photo_out), signature=COALESCE(?,signature), out_lat=?, out_lng=?, out_acc=?, updated_at=? WHERE id=?',
+      [now, photo, sig, lat, lng, acc, now, id]);
   }
-  audit(req.ctx.tenant_id, req.user.id, kind === 'in' ? 'CLOCK_IN' : 'CLOCK_OUT', 'attendance', id, { staff: st.full_name, date });
+  await audit(req.ctx.tenant_id, req.user.id, kind === 'in' ? 'CLOCK_IN' : 'CLOCK_OUT', 'attendance', id, { staff: st.full_name, date });
   res.status(existing ? 200 : 201).json({ id, kind, clock: now });
 });
-// Serve a captured image (auth + tenant/site scoped). which = in | out | sig
-router.get('/attendance/:id/img/:which', requireAuth, (req, res) => {
-  const a = db.prepare('SELECT * FROM attendance WHERE id=?').get(req.params.id);
+router.get('/attendance/:id/img/:which', requireAuth, async (req, res) => {
+  const a = await qone('SELECT * FROM attendance WHERE id=?', [req.params.id]);
   if (!a) return res.status(404).end();
-  const c = contextFor(req.user, a.tenant_id);
+  const c = await contextFor(req.user, a.tenant_id);
   if (!c || (c.role === 'SITE_MANAGER' && a.site_id !== c.site_id)) return res.status(404).end();
   const name = req.params.which === 'out' ? a.photo_out : req.params.which === 'sig' ? a.signature : a.photo_in;
   if (!name) return res.status(404).end();
@@ -774,53 +768,60 @@ router.get('/attendance/:id/img/:which', requireAuth, (req, res) => {
   res.sendFile(p);
 });
 
-router.get('/timesheets', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
+// ── TIMESHEETS ────────────────────────────────────────────────────────────────
+router.get('/timesheets', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   const { site, from, to, date } = req.query; const where = [], args = [];
-  if (s.ctx) { where.push('t.tenant_id=?'); args.push(s.ctx.tenant_id);
+  if (s.ctx) {
+    where.push('t.tenant_id=?'); args.push(s.ctx.tenant_id);
     if (s.ctx.role === 'SITE_MANAGER') { where.push('t.site_id=?'); args.push(s.ctx.site_id); }
-    else if (site) { where.push('t.site_id=?'); args.push(site); } }
+    else if (site) { where.push('t.site_id=?'); args.push(site); }
+  }
   if (date) { where.push('t.work_date=?'); args.push(date); }
   if (from) { where.push('t.work_date>=?'); args.push(from); }
   if (to) { where.push('t.work_date<=?'); args.push(to); }
   const sql = `SELECT t.*, st.full_name FROM timesheets t JOIN staff st ON st.id=t.staff_id ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY t.work_date DESC, st.full_name LIMIT 2000`;
-  res.json(db.prepare(sql).all(...args));
+  res.json(await qall(sql, args));
 });
-router.post('/timesheets', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+router.post('/timesheets', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {}; const work_date = b.work_date; const entries = Array.isArray(b.entries) ? b.entries : [];
   const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
   if (!work_date || !site_id) return res.status(400).json({ error: 'work_date and site_id required' });
-  const up = db.prepare(`INSERT INTO timesheets (id,tenant_id,site_id,staff_id,work_date,present,hours,bags_bagged,bags_loaded,note,recorded_by)
-    VALUES (@id,@tenant_id,@site_id,@staff_id,@work_date,@present,@hours,@bags_bagged,@bags_loaded,@note,@recorded_by)
-    ON CONFLICT(staff_id,work_date) DO UPDATE SET present=@present,hours=@hours,bags_bagged=@bags_bagged,bags_loaded=@bags_loaded,note=@note,recorded_by=@recorded_by`);
   let n = 0;
   for (const e of entries) {
-    const st = db.prepare('SELECT tenant_id FROM staff WHERE id=?').get(e.staff_id);
+    const st = await qone('SELECT tenant_id FROM staff WHERE id=?', [e.staff_id]);
     if (!st || st.tenant_id !== req.ctx.tenant_id) continue;
-    up.run({ id: uuid(), tenant_id: req.ctx.tenant_id, site_id, staff_id: e.staff_id, work_date, present: e.present ? 1 : 0, hours: e.hours ?? null, bags_bagged: e.bags_bagged ?? null, bags_loaded: e.bags_loaded ?? null, note: e.note || null, recorded_by: req.user.id });
+    await qrun(
+      `INSERT INTO timesheets (id,tenant_id,site_id,staff_id,work_date,present,hours,bags_bagged,bags_loaded,note,recorded_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(staff_id,work_date) DO UPDATE SET
+         present=EXCLUDED.present, hours=EXCLUDED.hours, bags_bagged=EXCLUDED.bags_bagged,
+         bags_loaded=EXCLUDED.bags_loaded, note=EXCLUDED.note, recorded_by=EXCLUDED.recorded_by`,
+      [uuid(), req.ctx.tenant_id, site_id, e.staff_id, work_date, e.present ? 1 : 0,
+        e.hours ?? null, e.bags_bagged ?? null, e.bags_loaded ?? null, e.note || null, req.user.id]);
     n++;
   }
   res.json({ saved: n, work_date });
 });
-function tsSummary(tenant_id, site, from, to) {
+async function tsSummary(tenant_id, site, from, to) {
   const where = ['t.tenant_id=?'], args = [tenant_id];
   if (site) { where.push('t.site_id=?'); args.push(site); }
   if (from) { where.push('t.work_date>=?'); args.push(from); }
   if (to) { where.push('t.work_date<=?'); args.push(to); }
-  return db.prepare(`SELECT st.full_name staff, si.name site, COUNT(CASE WHEN t.present=1 THEN 1 END) days,
+  return qall(`SELECT st.full_name staff, si.name site, COUNT(CASE WHEN t.present=1 THEN 1 END) days,
     COALESCE(SUM(t.hours),0) hours, COALESCE(SUM(t.bags_bagged),0) bags_bagged, COALESCE(SUM(t.bags_loaded),0) bags_loaded
     FROM timesheets t JOIN staff st ON st.id=t.staff_id JOIN sites si ON si.id=t.site_id
-    WHERE ${where.join(' AND ')} GROUP BY t.staff_id ORDER BY si.name, st.full_name`).all(...args);
+    WHERE ${where.join(' AND ')} GROUP BY t.staff_id, st.full_name, si.name ORDER BY si.name, st.full_name`, args);
 }
-router.get('/timesheets/summary', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+router.get('/timesheets/summary', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const site = s.ctx.role === 'SITE_MANAGER' ? s.ctx.site_id : req.query.site;
-  res.json(tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to));
+  res.json(await tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to));
 });
-router.get('/timesheets/summary.csv', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error || !s.ctx) return res.status(400).send(s.error || 'select a workspace');
+router.get('/timesheets/summary.csv', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error || !s.ctx) return res.status(400).send(s.error || 'select a workspace');
   const site = s.ctx.role === 'SITE_MANAGER' ? s.ctx.site_id : req.query.site;
-  const rows = tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to);
+  const rows = await tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to);
   const csv = ['Staff,Site,Days,Hours,Bags Bagged,Bags Loaded',
     ...rows.map((r) => [r.staff, r.site, r.days, r.hours, r.bags_bagged, r.bags_loaded].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))].join('\n');
   res.setHeader('Content-Type', 'text/csv');
@@ -828,7 +829,6 @@ router.get('/timesheets/summary.csv', requireAuth, (req, res) => {
   res.send(csv);
 });
 
-// Manually run the POS→Daybook sync for a date (superadmin only).
 router.post('/sync/run', requireAuth, async (req, res) => {
   if (!req.user.is_superadmin) return res.status(403).json({ error: 'superadmin only' });
   if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
@@ -837,116 +837,114 @@ router.post('/sync/run', requireAuth, async (req, res) => {
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// ── GENERATORS (per-site power assets + diesel/maintenance logs) ──────────────
-router.get('/generators', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
-  if (s.all) return res.json(db.prepare('SELECT * FROM generators ORDER BY name').all());
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(db.prepare("SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name").all(s.ctx.tenant_id, s.ctx.site_id));
+// ── GENERATORS ────────────────────────────────────────────────────────────────
+router.get('/generators', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  if (s.all) return res.json(await qall('SELECT * FROM generators ORDER BY name'));
+  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall('SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name', [s.ctx.tenant_id, s.ctx.site_id]));
   const site = req.query.site;
-  res.json(site ? db.prepare('SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name').all(s.ctx.tenant_id, site)
-    : db.prepare('SELECT * FROM generators WHERE tenant_id=? ORDER BY name').all(s.ctx.tenant_id));
+  res.json(site ? await qall('SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name', [s.ctx.tenant_id, site])
+    : await qall('SELECT * FROM generators WHERE tenant_id=? ORDER BY name', [s.ctx.tenant_id]));
 });
-router.post('/generators', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+router.post('/generators', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {};
   const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
   if (!b.name) return res.status(400).json({ error: 'name required' });
-  if (site_id) { const site = siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' }); }
+  if (site_id) { const site = await siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' }); }
   const id = uuid();
-  db.prepare(`INSERT INTO generators (id,tenant_id,site_id,name,fuel_type,make_model,capacity_kva,serial_no,purchase_date,purchase_cost,notes,created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, req.ctx.tenant_id, site_id, b.name.trim(), (b.fuel_type || 'DIESEL'), b.make_model || null, b.capacity_kva || null, b.serial_no || null, b.purchase_date || null, b.purchase_cost || null, b.notes || null, req.user.id);
-  audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'generator', id, { name: b.name });
-  res.status(201).json(db.prepare('SELECT * FROM generators WHERE id=?').get(id));
+  await qrun(`INSERT INTO generators (id,tenant_id,site_id,name,fuel_type,make_model,capacity_kva,serial_no,purchase_date,purchase_cost,notes,created_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, req.ctx.tenant_id, site_id, b.name.trim(), b.fuel_type || 'DIESEL', b.make_model || null, b.capacity_kva || null, b.serial_no || null, b.purchase_date || null, b.purchase_cost || null, b.notes || null, req.user.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'generator', id, { name: b.name });
+  res.status(201).json(await qone('SELECT * FROM generators WHERE id=?', [id]));
 });
-router.patch('/generators/:id', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
-  const g = db.prepare('SELECT * FROM generators WHERE id=?').get(req.params.id);
+router.patch('/generators/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
   if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (req.ctx.role === 'SITE_MANAGER' && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const f = req.body || {};
-  db.prepare(`UPDATE generators SET name=?,fuel_type=?,make_model=?,capacity_kva=?,serial_no=?,purchase_date=?,purchase_cost=?,status=?,notes=? WHERE id=?`)
-    .run(f.name ?? g.name, f.fuel_type ?? g.fuel_type, f.make_model ?? g.make_model, f.capacity_kva ?? g.capacity_kva, f.serial_no ?? g.serial_no, f.purchase_date ?? g.purchase_date, f.purchase_cost ?? g.purchase_cost, f.status ?? g.status, f.notes ?? g.notes, g.id);
-  res.json(db.prepare('SELECT * FROM generators WHERE id=?').get(g.id));
+  await qrun(`UPDATE generators SET name=?,fuel_type=?,make_model=?,capacity_kva=?,serial_no=?,purchase_date=?,purchase_cost=?,status=?,notes=? WHERE id=?`,
+    [f.name ?? g.name, f.fuel_type ?? g.fuel_type, f.make_model ?? g.make_model, f.capacity_kva ?? g.capacity_kva, f.serial_no ?? g.serial_no, f.purchase_date ?? g.purchase_date, f.purchase_cost ?? g.purchase_cost, f.status ?? g.status, f.notes ?? g.notes, g.id]);
+  res.json(await qone('SELECT * FROM generators WHERE id=?', [g.id]));
 });
-router.get('/generators/:id/logs', requireAuth, (req, res) => {
-  const g = db.prepare('SELECT * FROM generators WHERE id=?').get(req.params.id);
+router.get('/generators/:id/logs', requireAuth, async (req, res) => {
+  const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
   if (!g) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, g.tenant_id);
+  const c = await contextFor(req.user, g.tenant_id);
   if (!c || (c.role === 'SITE_MANAGER' && g.site_id && g.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
   const { from, to } = req.query; const where = ['generator_id=?'], args = [g.id];
   if (from) { where.push('log_date>=?'); args.push(from); }
   if (to) { where.push('log_date<=?'); args.push(to); }
-  const logs = db.prepare(`SELECT * FROM generator_logs WHERE ${where.join(' AND ')} ORDER BY log_date DESC, created_at DESC LIMIT 500`).all(...args);
-  const tot = db.prepare(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE ${where.join(' AND ')} AND type='DIESEL'`).get(...args);
+  const logs = await qall(`SELECT * FROM generator_logs WHERE ${where.join(' AND ')} ORDER BY log_date DESC, created_at DESC LIMIT 500`, args);
+  const tot = await qone(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE ${where.join(' AND ')} AND type='DIESEL'`, args);
   res.json({ logs, diesel_total: tot });
 });
-router.post('/generators/:id/logs', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
-  const g = db.prepare('SELECT * FROM generators WHERE id=?').get(req.params.id);
+router.post('/generators/:id/logs', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
   if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (req.ctx.role === 'SITE_MANAGER' && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const b = req.body || {}; const type = (b.type || 'DIESEL').toUpperCase();
   if (!['DIESEL', 'MAINTENANCE', 'NOTE'].includes(type)) return res.status(400).json({ error: 'invalid type' });
   const id = uuid();
-  db.prepare(`INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,cost,runtime_hours,detail,recorded_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(id, g.tenant_id, g.id, g.site_id, b.log_date || new Date().toISOString().slice(0, 10), type, b.litres ?? null, b.cost ?? null, b.runtime_hours ?? null, b.detail || null, req.user.id);
-  res.status(201).json(db.prepare('SELECT * FROM generator_logs WHERE id=?').get(id));
+  await qrun(`INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,cost,runtime_hours,detail,recorded_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, g.tenant_id, g.id, g.site_id, b.log_date || new Date().toISOString().slice(0, 10), type, b.litres ?? null, b.cost ?? null, b.runtime_hours ?? null, b.detail || null, req.user.id]);
+  res.status(201).json(await qone('SELECT * FROM generator_logs WHERE id=?', [id]));
 });
 
-// ── IN-APP POS (products, customers, live sales, inventory) ───────────────────
-// Available to self-contained tenants (those NOT linked to the external fido POS).
-function internalPos(tenant_id) { const t = tenantById(tenant_id); return !!t && !t.pos_source; }
-
-router.get('/products', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error) return res.status(403).json({ error: s.error });
-  if (s.all) return res.json(db.prepare('SELECT * FROM products ORDER BY name').all());
-  res.json(db.prepare("SELECT * FROM products WHERE tenant_id=? ORDER BY status, name").all(s.ctx.tenant_id));
+// ── IN-APP POS ────────────────────────────────────────────────────────────────
+router.get('/products', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
+  if (s.all) return res.json(await qall('SELECT * FROM products ORDER BY name'));
+  res.json(await qall("SELECT * FROM products WHERE tenant_id=? ORDER BY status, name", [s.ctx.tenant_id]));
 });
-router.post('/products', requireAuth, needTenant('GENERAL_MANAGER'), (req, res) => {
+router.post('/products', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
   const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'name required' });
   const id = uuid();
   try {
-    db.prepare(`INSERT INTO products (id,tenant_id,name,category,price,cost,sku,unit,track_stock,stock_qty)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, req.ctx.tenant_id, b.name.trim(), b.category || null, +b.price || 0, +b.cost || 0, b.sku || null, b.unit || 'unit', b.track_stock === false ? 0 : 1, +b.stock_qty || 0);
+    await qrun(`INSERT INTO products (id,tenant_id,name,category,price,cost,sku,unit,track_stock,stock_qty)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [id, req.ctx.tenant_id, b.name.trim(), b.category || null, +b.price || 0, +b.cost || 0, b.sku || null, b.unit || 'unit', b.track_stock === false ? 0 : 1, +b.stock_qty || 0]);
   } catch { return res.status(409).json({ error: 'product name already exists' }); }
-  res.status(201).json(db.prepare('SELECT * FROM products WHERE id=?').get(id));
+  res.status(201).json(await qone('SELECT * FROM products WHERE id=?', [id]));
 });
-router.patch('/products/:id', requireAuth, needTenant('GENERAL_MANAGER'), (req, res) => {
-  const p = db.prepare('SELECT * FROM products WHERE id=?').get(req.params.id);
+router.patch('/products/:id', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+  const p = await qone('SELECT * FROM products WHERE id=?', [req.params.id]);
   if (!p || p.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   const f = req.body || {};
-  db.prepare('UPDATE products SET name=?,category=?,price=?,cost=?,sku=?,unit=?,track_stock=?,status=? WHERE id=?')
-    .run(f.name ?? p.name, f.category ?? p.category, f.price ?? p.price, f.cost ?? p.cost, f.sku ?? p.sku, f.unit ?? p.unit, f.track_stock != null ? (f.track_stock ? 1 : 0) : p.track_stock, f.status ?? p.status, p.id);
-  res.json(db.prepare('SELECT * FROM products WHERE id=?').get(p.id));
+  await qrun('UPDATE products SET name=?,category=?,price=?,cost=?,sku=?,unit=?,track_stock=?,status=? WHERE id=?',
+    [f.name ?? p.name, f.category ?? p.category, f.price ?? p.price, f.cost ?? p.cost, f.sku ?? p.sku, f.unit ?? p.unit, f.track_stock != null ? (f.track_stock ? 1 : 0) : p.track_stock, f.status ?? p.status, p.id]);
+  res.json(await qone('SELECT * FROM products WHERE id=?', [p.id]));
 });
-// Stock movement (purchase / manual adjust). qty signed.
-router.post('/products/:id/stock', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
-  const p = db.prepare('SELECT * FROM products WHERE id=?').get(req.params.id);
+router.post('/products/:id/stock', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const p = await qone('SELECT * FROM products WHERE id=?', [req.params.id]);
   if (!p || p.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   const b = req.body || {}; const qty = +b.qty || 0; const type = (b.type || 'ADJUST').toUpperCase();
   if (!qty) return res.status(400).json({ error: 'qty required' });
-  db.prepare('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,unit_cost,note,created_by) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(uuid(), p.tenant_id, p.id, req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null), ['PURCHASE', 'ADJUST'].includes(type) ? type : 'ADJUST', qty, +b.unit_cost || null, b.note || null, req.user.id);
-  db.prepare('UPDATE products SET stock_qty=stock_qty+? WHERE id=?').run(qty, p.id);
-  res.json(db.prepare('SELECT * FROM products WHERE id=?').get(p.id));
+  await qrun('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,unit_cost,note,created_by) VALUES (?,?,?,?,?,?,?,?,?)',
+    [uuid(), p.tenant_id, p.id, req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null), ['PURCHASE', 'ADJUST'].includes(type) ? type : 'ADJUST', qty, +b.unit_cost || null, b.note || null, req.user.id]);
+  await qrun('UPDATE products SET stock_qty=stock_qty+? WHERE id=?', [qty, p.id]);
+  res.json(await qone('SELECT * FROM products WHERE id=?', [p.id]));
 });
 
-router.get('/customers', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+router.get('/customers', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const q = req.query.q;
-  res.json(q ? db.prepare("SELECT * FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 50").all(s.ctx.tenant_id, '%' + q + '%')
-    : db.prepare('SELECT * FROM customers WHERE tenant_id=? ORDER BY name LIMIT 200').all(s.ctx.tenant_id));
+  res.json(q ? await qall("SELECT * FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 50", [s.ctx.tenant_id, '%' + q + '%'])
+    : await qall('SELECT * FROM customers WHERE tenant_id=? ORDER BY name LIMIT 200', [s.ctx.tenant_id]));
 });
-router.post('/customers', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+router.post('/customers', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'name required' });
   const id = uuid();
-  db.prepare('INSERT INTO customers (id,tenant_id,name,phone,email,note) VALUES (?,?,?,?,?,?)').run(id, req.ctx.tenant_id, b.name.trim(), b.phone || null, b.email || null, b.note || null);
-  res.status(201).json(db.prepare('SELECT * FROM customers WHERE id=?').get(id));
+  await qrun('INSERT INTO customers (id,tenant_id,name,phone,email,note) VALUES (?,?,?,?,?,?)',
+    [id, req.ctx.tenant_id, b.name.trim(), b.phone || null, b.email || null, b.note || null]);
+  res.status(201).json(await qone('SELECT * FROM customers WHERE id=?', [id]));
 });
 
-// Record a live sale → decrements stock, assigns a receipt number, returns the sale.
-router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
+router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {};
-  // Idempotency: a re-sent offline sale (same client_uid) returns the original.
   if (b.client_uid) {
-    const dup = db.prepare('SELECT * FROM pos_sales WHERE tenant_id=? AND client_uid=?').get(req.ctx.tenant_id, b.client_uid);
+    const dup = await qone('SELECT * FROM pos_sales WHERE tenant_id=? AND client_uid=?', [req.ctx.tenant_id, b.client_uid]);
     if (dup) return res.status(200).json(dup);
   }
   const items = Array.isArray(b.items) ? b.items.filter((i) => i.product_id && (+i.qty > 0)) : [];
@@ -954,7 +952,7 @@ router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), (req, res) =>
   const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
   const lines = [];
   for (const it of items) {
-    const p = db.prepare('SELECT * FROM products WHERE id=? AND tenant_id=?').get(it.product_id, req.ctx.tenant_id);
+    const p = await qone('SELECT * FROM products WHERE id=? AND tenant_id=?', [it.product_id, req.ctx.tenant_id]);
     if (!p) return res.status(400).json({ error: 'invalid product in cart' });
     const qty = +it.qty; const price = it.price != null ? +it.price : p.price; const amount = qty * price;
     lines.push({ product_id: p.id, name: p.name, qty, price, amount, track: p.track_stock });
@@ -966,45 +964,44 @@ router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), (req, res) =>
   const balance = +(total - amount_paid).toFixed(2);
   const status = balance <= 0 ? 'PAID' : (amount_paid > 0 ? 'PART' : 'UNPAID');
   const id = uuid();
-  const nextNo = (db.prepare('SELECT COALESCE(MAX(receipt_no),0)+1 n FROM pos_sales WHERE tenant_id=?').get(req.ctx.tenant_id).n);
+  const nextNoRow = await qone('SELECT COALESCE(MAX(receipt_no),0)+1 n FROM pos_sales WHERE tenant_id=?', [req.ctx.tenant_id]);
+  const nextNo = parseInt(nextNoRow.n, 10);
   const sale_date = b.sale_date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
-  db.prepare(`INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,client_uid,sold_by)
-    VALUES (@id,@tenant_id,@site_id,@receipt_no,@customer_id,@customer_name,@items_json,@subtotal,@discount,@total,@payment_method,@amount_paid,@balance,@status,@sale_date,@client_uid,@sold_by)`)
-    .run({ id, tenant_id: req.ctx.tenant_id, site_id, receipt_no: nextNo, customer_id: b.customer_id || null, customer_name: b.customer_name || null,
-      items_json: JSON.stringify(lines.map((l) => ({ product_id: l.product_id, name: l.name, qty: l.qty, price: l.price, amount: l.amount }))),
-      subtotal, discount, total, payment_method: (b.payment_method || 'CASH').toUpperCase(), amount_paid, balance, status, sale_date, client_uid: b.client_uid || null, sold_by: req.user.id });
-  // stock decrement + inventory move
+  await qrun(
+    `INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,client_uid,sold_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, req.ctx.tenant_id, site_id, nextNo, b.customer_id || null, b.customer_name || null,
+      JSON.stringify(lines.map((l) => ({ product_id: l.product_id, name: l.name, qty: l.qty, price: l.price, amount: l.amount }))),
+      subtotal, discount, total, (b.payment_method || 'CASH').toUpperCase(), amount_paid, balance, status, sale_date, b.client_uid || null, req.user.id]);
   for (const l of lines) {
     if (!l.track) continue;
-    db.prepare('UPDATE products SET stock_qty=stock_qty-? WHERE id=?').run(l.qty, l.product_id);
-    db.prepare('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,ref,created_by) VALUES (?,?,?,?,?,?,?,?)')
-      .run(uuid(), req.ctx.tenant_id, l.product_id, site_id, 'SALE', -l.qty, 'receipt#' + nextNo, req.user.id);
+    await qrun('UPDATE products SET stock_qty=stock_qty-? WHERE id=?', [l.qty, l.product_id]);
+    await qrun('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,ref,created_by) VALUES (?,?,?,?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, l.product_id, site_id, 'SALE', -l.qty, 'receipt#' + nextNo, req.user.id]);
   }
-  res.status(201).json(db.prepare('SELECT * FROM pos_sales WHERE id=?').get(id));
+  res.status(201).json(await qone('SELECT * FROM pos_sales WHERE id=?', [id]));
 });
-router.get('/pos/sales', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+router.get('/pos/sales', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const { from, to, site } = req.query; const where = ['p.tenant_id=?'], args = [s.ctx.tenant_id];
   if (s.ctx.role === 'SITE_MANAGER') { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
   if (from) { where.push('p.sale_date>=?'); args.push(from); }
   if (to) { where.push('p.sale_date<=?'); args.push(to); }
-  res.json(db.prepare(`SELECT p.*, s.name site_name FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 300`).all(...args));
+  res.json(await qall(`SELECT p.*, s.name site_name FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 300`, args));
 });
-router.get('/pos/sales/:id', requireAuth, (req, res) => {
-  const sale = db.prepare('SELECT * FROM pos_sales WHERE id=?').get(req.params.id);
+router.get('/pos/sales/:id', requireAuth, async (req, res) => {
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, sale.tenant_id);
+  const c = await contextFor(req.user, sale.tenant_id);
   if (!c || (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
-  res.json({ ...sale, items: J(sale.items_json, []), tenant: tenantById(sale.tenant_id), site: sale.site_id ? siteById(sale.site_id) : null });
+  res.json({ ...sale, items: J(sale.items_json, []), tenant: await tenantById(sale.tenant_id), site: sale.site_id ? await siteById(sale.site_id) : null });
 });
-// Per-day POS summary (feeds the dashboard panel + daily report pull for self-contained tenants).
-router.get('/pos/summary', requireAuth, (req, res) => {
-  const s = scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+router.get('/pos/summary', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const date = req.query.date; if (!date) return res.status(400).json({ error: 'date required' });
   const where = ['tenant_id=?', 'sale_date=?'], args = [s.ctx.tenant_id, date];
   if (s.ctx.role === 'SITE_MANAGER') { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
-  const W = 'WHERE ' + where.join(' AND ');
-  const rows = db.prepare(`SELECT * FROM pos_sales ${W}`).all(...args);
+  const rows = await qall(`SELECT * FROM pos_sales WHERE ${where.join(' AND ')}`, args);
   const total = rows.reduce((a, r) => a + (r.total || 0), 0);
   const pay = {}; const prod = {};
   for (const r of rows) {
@@ -1016,260 +1013,243 @@ router.get('/pos/summary', requireAuth, (req, res) => {
     payments: Object.entries(pay).map(([method, amount]) => ({ method, amount })), lines: Object.values(prod) });
 });
 
-// ── STAFF CHAT (WhatsApp-style, per company; channel = 'team' or a site_id) ───
-router.get('/chat/channels', requireAuth, (req, res) => {
-  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+// ── CHAT ──────────────────────────────────────────────────────────────────────
+router.get('/chat/channels', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const out = [{ id: 'team', name: 'Team', kind: 'team' }];
-  let sites = db.prepare('SELECT id, name, code FROM sites WHERE tenant_id=? ORDER BY name').all(s.ctx.tenant_id);
+  let sites = await qall('SELECT id, name, code FROM sites WHERE tenant_id=? ORDER BY name', [s.ctx.tenant_id]);
   if (s.ctx.role === 'SITE_MANAGER') sites = sites.filter((x) => x.id === s.ctx.site_id);
   for (const x of sites) out.push({ id: x.id, name: x.name, code: x.code, kind: 'site' });
   res.json(out);
 });
-router.get('/chat/messages', requireAuth, (req, res) => {
-  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+router.get('/chat/messages', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const channel = req.query.channel || 'team';
-  if (!channelAllowed(s.ctx, channel)) return res.status(403).json({ error: 'no access to this channel' });
+  if (!await channelAllowed(s.ctx, channel)) return res.status(403).json({ error: 'no access to this channel' });
   const since = parseInt(req.query.since, 10) || 0;
-  const rows = db.prepare(`SELECT id, channel, user_id, user_name, body, created_at FROM messages
-    WHERE tenant_id=? AND channel=? AND created_at>? ORDER BY created_at ASC, id ASC LIMIT 200`)
-    .all(s.ctx.tenant_id, channel, since);
+  const rows = await qall(`SELECT id, channel, user_id, user_name, body, created_at FROM messages
+    WHERE tenant_id=? AND channel=? AND created_at>? ORDER BY created_at ASC, id ASC LIMIT 200`,
+    [s.ctx.tenant_id, channel, since]);
   res.json(rows.map((m) => ({ ...m, mine: m.user_id === req.user.id })));
 });
-router.post('/chat/messages', requireAuth, (req, res) => {
-  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+router.post('/chat/messages', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const b = req.body || {};
   const channel = b.channel || 'team';
   const body = (b.body || '').toString().trim();
   if (!body) return res.status(400).json({ error: 'empty message' });
-  if (!channelAllowed(s.ctx, channel)) return res.status(403).json({ error: 'no access to this channel' });
-  // Idempotent on client_uid so offline re-sends don't duplicate.
+  if (!await channelAllowed(s.ctx, channel)) return res.status(403).json({ error: 'no access to this channel' });
   if (b.client_uid) {
-    const dup = db.prepare('SELECT id FROM messages WHERE tenant_id=? AND client_uid=?').get(s.ctx.tenant_id, b.client_uid);
+    const dup = await qone('SELECT id FROM messages WHERE tenant_id=? AND client_uid=?', [s.ctx.tenant_id, b.client_uid]);
     if (dup) return res.json({ id: dup.id, duplicate: true });
   }
   const id = uuid();
   const name = req.user.name || req.user.email;
-  db.prepare('INSERT INTO messages (id,tenant_id,channel,user_id,user_name,body,client_uid) VALUES (?,?,?,?,?,?,?)')
-    .run(id, s.ctx.tenant_id, channel, req.user.id, name, body.slice(0, 2000), b.client_uid || null);
-  // Notify the rest of the channel audience (skip self) so the bell lights up.
-  let audience = tenantUserIds(s.ctx.tenant_id, 'SITE_MANAGER');
+  await qrun('INSERT INTO messages (id,tenant_id,channel,user_id,user_name,body,client_uid) VALUES (?,?,?,?,?,?,?)',
+    [id, s.ctx.tenant_id, channel, req.user.id, name, body.slice(0, 2000), b.client_uid || null]);
+  let audience = await tenantUserIds(s.ctx.tenant_id, 'SITE_MANAGER');
   if (channel !== 'team') {
-    const siteUsers = db.prepare("SELECT user_id, role, site_id FROM memberships WHERE tenant_id=? AND user_id IS NOT NULL").all(s.ctx.tenant_id)
+    const siteUsers = (await qall("SELECT user_id, role, site_id FROM memberships WHERE tenant_id=? AND user_id IS NOT NULL", [s.ctx.tenant_id]))
       .filter((m) => atLeast(m.role, 'GENERAL_MANAGER') || m.site_id === channel).map((m) => m.user_id);
     audience = siteUsers;
   }
-  const label = channel === 'team' ? 'Team chat' : (siteById(channel) || {}).name || 'Site chat';
-  notify(s.ctx.tenant_id, audience.filter((u) => u !== req.user.id),
+  const siteName = channel !== 'team' ? ((await siteById(channel)) || {}).name || 'Site chat' : null;
+  const label = channel === 'team' ? 'Team chat' : siteName;
+  await notify(s.ctx.tenant_id, audience.filter((u) => u !== req.user.id),
     { type: 'chat', title: `${name} · ${label}`, body: body.slice(0, 120), link: `chat:${channel}` });
   res.status(201).json({ id, channel, user_id: req.user.id, user_name: name, body, created_at: nowS(), mine: true });
 });
 
-// ── NOTIFICATIONS (in-app bell) ───────────────────────────────────────────────
-router.get('/notifications', requireAuth, (req, res) => {
+// ── NOTIFICATIONS ─────────────────────────────────────────────────────────────
+router.get('/notifications', requireAuth, async (req, res) => {
   const tid = requestedTenant(req);
   const args = [req.user.id]; let tw = '';
   if (tid) { tw = ' AND (tenant_id=? OR tenant_id IS NULL)'; args.push(tid); }
-  const list = db.prepare(`SELECT * FROM notifications WHERE user_id=?${tw} ORDER BY created_at DESC LIMIT 60`).all(...args);
-  const unread = db.prepare(`SELECT COUNT(*) n FROM notifications WHERE user_id=? AND read=0${tw}`).get(...args).n;
-  res.json({ unread, list });
+  const list = await qall(`SELECT * FROM notifications WHERE user_id=?${tw} ORDER BY created_at DESC LIMIT 60`, args);
+  const unreadRow = await qone(`SELECT COUNT(*) n FROM notifications WHERE user_id=? AND read=0${tw}`, args);
+  res.json({ unread: parseInt(unreadRow.n, 10), list });
 });
-router.post('/notifications/read', requireAuth, (req, res) => {
+router.post('/notifications/read', requireAuth, async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
   if (ids && ids.length) {
-    const q = db.prepare('UPDATE notifications SET read=1 WHERE user_id=? AND id=?');
-    for (const i of ids) q.run(req.user.id, i);
+    for (const i of ids) await qrun('UPDATE notifications SET read=1 WHERE user_id=? AND id=?', [req.user.id, i]);
   } else {
-    db.prepare('UPDATE notifications SET read=1 WHERE user_id=?').run(req.user.id);
+    await qrun('UPDATE notifications SET read=1 WHERE user_id=?', [req.user.id]);
   }
   res.json({ ok: true });
 });
 
-// ── FEATURE REQUESTS (any member submits; admins + superadmin triage) ─────────
-router.get('/feature-requests', requireAuth, (req, res) => {
+// ── FEATURE REQUESTS ──────────────────────────────────────────────────────────
+router.get('/feature-requests', requireAuth, async (req, res) => {
   if (req.user.is_superadmin && !requestedTenant(req)) {
-    return res.json(db.prepare(`SELECT f.*, t.name tenant_name FROM feature_requests f LEFT JOIN tenants t ON t.id=f.tenant_id ORDER BY f.created_at DESC LIMIT 200`).all());
+    return res.json(await qall(`SELECT f.*, t.name tenant_name FROM feature_requests f LEFT JOIN tenants t ON t.id=f.tenant_id ORDER BY f.created_at DESC LIMIT 200`));
   }
-  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
-  res.json(db.prepare('SELECT * FROM feature_requests WHERE tenant_id=? ORDER BY created_at DESC LIMIT 200').all(s.ctx.tenant_id));
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  res.json(await qall('SELECT * FROM feature_requests WHERE tenant_id=? ORDER BY created_at DESC LIMIT 200', [s.ctx.tenant_id]));
 });
-router.post('/feature-requests', requireAuth, (req, res) => {
-  const s = scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+router.post('/feature-requests', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const b = req.body || {};
   const title = (b.title || '').toString().trim();
   if (!title) return res.status(400).json({ error: 'title required' });
   const id = uuid(); const name = req.user.name || req.user.email;
-  db.prepare('INSERT INTO feature_requests (id,tenant_id,user_id,user_name,title,body) VALUES (?,?,?,?,?,?)')
-    .run(id, s.ctx.tenant_id, req.user.id, name, title.slice(0, 160), (b.body || '').toString().slice(0, 4000));
-  audit(s.ctx.tenant_id, req.user.id, 'CREATE', 'feature_request', id, { title });
-  // Notify the tenant's admins + every superadmin (the product team triages these).
-  const supers = db.prepare('SELECT id FROM users WHERE is_superadmin=1').all().map((u) => u.id);
-  notify(s.ctx.tenant_id, [...tenantUserIds(s.ctx.tenant_id, 'ADMIN'), ...supers].filter((u) => u !== req.user.id),
-    { type: 'feature', title: `Feature request — ${tenantById(s.ctx.tenant_id)?.name || ''}`, body: title.slice(0, 120), link: 'admin' });
-  res.status(201).json(db.prepare('SELECT * FROM feature_requests WHERE id=?').get(id));
+  await qrun('INSERT INTO feature_requests (id,tenant_id,user_id,user_name,title,body) VALUES (?,?,?,?,?,?)',
+    [id, s.ctx.tenant_id, req.user.id, name, title.slice(0, 160), (b.body || '').toString().slice(0, 4000)]);
+  await audit(s.ctx.tenant_id, req.user.id, 'CREATE', 'feature_request', id, { title });
+  const supers = (await qall('SELECT id FROM users WHERE is_superadmin=1')).map((u) => u.id);
+  const t = await tenantById(s.ctx.tenant_id);
+  await notify(s.ctx.tenant_id, [...await tenantUserIds(s.ctx.tenant_id, 'ADMIN'), ...supers].filter((u) => u !== req.user.id),
+    { type: 'feature', title: `Feature request — ${t?.name || ''}`, body: title.slice(0, 120), link: 'admin' });
+  res.status(201).json(await qone('SELECT * FROM feature_requests WHERE id=?', [id]));
 });
-router.patch('/feature-requests/:id', requireAuth, (req, res) => {
-  const fr = db.prepare('SELECT * FROM feature_requests WHERE id=?').get(req.params.id);
+router.patch('/feature-requests/:id', requireAuth, async (req, res) => {
+  const fr = await qone('SELECT * FROM feature_requests WHERE id=?', [req.params.id]);
   if (!fr) return res.status(404).json({ error: 'not found' });
-  const c = contextFor(req.user, fr.tenant_id);
+  const c = await contextFor(req.user, fr.tenant_id);
   const canTriage = req.user.is_superadmin || (c && atLeast(c.role, 'ADMIN'));
   if (!canTriage) return res.status(403).json({ error: 'admins only' });
   const b = req.body || {};
   const ok = ['NEW', 'PLANNED', 'IN_PROGRESS', 'DONE', 'DECLINED'];
   const status = ok.includes(b.status) ? b.status : fr.status;
-  db.prepare('UPDATE feature_requests SET status=?, updated_at=unixepoch() WHERE id=?').run(status, fr.id);
-  // Tell the requester when their idea changes state.
+  await qrun('UPDATE feature_requests SET status=?, updated_at=? WHERE id=?', [status, nowS(), fr.id]);
   if (status !== fr.status && fr.user_id && fr.user_id !== req.user.id) {
-    notify(fr.tenant_id, [fr.user_id], { type: 'feature', title: `Your request is now ${status}`, body: fr.title, link: 'admin' });
+    await notify(fr.tenant_id, [fr.user_id], { type: 'feature', title: `Your request is now ${status}`, body: fr.title, link: 'admin' });
   }
-  res.json(db.prepare('SELECT * FROM feature_requests WHERE id=?').get(fr.id));
+  res.json(await qone('SELECT * FROM feature_requests WHERE id=?', [fr.id]));
 });
 
-// ── BILLING (superadmin: mark a tenant paid / extend / reactivate) ────────────
-router.post('/tenants/:id/billing', requireAuth, (req, res) => {
+// ── BILLING ───────────────────────────────────────────────────────────────────
+router.post('/tenants/:id/billing', requireAuth, async (req, res) => {
   if (!req.user.is_superadmin) return res.status(403).json({ error: 'superadmin only' });
-  const t = tenantById(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
+  const t = await tenantById(req.params.id); if (!t) return res.status(404).json({ error: 'not found' });
   const b = req.body || {};
   const now = Math.floor(Date.now() / 1000);
   const paid_until = b.paid_until ? parseInt(b.paid_until, 10)
     : (b.months ? now + parseInt(b.months, 10) * 2629800 : t.paid_until);
-  db.prepare('UPDATE tenants SET paid_until=?, plan=?, status=? WHERE id=?')
-    .run(paid_until, b.plan ?? t.plan, b.status ?? 'ACTIVE', t.id);
-  audit(t.id, req.user.id, 'BILLING', 'tenant', t.id, { paid_until, plan: b.plan });
-  res.json(tenantById(t.id));
+  await qrun('UPDATE tenants SET paid_until=?, plan=?, status=? WHERE id=?',
+    [paid_until, b.plan ?? t.plan, b.status ?? 'ACTIVE', t.id]);
+  await audit(t.id, req.user.id, 'BILLING', 'tenant', t.id, { paid_until, plan: b.plan });
+  res.json(await tenantById(t.id));
 });
 
-// ── SELF-SERVE SUBSCRIPTION (Monnify primary · Paystack fallback · Lemon Squeezy)
-const MONTH_SECS = 2629800; // ~30.44 days
+const MONTH_SECS = 2629800;
 
-// Apply a verified successful payment to its tenant (idempotent on the reference).
-function applyPaidPayment(reference, rawData) {
-  const p = db.prepare('SELECT * FROM payments WHERE reference=?').get(reference);
+async function applyPaidPayment(reference, rawData) {
+  const p = await qone('SELECT * FROM payments WHERE reference=?', [reference]);
   if (!p) return { error: 'unknown reference' };
-  if (p.status === 'SUCCESS') return { tenant: tenantById(p.tenant_id), already: true };
-  const t = tenantById(p.tenant_id); if (!t) return { error: 'tenant gone' };
+  if (p.status === 'SUCCESS') return { tenant: await tenantById(p.tenant_id), already: true };
+  const t = await tenantById(p.tenant_id); if (!t) return { error: 'tenant gone' };
   const now = Math.floor(Date.now() / 1000);
-  const base = Math.max(now, t.paid_until || 0);             // extend, don't truncate existing time
+  const base = Math.max(now, t.paid_until || 0);
   const paid_until = base + (p.months || 1) * MONTH_SECS;
-  db.prepare("UPDATE tenants SET paid_until=?, plan=?, status='ACTIVE' WHERE id=?").run(paid_until, p.plan || t.plan, t.id);
-  db.prepare("UPDATE payments SET status='SUCCESS', paid_at=?, raw=? WHERE id=?").run(now, rawData ? JSON.stringify(rawData).slice(0, 8000) : p.raw, p.id);
-  audit(t.id, p.created_by, 'SUBSCRIBE', 'tenant', t.id, { reference, provider: p.provider, plan: p.plan, months: p.months, paid_until });
-  notify(t.id, tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription active', body: `${p.plan} · ${p.months} month(s)`, link: 'admin' });
-  return { tenant: tenantById(t.id) };
+  await qrun("UPDATE tenants SET paid_until=?, plan=?, status='ACTIVE' WHERE id=?", [paid_until, p.plan || t.plan, t.id]);
+  await qrun("UPDATE payments SET status='SUCCESS', paid_at=?, raw=? WHERE id=?", [now, rawData ? JSON.stringify(rawData).slice(0, 8000) : p.raw, p.id]);
+  await audit(t.id, p.created_by, 'SUBSCRIBE', 'tenant', t.id, { reference, provider: p.provider, plan: p.plan, months: p.months, paid_until });
+  await notify(t.id, await tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription active', body: `${p.plan} · ${p.months} month(s)`, link: 'admin' });
+  return { tenant: await tenantById(t.id) };
 }
-// Confirm a one-off payment with its gateway and apply it. Shared by verify + webhooks.
 async function confirmPayment(reference) {
-  const p = db.prepare('SELECT * FROM payments WHERE reference=?').get(reference);
+  const p = await qone('SELECT * FROM payments WHERE reference=?', [reference]);
   if (!p) return { status: 'unknown' };
-  if (p.status === 'SUCCESS') return { status: 'success', tenant: tenantById(p.tenant_id) };
+  if (p.status === 'SUCCESS') return { status: 'success', tenant: await tenantById(p.tenant_id) };
   const r = await payments.verifyGateway(p.provider, { reference: p.reference, providerReference: p.provider_reference, amountNaira: p.amount });
-  if (r.ok) { const a = applyPaidPayment(reference, r.data || { raw: r.raw }); return { status: 'success', tenant: a.tenant }; }
-  db.prepare("UPDATE payments SET status='FAILED' WHERE reference=? AND status<>'SUCCESS'").run(reference);
+  if (r.ok) { const a = await applyPaidPayment(reference, r.data || { raw: r.raw }); return { status: 'success', tenant: a.tenant }; }
+  await qrun("UPDATE payments SET status='FAILED' WHERE reference=? AND status<>'SUCCESS'", [reference]);
   return { status: r.raw || 'pending' };
 }
 
-// Plans + which rails are available. Same shape every Torama app exposes.
 router.get('/billing/plans', requireAuth, (_req, res) => res.json({
   enabled: payments.paymentsEnabled(), provider: payments.activeProvider(), currency: payments.CURRENCY,
   public_key: payments.paystack.PUBLIC, plans: payments.planList(),
   subscription: { enabled: ls.subscriptionsEnabled(), price_label: ls.priceLabel() },
-  autorenew: { enabled: payments.paystack.paystackEnabled(), provider: 'paystack' }, // Paystack Plans (NGN auto-renew)
+  autorenew: { enabled: payments.paystack.paystackEnabled(), provider: 'paystack' },
 }));
 
-// Resolve (lazily creating + caching) the Paystack plan code for planType×interval.
 async function ensurePaystackPlan(planType, interval) {
   const meta = payments.PLANS[planType]; if (!meta) throw new Error('unknown plan');
   const intv = interval === 'annually' ? 'annually' : 'monthly';
   const key = `${planType}_${intv}`;
-  const cached = db.prepare('SELECT plan_code FROM payment_plans WHERE code=?').get(key);
+  const cached = await qone('SELECT plan_code FROM payment_plans WHERE code=?', [key]);
   if (cached && cached.plan_code) return { plan_code: cached.plan_code, interval: intv, amountKobo: (intv === 'annually' ? meta.price * 12 : meta.price) * 100 };
   const amountKobo = (intv === 'annually' ? meta.price * 12 : meta.price) * 100;
   const created = await payments.paystack.createPlan({ name: `Daybook ${meta.name} (${intv})`, amountKobo, interval: intv });
-  db.prepare('INSERT OR REPLACE INTO payment_plans (id,code,provider,plan_code,interval,amount) VALUES (?,?,?,?,?,?)')
-    .run(uuid(), key, 'paystack', created.plan_code, intv, amountKobo / 100);
+  await qrun('INSERT INTO payment_plans (id,code,provider,plan_code,interval,amount) VALUES (?,?,?,?,?,?) ON CONFLICT (code) DO UPDATE SET plan_code=EXCLUDED.plan_code',
+    [uuid(), key, 'paystack', created.plan_code, intv, amountKobo / 100]);
   return { plan_code: created.plan_code, interval: intv, amountKobo };
 }
 
-// Apply a Paystack subscription charge (first + every renewal) to its tenant. Idempotent on reference.
-function applySubscriptionCharge(data) {
+async function applySubscriptionCharge(data) {
   const reference = data && data.reference; if (!reference) return;
-  if (db.prepare("SELECT 1 FROM payments WHERE reference=? AND status='SUCCESS'").get(reference)) return; // already applied
+  if (await qone("SELECT 1 FROM payments WHERE reference=? AND status='SUCCESS'", [reference])) return;
   const meta = data.metadata || {};
   const custCode = data.customer && data.customer.customer_code;
-  let t = meta.tenant_id ? tenantById(meta.tenant_id) : null;
-  if (!t && custCode) t = db.prepare('SELECT * FROM tenants WHERE ps_customer_code=?').get(custCode);
+  let t = meta.tenant_id ? await tenantById(meta.tenant_id) : null;
+  if (!t && custCode) t = await qone('SELECT * FROM tenants WHERE ps_customer_code=?', [custCode]);
   if (!t) return;
   const interval = (data.plan && data.plan.interval) || meta.interval || 'monthly';
   const now = Math.floor(Date.now() / 1000);
   const add = (interval === 'annually' ? 12 : 1) * MONTH_SECS;
   const base = Math.max(now, t.paid_until || 0);
   const paid_until = base + add;
-  db.prepare(`UPDATE tenants SET paid_until=?, plan=COALESCE(?,plan), status='ACTIVE', subscription_status='active',
-      ps_customer_code=COALESCE(?,ps_customer_code), ps_subscription_code=COALESCE(?,ps_subscription_code), subscription_renews_at=? WHERE id=?`)
-    .run(paid_until, meta.plan || null, custCode || null, data.subscription_code || null, paid_until, t.id);
-  // Record the charge for reconciliation/idempotency.
-  db.prepare(`INSERT OR IGNORE INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,status,paid_at,raw)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(uuid(), t.id, reference, meta.plan || t.plan, interval === 'annually' ? 12 : 1,
-      Math.round((Number(data.amount) || 0) / 100), payments.CURRENCY, 'paystack', 'SUCCESS', now, JSON.stringify(data).slice(0, 8000));
-  audit(t.id, null, 'SUBSCRIBE_RENEW', 'tenant', t.id, { reference, interval, paid_until });
-  notify(t.id, tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription renewed', body: `Auto-renew · paid through ${new Date(paid_until * 1000).toLocaleDateString()}`, link: 'admin' });
+  await qrun(`UPDATE tenants SET paid_until=?, plan=COALESCE(?,plan), status='ACTIVE', subscription_status='active',
+      ps_customer_code=COALESCE(?,ps_customer_code), ps_subscription_code=COALESCE(?,ps_subscription_code), subscription_renews_at=? WHERE id=?`,
+    [paid_until, meta.plan || null, custCode || null, data.subscription_code || null, paid_until, t.id]);
+  await qrun(`INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,status,paid_at,raw)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (reference) DO NOTHING`,
+    [uuid(), t.id, reference, meta.plan || t.plan, interval === 'annually' ? 12 : 1,
+      Math.round((Number(data.amount) || 0) / 100), payments.CURRENCY, 'paystack', 'SUCCESS', now, JSON.stringify(data).slice(0, 8000)]);
+  await audit(t.id, null, 'SUBSCRIBE_RENEW', 'tenant', t.id, { reference, interval, paid_until });
+  await notify(t.id, await tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription renewed', body: `Auto-renew · paid through ${new Date(paid_until * 1000).toLocaleDateString()}`, link: 'admin' });
 }
 
-// Start a one-off checkout (plan × months). Admin only. Routes to the active rail.
 router.post('/billing/checkout', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const provider = payments.activeProvider();
   if (!provider) return res.status(503).json({ error: 'billing not configured', code: 'no_provider' });
-  const t = tenantById(req.ctx.tenant_id);
+  const t = await tenantById(req.ctx.tenant_id);
   if (t.plan === 'OWNER') return res.status(400).json({ error: 'this workspace does not require a subscription' });
   const b = req.body || {};
   const price = payments.priceFor(b.plan, b.months);
   if (!price) return res.status(400).json({ error: 'unknown plan' });
   const reference = 'DBK-' + t.id.slice(0, 8) + '-' + Date.now().toString(36) + '-' + uuid().slice(0, 6);
-  const email = req.user.email;
-  db.prepare('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,email,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)')
-    .run(uuid(), t.id, reference, b.plan, price.months, price.naira, payments.CURRENCY, provider, email, req.user.id);
+  await qrun('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,email,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [uuid(), t.id, reference, b.plan, price.months, price.naira, payments.CURRENCY, provider, req.user.email, req.user.id]);
   const callback_url = (process.env.PAYMENT_CALLBACK_URL || process.env.PUBLIC_BASE_URL || '') + '/?pay=' + reference;
   try {
-    const g = await payments.initGateway(provider, { email, customerName: t.name, reference, price,
+    const g = await payments.initGateway(provider, { email: req.user.email, customerName: t.name, reference, price,
       metadata: { tenant_id: t.id, plan: b.plan, months: price.months, custom_fields: [{ display_name: 'Workspace', variable_name: 'workspace', value: t.name }] },
       callback_url, label: `Daybook · ${t.name} (${b.plan})`, description: `Daybook ${b.plan} · ${price.months} month(s)` });
     if (g.providerReference && g.providerReference !== reference)
-      db.prepare('UPDATE payments SET provider_reference=? WHERE reference=?').run(g.providerReference, reference);
+      await qrun('UPDATE payments SET provider_reference=? WHERE reference=?', [g.providerReference, reference]);
     res.json({ authorization_url: g.url, provider, reference, amount: price.naira, currency: payments.CURRENCY, months: price.months });
   } catch (e) {
-    db.prepare("UPDATE payments SET status='FAILED' WHERE reference=?").run(reference);
+    await qrun("UPDATE payments SET status='FAILED' WHERE reference=?", [reference]);
     res.status(502).json({ error: e.message });
   }
 });
 
-// Verify a reference (called when the user returns from the gateway). Idempotent.
 router.get('/billing/verify', requireAuth, async (req, res) => {
   const reference = req.query.reference; if (!reference) return res.status(400).json({ error: 'reference required' });
-  const p = db.prepare('SELECT * FROM payments WHERE reference=?').get(reference);
+  const p = await qone('SELECT * FROM payments WHERE reference=?', [reference]);
   if (!p) return res.status(404).json({ error: 'unknown reference' });
-  if (!contextFor(req.user, p.tenant_id)) return res.status(403).json({ error: 'not your workspace' });
+  if (!await contextFor(req.user, p.tenant_id)) return res.status(403).json({ error: 'not your workspace' });
   try { res.json(await confirmPayment(reference)); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// Reconcile the latest pending payment for a tenant by re-checking the gateway.
-// Safety net for a payer who closed the checkout tab before redirecting back —
-// called when the billing screen loads. Only credits on success; never fails a
-// payment (it may still complete later), mirroring VOTE's verify-on-view.
 router.get('/billing/reconcile', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!payments.activeProvider()) return res.json({ status: 'none' });
-  const p = db.prepare("SELECT * FROM payments WHERE tenant_id=? AND status='PENDING' ORDER BY created_at DESC LIMIT 1").get(req.ctx.tenant_id);
+  const p = await qone("SELECT * FROM payments WHERE tenant_id=? AND status='PENDING' ORDER BY created_at DESC LIMIT 1", [req.ctx.tenant_id]);
   if (!p) return res.json({ status: 'none' });
   try {
     const r = await payments.verifyGateway(p.provider, { reference: p.reference, providerReference: p.provider_reference, amountNaira: p.amount });
-    if (r.ok) { const a = applyPaidPayment(p.reference, r.data || { raw: r.raw }); return res.json({ status: 'success', tenant: a.tenant }); }
-    return res.json({ status: 'pending' });          // leave it pending; do not fail
-  } catch (e) { return res.json({ status: 'pending' }); }
+    if (r.ok) { const a = await applyPaidPayment(p.reference, r.data || { raw: r.raw }); return res.json({ status: 'success', tenant: a.tenant }); }
+    return res.json({ status: 'pending' });
+  } catch { return res.json({ status: 'pending' }); }
 });
 
-// ── Paystack auto-renew subscription (NGN Plans) ──────────────────────────────
 router.post('/billing/autorenew', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!payments.paystack.paystackEnabled()) return res.status(503).json({ error: 'auto-renew not configured', code: 'no_paystack' });
-  const t = tenantById(req.ctx.tenant_id);
+  const t = await tenantById(req.ctx.tenant_id);
   if (t.plan === 'OWNER') return res.status(400).json({ error: 'this workspace does not require a subscription' });
   const b = req.body || {};
   if (!payments.PLANS[b.plan]) return res.status(400).json({ error: 'unknown plan' });
@@ -1277,19 +1257,16 @@ router.post('/billing/autorenew', requireAuth, needTenant('ADMIN'), async (req, 
   try {
     const plan = await ensurePaystackPlan(b.plan, interval);
     const reference = 'DBKSUB-' + t.id.slice(0, 8) + '-' + Date.now().toString(36) + '-' + uuid().slice(0, 6);
-    db.prepare('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,email,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(uuid(), t.id, reference, b.plan, interval === 'annually' ? 12 : 1, plan.amountKobo / 100, payments.CURRENCY, 'paystack', req.user.email, req.user.id);
+    await qrun('INSERT INTO payments (id,tenant_id,reference,plan,months,amount,currency,provider,email,created_by) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [uuid(), t.id, reference, b.plan, interval === 'annually' ? 12 : 1, plan.amountKobo / 100, payments.CURRENCY, 'paystack', req.user.email, req.user.id]);
     const callback_url = (process.env.PAYMENT_CALLBACK_URL || process.env.PUBLIC_BASE_URL || '') + '/?pay=' + reference;
     const data = await payments.paystack.initTransaction({ email: req.user.email, amountKobo: plan.amountKobo, reference,
       plan: plan.plan_code, currency: payments.CURRENCY, callback_url, label: `Daybook ${b.plan} · auto-renew (${interval})`,
       metadata: { tenant_id: t.id, plan: b.plan, interval, kind: 'subscription' } });
     res.json({ authorization_url: data.authorization_url, reference, interval, plan: b.plan });
-  } catch (e) {
-    res.status(502).json({ error: e.message });
-  }
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// ── Lemon Squeezy recurring subscription (alternative to the one-off rails) ────
 router.post('/billing/subscribe', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!ls.subscriptionsEnabled()) return res.status(503).json({ error: 'subscriptions not configured', code: 'no_ls' });
   try {
@@ -1299,27 +1276,24 @@ router.post('/billing/subscribe', requireAuth, needTenant('ADMIN'), async (req, 
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// ── Per-provider webhooks (signed; authoritative confirmation re-queries gateway)
-// Paystack — HMAC-SHA512 (x-paystack-signature). Handles one-off + subscription events.
 router.post(['/billing/webhook', '/billing/webhook/paystack'], async (req, res) => {
   if (!payments.paystack.verifySignature(req.rawBody, req.headers['x-paystack-signature'])) return res.status(401).json({ error: 'bad signature' });
   res.json({ received: true });
   const evt = req.body || {}; const data = evt.data || {};
   try {
     if (evt.event === 'charge.success') {
-      if (data.plan && data.plan.plan_code) applySubscriptionCharge(data);   // subscription first-charge / renewal
-      else if (data.reference) confirmPayment(data.reference).catch(() => {}); // one-off
+      if (data.plan && data.plan.plan_code) applySubscriptionCharge(data).catch(() => {});
+      else if (data.reference) confirmPayment(data.reference).catch(() => {});
     } else if (evt.event === 'subscription.create' && data.subscription_code) {
       const cust = data.customer && data.customer.customer_code;
-      const t = cust && db.prepare('SELECT id FROM tenants WHERE ps_customer_code=?').get(cust);
-      if (t) db.prepare("UPDATE tenants SET ps_subscription_code=?, subscription_status='active' WHERE id=?").run(data.subscription_code, t.id);
+      const t = cust && await qone('SELECT id FROM tenants WHERE ps_customer_code=?', [cust]);
+      if (t) await qrun("UPDATE tenants SET ps_subscription_code=?, subscription_status='active' WHERE id=?", [data.subscription_code, t.id]);
     } else if ((evt.event === 'subscription.disable' || evt.event === 'subscription.not_renew') && data.subscription_code) {
       const status = evt.event === 'subscription.disable' ? 'cancelled' : 'non-renewing';
-      db.prepare('UPDATE tenants SET subscription_status=? WHERE ps_subscription_code=?').run(status, data.subscription_code);
+      await qrun('UPDATE tenants SET subscription_status=? WHERE ps_subscription_code=?', [status, data.subscription_code]);
     }
   } catch (e) { console.warn('[billing] paystack webhook', e.message); }
 });
-// Monnify — HMAC-SHA512 of raw body with secret (monnify-signature); reference echoed as eventData.paymentReference
 router.post('/billing/webhook/monnify', (req, res) => {
   const secret = payments.monnify.SECRET_KEY;
   if (!secret) return res.sendStatus(200);
@@ -1331,11 +1305,15 @@ router.post('/billing/webhook/monnify', (req, res) => {
   const ref = req.body && req.body.eventData && req.body.eventData.paymentReference;
   if (ref) confirmPayment(ref).catch((e) => console.warn('[billing] monnify webhook', ref, e.message));
 });
-// Lemon Squeezy — HMAC-SHA256 (x-signature)
 router.post('/billing/webhook/lemonsqueezy', (req, res) => {
   if (!ls.verifyWebhookSignature(req.rawBody, String(req.headers['x-signature'] || ''))) return res.status(401).json({ error: 'bad signature' });
   res.sendStatus(200);
   try { ls.applySubscriptionEvent(req.rawBody); } catch (e) { console.warn('[billing] ls webhook', e.message); }
 });
+
+// ── PHASE 3 FEATURE MODULES ───────────────────────────────────────────────────
+router.use('/expenses',  require('./routes_expenses'));
+router.use('/logistics', require('./routes_logistics'));
+router.use('/payroll',   require('./routes_payroll'));
 
 module.exports = router;

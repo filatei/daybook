@@ -13,7 +13,7 @@
 'use strict';
 
 const { v4: uuid } = require('uuid');
-const { getDb } = require('./db');
+const { qone, qall, qrun } = require('./db');
 
 const TENANTS = [
   { slug: 'fido', name: 'Fido Water', brand_color: '#0ea5e9', industry: 'Water production',
@@ -32,19 +32,17 @@ const TENANTS = [
     ] },
 ];
 
-function ensureSeed() {
-  const db = getDb();
-
+async function ensureSeed() {
   // ── platform superadmins ──────────────────────────────────────────────────
   const supers = (process.env.SUPERADMIN_EMAILS || 'filatei@gmail.com,filatei@torama.money')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   for (const email of supers) {
-    const u = db.prepare('SELECT * FROM users WHERE lower(email)=lower(?)').get(email);
+    const u = await qone('SELECT * FROM users WHERE lower(email)=lower(?)', [email]);
     if (!u) {
-      db.prepare('INSERT INTO users (id,email,name,is_superadmin) VALUES (?,?,?,1)').run(uuid(), email, 'Platform Admin');
+      await qrun('INSERT INTO users (id,email,name,is_superadmin) VALUES (?,?,?,1)', [uuid(), email, 'Platform Admin']);
       console.log(`[seed] superadmin ${email}`);
     } else if (!u.is_superadmin) {
-      db.prepare('UPDATE users SET is_superadmin=1 WHERE id=?').run(u.id);
+      await qrun('UPDATE users SET is_superadmin=1 WHERE id=?', [u.id]);
     }
   }
 
@@ -52,25 +50,31 @@ function ensureSeed() {
   const recipients = (process.env.DEFAULT_REPORT_RECIPIENTS || 'dailyreports@gtsng.com')
     .split(',').map((s) => s.trim()).filter(Boolean);
   for (const t of TENANTS) {
-    let tenant = db.prepare('SELECT * FROM tenants WHERE slug=?').get(t.slug);
+    let tenant = await qone('SELECT * FROM tenants WHERE slug=?', [t.slug]);
     if (!tenant) {
       const id = uuid();
-      db.prepare('INSERT INTO tenants (id,slug,name,brand_color,industry,plan,pos_source) VALUES (?,?,?,?,?,?,?)')
-        .run(id, t.slug, t.name, t.brand_color, t.industry, 'OWNER', 'FIDO');
+      await qrun('INSERT INTO tenants (id,slug,name,brand_color,industry,plan,pos_source) VALUES (?,?,?,?,?,?,?)',
+        [id, t.slug, t.name, t.brand_color, t.industry, 'OWNER', 'FIDO']);
       tenant = { id };
       console.log(`[seed] tenant ${t.name}`);
     } else if (!tenant.pos_source) {
       // backfill existing Fido/Fiafia rows with the POS link + owner plan
-      db.prepare("UPDATE tenants SET pos_source='FIDO', plan='OWNER' WHERE id=?").run(tenant.id);
+      await qrun("UPDATE tenants SET pos_source='FIDO', plan='OWNER' WHERE id=?", [tenant.id]);
     }
     for (const s of t.sites) {
-      if (!db.prepare('SELECT 1 FROM sites WHERE tenant_id=? AND code=?').get(tenant.id, s.code))
-        db.prepare('INSERT INTO sites (id,tenant_id,code,name,is_hq) VALUES (?,?,?,?,?)').run(uuid(), tenant.id, s.code, s.name, s.is_hq ? 1 : 0);
+      const exists = await qone('SELECT 1 FROM sites WHERE tenant_id=? AND code=?', [tenant.id, s.code]);
+      if (!exists)
+        await qrun('INSERT INTO sites (id,tenant_id,code,name,is_hq) VALUES (?,?,?,?,?)',
+          [uuid(), tenant.id, s.code, s.name, s.is_hq ? 1 : 0]);
     }
     for (const email of recipients)
-      db.prepare('INSERT OR IGNORE INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?)').run(uuid(), tenant.id, email, null);
+      await qrun('INSERT INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?) ON CONFLICT (tenant_id,email) DO NOTHING',
+        [uuid(), tenant.id, email, null]);
   }
 }
 
 module.exports = { ensureSeed };
-if (require.main === module) { ensureSeed(); console.log('[seed] done'); }
+if (require.main === module) {
+  const { initDb } = require('./db');
+  initDb().then(ensureSeed).then(() => { console.log('[seed] done'); process.exit(0); }).catch((e) => { console.error(e); process.exit(1); });
+}

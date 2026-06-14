@@ -1,13 +1,29 @@
-# Daybook — runs as its own container, isolated from otuburu/vote.
-# A single Node service (SQLite-backed) on its own bridge network and
-# named volume. Apache on the host reverse-proxies daybook.torama.money
-# → 127.0.0.1:8090.
+# Daybook — Node API + Postgres, isolated from otuburu/vote stacks.
+# Apache on the host reverse-proxies daybook.torama.money → 127.0.0.1:8090.
 #
 # Explicit project name — DO NOT remove. Without it Compose derives the project
 # from the directory ("backend"), which collides with otuburu's stack and makes
 # `--remove-orphans` capable of deleting otuburu's containers.
 name: daybook
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: daybook-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-daybook}
+      POSTGRES_USER: ${POSTGRES_USER:-daybook}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - daybook
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-daybook} -d ${POSTGRES_DB:-daybook}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   daybook:
     image: ghcr.io/filatei/daybook:latest
     # Local build fallback: `docker compose up -d --build` builds from source on
@@ -18,13 +34,16 @@ services:
       dockerfile: Dockerfile
     container_name: daybook
     restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
     # Bind only to loopback — Apache is the public edge (TLS terminator).
-    # Host port is auto-selected by remote-install.sh (host 8090/8091 are taken on
-    # this box) and persisted as DAYBOOK_HOST_PORT in .env. Container always 8090.
     ports:
       - "127.0.0.1:${DAYBOOK_HOST_PORT:-8091}:8090"
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-daybook}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-daybook}
     # Lets the app reach host-side services (the fido Mongo SSH tunnel on
     # host port 27018) via host.docker.internal — the container's own 127.0.0.1
     # is NOT the host's. Used by SALES_MONGO_URL.
@@ -41,6 +60,7 @@ services:
       retries: 3
 
 volumes:
+  pgdata:
   daybookdata:
 
 networks:

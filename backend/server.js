@@ -7,22 +7,17 @@
 'use strict';
 
 const path = require('path');
-const fs = require('fs');
 const express = require('express');
 
 function mustEnv(name, hint) {
   if (!process.env[name]) { console.error(`[FATAL] missing env ${name} — ${hint}`); process.exit(1); }
 }
 mustEnv('JWT_SECRET', 'HS256 session signing key. Generate: openssl rand -hex 32');
+mustEnv('DATABASE_URL', 'Postgres connection string. e.g. postgres://user:pass@host:5432/daybook');
 if (!process.env.GOOGLE_CLIENT_ID) console.warn('[WARN] GOOGLE_CLIENT_ID not set — Google sign-in will be disabled until it is configured.');
 
-const { getDb } = require('./db');
+const { initDb } = require('./db');
 const { ensureSeed } = require('./seed');
-
-getDb();
-ensureSeed(); // first-boot: superadmins + Fido/Fiafia tenants & sites if DB empty
-
-const api = require('./routes');
 
 const PORT = process.env.PORT || 8090;
 const app = express();
@@ -51,8 +46,6 @@ app.use((_req, res, next) => {
 
 app.get('/healthz', (_req, res) => res.json({ status: 'ok', service: 'daybook' }));
 
-app.use('/api', api);
-
 // ── static PWA frontend ────────────────────────────────────────────────────
 const FRONTEND = path.join(__dirname, '../frontend');
 // The service worker must always be revalidated so code updates are detected
@@ -78,7 +71,22 @@ app.use((err, _req, res, _next) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`[Daybook] listening on :${PORT} (${process.env.NODE_ENV || 'development'})`);
-  try { require('./scheduler').start(); } catch (e) { console.error('[sync] scheduler not started:', e.message); }
-});
+// ── async startup ─────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    await initDb();           // connect pool + run migrations
+    await ensureSeed();       // first-boot: superadmins + Fido/Fiafia tenants & sites
+
+    // routes require db to be ready — register after initDb
+    const api = require('./routes');
+    app.use('/api', api);
+
+    app.listen(PORT, () => {
+      console.log(`[Daybook] listening on :${PORT} (${process.env.NODE_ENV || 'development'})`);
+      try { require('./scheduler').start(); } catch (e) { console.error('[sync] scheduler not started:', e.message); }
+    });
+  } catch (e) {
+    console.error('[FATAL] startup failed:', e.message);
+    process.exit(1);
+  }
+})();

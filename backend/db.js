@@ -1,5 +1,5 @@
 /**
- * Daybook — SQLite data layer (multi-client SaaS)
+ * Daybook — Postgres data layer (multi-client SaaS)
  *
  * Hierarchy (Zendesk-style):
  *   tenant      = a client company / workspace (the isolation + billing unit)
@@ -11,45 +11,107 @@
  * A user may belong to several tenants (e.g. a GM over both Fido and Fiafia).
  * users.is_superadmin = the platform operator (Torama / you): sees every tenant.
  *
- * Drop-in SQLite; no external DB service. Upgrade path -> PostgreSQL by swapping
- * this module (same exported getDb() surface).
+ * Uses `pg` (pure-JS Postgres driver). Call initDb() once at startup; after that
+ * getDb() returns the pool synchronously, and qone/qall/qrun are async helpers.
  */
 'use strict';
 
-const Database = require('better-sqlite3');
-const path = require('path');
-const fs = require('fs');
+const { Pool } = require('pg');
 
-const DB_PATH = process.env.DAYBOOK_DB_PATH || path.join(__dirname, '../data/daybook.db');
+let pool = null;
 
-let db;
-function getDb() {
-  if (db) return db;
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  migrate(db);
-  return db;
+// Convert ? placeholders to $1, $2, … (pg uses positional params)
+function pq(sql) {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
 }
 
-function migrate(db) {
-  db.exec(`
+async function initDb() {
+  if (pool) return pool;
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL ||
+      `postgresql://${process.env.PG_USER || 'daybook'}:${process.env.PG_PASSWORD || 'daybook'}@${process.env.PG_HOST || 'localhost'}:${process.env.PG_PORT || 5432}/${process.env.PG_DB || 'daybook'}`,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+  });
+  // Verify connectivity
+  const client = await pool.connect();
+  client.release();
+  await migrate();
+  return pool;
+}
+
+function getDb() {
+  if (!pool) throw new Error('DB not initialized — call initDb() first');
+  return pool;
+}
+
+// ── Async query helpers ────────────────────────────────────────────────────────
+
+/** Return first row or null. */
+async function qone(sql, params = []) {
+  const r = await pool.query(pq(sql), params);
+  return r.rows[0] || null;
+}
+
+/** Return all rows. */
+async function qall(sql, params = []) {
+  const r = await pool.query(pq(sql), params);
+  return r.rows;
+}
+
+/** Execute (INSERT/UPDATE/DELETE). Returns pg result. */
+async function qrun(sql, params = []) {
+  return pool.query(pq(sql), params);
+}
+
+/** Execute raw DDL (no placeholder translation needed). */
+async function qexec(sql) {
+  return pool.query(sql);
+}
+
+/** Run fn(client) inside a transaction; rolls back on error. */
+async function withTransaction(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+// ── Schema migrations (idempotent) ────────────────────────────────────────────
+async function migrate() {
+  await pool.query(`
     -- TENANTS — one per client company / workspace
     CREATE TABLE IF NOT EXISTS tenants (
-      id           TEXT PRIMARY KEY,
-      slug         TEXT UNIQUE NOT NULL,
-      name         TEXT NOT NULL,
-      brand_color  TEXT DEFAULT '#0ea5e9',
-      currency     TEXT DEFAULT 'NGN',
-      industry     TEXT,
-      plan         TEXT CHECK(plan IN ('FREE','STANDARD','PRO','OWNER')) DEFAULT 'FREE',
-      status       TEXT CHECK(status IN ('ACTIVE','SUSPENDED')) DEFAULT 'ACTIVE',
-      trial_ends_at INTEGER,                               -- end of 30-day trial (NULL = OWNER, no trial)
-      paid_until    INTEGER,                               -- subscription paid through (epoch)
-      pos_source    TEXT,                                  -- e.g. 'FIDO' → connect to fido POS; NULL = self-contained
-      created_by   TEXT,
-      created_at   INTEGER DEFAULT (unixepoch())
+      id                     TEXT PRIMARY KEY,
+      slug                   TEXT UNIQUE NOT NULL,
+      name                   TEXT NOT NULL,
+      brand_color            TEXT DEFAULT '#0ea5e9',
+      currency               TEXT DEFAULT 'NGN',
+      industry               TEXT,
+      plan                   TEXT CHECK(plan IN ('FREE','STANDARD','PRO','OWNER')) DEFAULT 'FREE',
+      status                 TEXT CHECK(status IN ('ACTIVE','SUSPENDED')) DEFAULT 'ACTIVE',
+      trial_ends_at          BIGINT,
+      paid_until             BIGINT,
+      pos_source             TEXT,
+      ls_subscription_id     TEXT,
+      subscription_status    TEXT,
+      subscription_ends_at   BIGINT,
+      subscription_renews_at BIGINT,
+      customer_portal_url    TEXT,
+      ps_customer_code       TEXT,
+      ps_subscription_code   TEXT,
+      created_by             TEXT,
+      created_at             BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
     -- USERS — global identities (one row per Google email)
@@ -61,8 +123,21 @@ function migrate(db) {
       photo_url     TEXT,
       is_superadmin INTEGER DEFAULT 0,
       status        TEXT CHECK(status IN ('ACTIVE','DISABLED')) DEFAULT 'ACTIVE',
-      last_login    INTEGER,
-      created_at    INTEGER DEFAULT (unixepoch())
+      last_login    BIGINT,
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+
+    -- SITES — physical locations within a tenant (before memberships for FK)
+    CREATE TABLE IF NOT EXISTS sites (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      code        TEXT NOT NULL,
+      name        TEXT NOT NULL,
+      address     TEXT,
+      is_hq       INTEGER DEFAULT 0,
+      status      TEXT CHECK(status IN ('ACTIVE','CLOSED')) DEFAULT 'ACTIVE',
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      UNIQUE(tenant_id, code)
     );
 
     -- MEMBERSHIPS — a user's role inside a tenant
@@ -73,43 +148,30 @@ function migrate(db) {
       role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER')) NOT NULL,
       site_id     TEXT REFERENCES sites(id),
       status      TEXT CHECK(status IN ('ACTIVE','DISABLED')) DEFAULT 'ACTIVE',
-      created_at  INTEGER DEFAULT (unixepoch()),
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
       UNIQUE(user_id, tenant_id)
-    );
-
-    -- SITES — physical locations within a tenant
-    CREATE TABLE IF NOT EXISTS sites (
-      id          TEXT PRIMARY KEY,
-      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
-      code        TEXT NOT NULL,
-      name        TEXT NOT NULL,
-      address     TEXT,
-      is_hq       INTEGER DEFAULT 0,
-      status      TEXT CHECK(status IN ('ACTIVE','CLOSED')) DEFAULT 'ACTIVE',
-      created_at  INTEGER DEFAULT (unixepoch()),
-      UNIQUE(tenant_id, code)
     );
 
     -- DAILY REPORTS — one per site per day
     CREATE TABLE IF NOT EXISTS daily_reports (
-      id            TEXT PRIMARY KEY,
-      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
-      site_id       TEXT NOT NULL REFERENCES sites(id),
-      report_date   TEXT NOT NULL,
-      total_sales   REAL DEFAULT 0,
-      total_cash    REAL DEFAULT 0,
-      total_deposit REAL DEFAULT 0,
-      diesel        REAL DEFAULT 0,
-      expenses      REAL DEFAULT 0,
-      balance       REAL DEFAULT 0,
+      id              TEXT PRIMARY KEY,
+      tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+      site_id         TEXT NOT NULL REFERENCES sites(id),
+      report_date     TEXT NOT NULL,
+      total_sales     DOUBLE PRECISION DEFAULT 0,
+      total_cash      DOUBLE PRECISION DEFAULT 0,
+      total_deposit   DOUBLE PRECISION DEFAULT 0,
+      diesel          DOUBLE PRECISION DEFAULT 0,
+      expenses        DOUBLE PRECISION DEFAULT 0,
+      balance         DOUBLE PRECISION DEFAULT 0,
       sales_json      TEXT,
       production_json TEXT,
-      notes         TEXT,
-      status        TEXT CHECK(status IN ('DRAFT','SUBMITTED','EMAILED')) DEFAULT 'DRAFT',
-      created_by    TEXT REFERENCES users(id),
-      created_at    INTEGER DEFAULT (unixepoch()),
-      submitted_at  INTEGER,
-      emailed_at    INTEGER,
+      notes           TEXT,
+      status          TEXT CHECK(status IN ('DRAFT','SUBMITTED','EMAILED')) DEFAULT 'DRAFT',
+      created_by      TEXT REFERENCES users(id),
+      created_at      BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      submitted_at    BIGINT,
+      emailed_at      BIGINT,
       UNIQUE(tenant_id, site_id, report_date)
     );
 
@@ -129,7 +191,7 @@ function migrate(db) {
       mime          TEXT,
       size          INTEGER,
       uploaded_by   TEXT REFERENCES users(id),
-      created_at    INTEGER DEFAULT (unixepoch())
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
     -- REPORT RECIPIENTS — per-tenant email distribution list
@@ -139,7 +201,7 @@ function migrate(db) {
       email       TEXT NOT NULL,
       name        TEXT,
       active      INTEGER DEFAULT 1,
-      created_at  INTEGER DEFAULT (unixepoch()),
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
       UNIQUE(tenant_id, email)
     );
 
@@ -151,11 +213,11 @@ function migrate(db) {
       role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER')) NOT NULL,
       site_id     TEXT REFERENCES sites(id),
       invited_by  TEXT REFERENCES users(id),
-      created_at  INTEGER DEFAULT (unixepoch()),
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
       UNIQUE(tenant_id, email)
     );
 
-    -- STAFF — a worker at a site (Daybook-owned; optionally linked to a POS person)
+    -- STAFF — a worker at a site
     CREATE TABLE IF NOT EXISTS staff (
       id            TEXT PRIMARY KEY,
       tenant_id     TEXT NOT NULL REFERENCES tenants(id),
@@ -164,30 +226,30 @@ function migrate(db) {
       role_title    TEXT,
       phone         TEXT,
       pay_type      TEXT CHECK(pay_type IN ('HOURLY','DAILY','MONTHLY','PIECE')) DEFAULT 'DAILY',
-      ext_people_id TEXT,                                  -- fido peoples _id when imported
+      ext_people_id TEXT,
       status        TEXT CHECK(status IN ('ACTIVE','INACTIVE')) DEFAULT 'ACTIVE',
-      created_at    INTEGER DEFAULT (unixepoch()),
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
       UNIQUE(tenant_id, site_id, full_name)
     );
 
-    -- TIMESHEETS — one row per staff per day (the live hours fido lacks)
+    -- TIMESHEETS — one row per staff per day
     CREATE TABLE IF NOT EXISTS timesheets (
       id           TEXT PRIMARY KEY,
       tenant_id    TEXT NOT NULL REFERENCES tenants(id),
       site_id      TEXT NOT NULL REFERENCES sites(id),
       staff_id     TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
-      work_date    TEXT NOT NULL,                          -- YYYY-MM-DD
+      work_date    TEXT NOT NULL,
       present      INTEGER DEFAULT 1,
-      hours        REAL,
+      hours        DOUBLE PRECISION,
       bags_bagged  INTEGER,
       bags_loaded  INTEGER,
       note         TEXT,
       recorded_by  TEXT REFERENCES users(id),
-      created_at   INTEGER DEFAULT (unixepoch()),
+      created_at   BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
       UNIQUE(staff_id, work_date)
     );
 
-    -- GENERATORS — a power generator asset at a site (spec registered once)
+    -- GENERATORS — a power generator asset at a site
     CREATE TABLE IF NOT EXISTS generators (
       id            TEXT PRIMARY KEY,
       tenant_id     TEXT NOT NULL REFERENCES tenants(id),
@@ -195,17 +257,17 @@ function migrate(db) {
       name          TEXT NOT NULL,
       fuel_type     TEXT CHECK(fuel_type IN ('DIESEL','PETROL','GAS')) DEFAULT 'DIESEL',
       make_model    TEXT,
-      capacity_kva  REAL,
+      capacity_kva  DOUBLE PRECISION,
       serial_no     TEXT,
       purchase_date TEXT,
-      purchase_cost REAL,
+      purchase_cost DOUBLE PRECISION,
       status        TEXT CHECK(status IN ('ACTIVE','RETIRED')) DEFAULT 'ACTIVE',
       notes         TEXT,
       created_by    TEXT REFERENCES users(id),
-      created_at    INTEGER DEFAULT (unixepoch())
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
-    -- GENERATOR LOGS — periodic diesel fills + maintenance entries
+    -- GENERATOR LOGS — diesel fills + maintenance
     CREATE TABLE IF NOT EXISTS generator_logs (
       id            TEXT PRIMARY KEY,
       tenant_id     TEXT NOT NULL REFERENCES tenants(id),
@@ -213,31 +275,32 @@ function migrate(db) {
       site_id       TEXT REFERENCES sites(id),
       log_date      TEXT NOT NULL,
       type          TEXT CHECK(type IN ('DIESEL','MAINTENANCE','NOTE')) NOT NULL,
-      litres        REAL,                                  -- for DIESEL
-      cost          REAL,                                  -- diesel or maintenance cost
-      runtime_hours REAL,
-      detail        TEXT,                                  -- maintenance/note detail
+      litres        DOUBLE PRECISION,
+      cost          DOUBLE PRECISION,
+      runtime_hours DOUBLE PRECISION,
+      detail        TEXT,
       recorded_by   TEXT REFERENCES users(id),
-      created_at    INTEGER DEFAULT (unixepoch())
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
-    -- ── In-app POS (self-contained tenants: live sales + receipts) ────────────
+    -- PRODUCTS
     CREATE TABLE IF NOT EXISTS products (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
       name        TEXT NOT NULL,
       category    TEXT,
-      price       REAL NOT NULL DEFAULT 0,
-      cost        REAL DEFAULT 0,
+      price       DOUBLE PRECISION NOT NULL DEFAULT 0,
+      cost        DOUBLE PRECISION DEFAULT 0,
       sku         TEXT,
       unit        TEXT DEFAULT 'unit',
       track_stock INTEGER DEFAULT 1,
-      stock_qty   REAL DEFAULT 0,
+      stock_qty   DOUBLE PRECISION DEFAULT 0,
       status      TEXT CHECK(status IN ('ACTIVE','INACTIVE')) DEFAULT 'ACTIVE',
-      created_at  INTEGER DEFAULT (unixepoch()),
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
       UNIQUE(tenant_id, name)
     );
 
+    -- CUSTOMERS
     CREATE TABLE IF NOT EXISTS customers (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
@@ -245,57 +308,59 @@ function migrate(db) {
       phone       TEXT,
       email       TEXT,
       note        TEXT,
-      created_at  INTEGER DEFAULT (unixepoch())
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
+    -- POS SALES
     CREATE TABLE IF NOT EXISTS pos_sales (
-      id            TEXT PRIMARY KEY,
-      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
-      site_id       TEXT REFERENCES sites(id),
-      receipt_no    INTEGER,
-      customer_id   TEXT REFERENCES customers(id),
-      customer_name TEXT,
-      items_json    TEXT,                                  -- [{product_id,name,qty,price,amount}]
-      subtotal      REAL DEFAULT 0,
-      discount      REAL DEFAULT 0,
-      total         REAL DEFAULT 0,
+      id             TEXT PRIMARY KEY,
+      tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+      site_id        TEXT REFERENCES sites(id),
+      receipt_no     INTEGER,
+      customer_id    TEXT REFERENCES customers(id),
+      customer_name  TEXT,
+      items_json     TEXT,
+      subtotal       DOUBLE PRECISION DEFAULT 0,
+      discount       DOUBLE PRECISION DEFAULT 0,
+      total          DOUBLE PRECISION DEFAULT 0,
       payment_method TEXT,
-      amount_paid   REAL DEFAULT 0,
-      balance       REAL DEFAULT 0,
-      status        TEXT CHECK(status IN ('PAID','PART','UNPAID')) DEFAULT 'PAID',
-      sale_date     TEXT,
-      client_uid    TEXT,                                  -- client-generated; dedupes offline re-sends
-      sold_by       TEXT REFERENCES users(id),
-      created_at    INTEGER DEFAULT (unixepoch())
+      amount_paid    DOUBLE PRECISION DEFAULT 0,
+      balance        DOUBLE PRECISION DEFAULT 0,
+      status         TEXT CHECK(status IN ('PAID','PART','UNPAID')) DEFAULT 'PAID',
+      sale_date      TEXT,
+      client_uid     TEXT,
+      sold_by        TEXT REFERENCES users(id),
+      created_at     BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
+    -- INVENTORY MOVES
     CREATE TABLE IF NOT EXISTS inventory_moves (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
       product_id  TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
       site_id     TEXT REFERENCES sites(id),
       type        TEXT CHECK(type IN ('PURCHASE','SALE','ADJUST')) NOT NULL,
-      qty         REAL NOT NULL,                           -- signed: + in, - out
-      unit_cost   REAL,
+      qty         DOUBLE PRECISION NOT NULL,
+      unit_cost   DOUBLE PRECISION,
       ref         TEXT,
       note        TEXT,
       created_by  TEXT REFERENCES users(id),
-      created_at  INTEGER DEFAULT (unixepoch())
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
-    -- ── Staff chat (WhatsApp-style channels per company) ──────────────────────
+    -- STAFF CHAT
     CREATE TABLE IF NOT EXISTS messages (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
-      channel     TEXT NOT NULL,                           -- 'team' or a site_id
+      channel     TEXT NOT NULL,
       user_id     TEXT REFERENCES users(id),
       user_name   TEXT,
       body        TEXT NOT NULL,
       client_uid  TEXT,
-      created_at  INTEGER DEFAULT (unixepoch())
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
-    -- ── In-app notifications ──────────────────────────────────────────────────
+    -- IN-APP NOTIFICATIONS
     CREATE TABLE IF NOT EXISTS notifications (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT REFERENCES tenants(id),
@@ -305,10 +370,10 @@ function migrate(db) {
       body        TEXT,
       link        TEXT,
       read        INTEGER DEFAULT 0,
-      created_at  INTEGER DEFAULT (unixepoch())
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
-    -- ── Feature requests (clients submit ideas; admins/superadmin triage) ──────
+    -- FEATURE REQUESTS
     CREATE TABLE IF NOT EXISTS feature_requests (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT REFERENCES tenants(id),
@@ -316,69 +381,74 @@ function migrate(db) {
       user_name   TEXT,
       title       TEXT NOT NULL,
       body        TEXT,
-      status      TEXT DEFAULT 'NEW',          -- NEW | PLANNED | IN_PROGRESS | DONE | DECLINED
+      status      TEXT DEFAULT 'NEW',
       votes       INTEGER DEFAULT 0,
-      created_at  INTEGER DEFAULT (unixepoch()),
-      updated_at  INTEGER DEFAULT (unixepoch())
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      updated_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
-    -- ── Subscription payments (Paystack) ──────────────────────────────────────
+    -- PAYMENTS
     CREATE TABLE IF NOT EXISTS payments (
-      id          TEXT PRIMARY KEY,
-      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
-      reference   TEXT UNIQUE NOT NULL,
-      plan        TEXT,
-      months      INTEGER,
-      amount      INTEGER,                                 -- major unit (₦)
-      currency    TEXT,
-      status      TEXT DEFAULT 'PENDING',                  -- PENDING | SUCCESS | FAILED
-      email       TEXT,
-      created_by  TEXT REFERENCES users(id),
-      created_at  INTEGER DEFAULT (unixepoch()),
-      paid_at     INTEGER,
-      raw         TEXT
+      id                 TEXT PRIMARY KEY,
+      tenant_id          TEXT NOT NULL REFERENCES tenants(id),
+      reference          TEXT UNIQUE NOT NULL,
+      plan               TEXT,
+      months             INTEGER,
+      amount             INTEGER,
+      currency           TEXT,
+      provider           TEXT,
+      provider_reference TEXT,
+      status             TEXT DEFAULT 'PENDING',
+      email              TEXT,
+      created_by         TEXT REFERENCES users(id),
+      created_at         BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      paid_at            BIGINT,
+      raw                TEXT
     );
 
-    -- ── Staff attendance (shared-device clock-in: photo + signature + GPS) ─────
+    -- ATTENDANCE
     CREATE TABLE IF NOT EXISTS attendance (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
       site_id     TEXT REFERENCES sites(id),
       staff_id    TEXT NOT NULL REFERENCES staff(id),
-      work_date   TEXT NOT NULL,                            -- YYYY-MM-DD
-      clock_in    INTEGER,
-      clock_out   INTEGER,
-      photo_in    TEXT,                                     -- stored filenames
+      work_date   TEXT NOT NULL,
+      clock_in    BIGINT,
+      clock_out   BIGINT,
+      photo_in    TEXT,
       photo_out   TEXT,
       signature   TEXT,
-      in_lat      REAL, in_lng REAL, in_acc REAL,
-      out_lat     REAL, out_lng REAL, out_acc REAL,
+      in_lat      DOUBLE PRECISION, in_lng DOUBLE PRECISION, in_acc DOUBLE PRECISION,
+      out_lat     DOUBLE PRECISION, out_lng DOUBLE PRECISION, out_acc DOUBLE PRECISION,
       captured_by TEXT REFERENCES users(id),
-      created_at  INTEGER DEFAULT (unixepoch()),
-      updated_at  INTEGER DEFAULT (unixepoch()),
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      updated_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
       UNIQUE(tenant_id, staff_id, work_date)
     );
 
-    -- Cached gateway plan codes (Paystack Plans) keyed by planType_interval
+    -- PAYMENT PLANS (cached gateway plan codes)
     CREATE TABLE IF NOT EXISTS payment_plans (
       id          TEXT PRIMARY KEY,
-      code        TEXT UNIQUE NOT NULL,                    -- e.g. 'STANDARD_monthly'
+      code        TEXT UNIQUE NOT NULL,
       provider    TEXT,
-      plan_code   TEXT,                                    -- the gateway's plan code
+      plan_code   TEXT,
       interval    TEXT,
       amount      INTEGER,
-      created_at  INTEGER DEFAULT (unixepoch())
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, report_id TEXT, to_addrs TEXT,
-      subject TEXT, status TEXT, error TEXT, created_at INTEGER DEFAULT (unixepoch())
+      subject TEXT, status TEXT, error TEXT,
+      created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
     CREATE TABLE IF NOT EXISTS audit_log (
       id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, action TEXT,
-      entity TEXT, entity_id TEXT, meta TEXT, created_at INTEGER DEFAULT (unixepoch())
+      entity TEXT, entity_id TEXT, meta TEXT,
+      created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
+    -- Indexes
     CREATE INDEX IF NOT EXISTS idx_member_user   ON memberships(user_id);
     CREATE INDEX IF NOT EXISTS idx_member_tenant ON memberships(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_reports_td    ON daily_reports(tenant_id, report_date);
@@ -388,27 +458,225 @@ function migrate(db) {
     CREATE INDEX IF NOT EXISTS idx_products_t    ON products(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_possales_td   ON pos_sales(tenant_id, sale_date);
     CREATE INDEX IF NOT EXISTS idx_invmoves      ON inventory_moves(tenant_id, product_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_possales_uid ON pos_sales(tenant_id, client_uid) WHERE client_uid IS NOT NULL;
   `);
 
-  // Idempotent column adds for databases created before these columns existed.
-  const addCol = (table, col, def) => { try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); } catch (e) { /* already exists */ } };
-  addCol('tenants', 'trial_ends_at', 'INTEGER');
-  addCol('tenants', 'paid_until', 'INTEGER');
-  addCol('tenants', 'pos_source', 'TEXT');
-  addCol('pos_sales', 'client_uid', 'TEXT');
-  // multi-provider payments (Monnify / Paystack) — provider + gateway reference
-  addCol('payments', 'provider', 'TEXT');
-  addCol('payments', 'provider_reference', 'TEXT');
-  // Lemon Squeezy recurring subscription (per tenant)
-  addCol('tenants', 'ls_subscription_id', 'TEXT');
-  addCol('tenants', 'subscription_status', 'TEXT');
-  addCol('tenants', 'subscription_ends_at', 'INTEGER');
-  addCol('tenants', 'subscription_renews_at', 'INTEGER');
-  addCol('tenants', 'customer_portal_url', 'TEXT');
-  // Paystack auto-renew subscription (per tenant)
-  addCol('tenants', 'ps_customer_code', 'TEXT');
-  addCol('tenants', 'ps_subscription_code', 'TEXT');
+  // Partial unique index (separate statement — Postgres parses the WHERE clause)
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_possales_uid
+      ON pos_sales(tenant_id, client_uid)
+      WHERE client_uid IS NOT NULL
+  `);
+
+  // ── Phase 2 additions (ETL: Mongo → Postgres) ─────────────────────────────
+
+  // ext_id columns for idempotent ETL upserts
+  await pool.query(`
+    ALTER TABLE pos_sales  ADD COLUMN IF NOT EXISTS ext_id TEXT;
+    ALTER TABLE customers  ADD COLUMN IF NOT EXISTS ext_id TEXT;
+    ALTER TABLE sites      ADD COLUMN IF NOT EXISTS ext_mongo_id TEXT;
+  `);
+
+  // ETL EXPENSES — from fido `expenses` collection
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id           TEXT PRIMARY KEY,
+      tenant_id    TEXT NOT NULL REFERENCES tenants(id),
+      site_id      TEXT REFERENCES sites(id),
+      ext_id       TEXT,
+      expense_date TEXT NOT NULL,
+      category     TEXT,
+      description  TEXT,
+      amount       DOUBLE PRECISION DEFAULT 0,
+      recorded_by  TEXT,
+      created_at   BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    )
+  `);
+
+  // ETL PAYROLL — from fido `payrolls` collection
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS payroll (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+      site_id       TEXT REFERENCES sites(id),
+      staff_id      TEXT REFERENCES staff(id),
+      ext_id        TEXT,
+      ext_staff_id  TEXT,
+      staff_name    TEXT,
+      month         TEXT NOT NULL,
+      year          TEXT NOT NULL,
+      gross_pay     DOUBLE PRECISION DEFAULT 0,
+      net_pay       DOUBLE PRECISION DEFAULT 0,
+      deductions    DOUBLE PRECISION DEFAULT 0,
+      days_worked   DOUBLE PRECISION DEFAULT 0,
+      bags_bagged   DOUBLE PRECISION DEFAULT 0,
+      status        TEXT,
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    )
+  `);
+
+  // Unique indexes for ETL idempotency (separate statements for WHERE clause)
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_possales_extid
+      ON pos_sales(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_extid
+      ON customers(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_expenses_extid
+      ON expenses(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_extid
+      ON payroll(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_expenses_td
+      ON expenses(tenant_id, expense_date);
+    CREATE INDEX IF NOT EXISTS idx_payroll_t
+      ON payroll(tenant_id, year, month);
+  `);
+
+  // ── Phase 3: Fido feature parity ──────────────────────────────────────────
+
+  await pool.query(`
+    -- DISTRIBUTORS — agents/companies that collect product from sites
+    CREATE TABLE IF NOT EXISTS distributors (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+      site_id       TEXT REFERENCES sites(id),
+      name          TEXT NOT NULL,
+      phone         TEXT,
+      bank_name     TEXT,
+      account_no    TEXT,
+      account_name  TEXT,
+      cashback_rate DOUBLE PRECISION DEFAULT 0,
+      status        TEXT CHECK(status IN ('ACTIVE','INACTIVE')) DEFAULT 'ACTIVE',
+      ext_id        TEXT,
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      UNIQUE(tenant_id, name)
+    );
+
+    -- VEHICLES — trucks belonging to distributors
+    CREATE TABLE IF NOT EXISTS vehicles (
+      id              TEXT PRIMARY KEY,
+      tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+      distributor_id  TEXT REFERENCES distributors(id),
+      plate           TEXT NOT NULL,
+      capacity        DOUBLE PRECISION,
+      model           TEXT,
+      status          TEXT CHECK(status IN ('ACTIVE','INACTIVE')) DEFAULT 'ACTIVE',
+      created_at      BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      UNIQUE(tenant_id, plate)
+    );
+
+    -- LOADING ORDERS — one gate dispatch session
+    CREATE TABLE IF NOT EXISTS loading_orders (
+      id              TEXT PRIMARY KEY,
+      tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+      site_id         TEXT REFERENCES sites(id),
+      vehicle_id      TEXT REFERENCES vehicles(id),
+      distributor_id  TEXT REFERENCES distributors(id),
+      load_date       TEXT NOT NULL,
+      status          TEXT CHECK(status IN
+                        ('PENDING','LOADED','DISPATCHED','DELIVERED','SETTLED','CANCELLED'))
+                        DEFAULT 'PENDING',
+      total_bags      DOUBLE PRECISION DEFAULT 0,
+      total_amount    DOUBLE PRECISION DEFAULT 0,
+      cashback_amount DOUBLE PRECISION DEFAULT 0,
+      notes           TEXT,
+      approved_by     TEXT REFERENCES users(id),
+      created_by      TEXT REFERENCES users(id),
+      ext_id          TEXT,
+      created_at      BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      dispatched_at   BIGINT,
+      delivered_at    BIGINT
+    );
+
+    -- LOADING ITEMS — products in a loading order
+    CREATE TABLE IF NOT EXISTS loading_items (
+      id               TEXT PRIMARY KEY,
+      loading_order_id TEXT NOT NULL REFERENCES loading_orders(id) ON DELETE CASCADE,
+      tenant_id        TEXT NOT NULL REFERENCES tenants(id),
+      product_id       TEXT REFERENCES products(id),
+      product_name     TEXT NOT NULL,
+      qty              DOUBLE PRECISION NOT NULL,
+      unit_price       DOUBLE PRECISION DEFAULT 0,
+      amount           DOUBLE PRECISION DEFAULT 0
+    );
+
+    -- CASHBACK LEDGER — distributor rebates per loading order
+    CREATE TABLE IF NOT EXISTS cashbacks (
+      id               TEXT PRIMARY KEY,
+      tenant_id        TEXT NOT NULL REFERENCES tenants(id),
+      distributor_id   TEXT NOT NULL REFERENCES distributors(id),
+      site_id          TEXT REFERENCES sites(id),
+      loading_order_id TEXT REFERENCES loading_orders(id),
+      period_date      TEXT NOT NULL,
+      bags             DOUBLE PRECISION DEFAULT 0,
+      rate             DOUBLE PRECISION DEFAULT 0,
+      amount           DOUBLE PRECISION DEFAULT 0,
+      status           TEXT CHECK(status IN ('PENDING','PAID','CANCELLED')) DEFAULT 'PENDING',
+      paid_at          BIGINT,
+      notes            TEXT,
+      created_at       BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+
+    -- STAFF PAY RATES — what each staff member earns (versioned by effective date)
+    CREATE TABLE IF NOT EXISTS staff_pay_rates (
+      id             TEXT PRIMARY KEY,
+      staff_id       TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+      pay_type       TEXT CHECK(pay_type IN ('DAILY','MONTHLY','PIECE')) DEFAULT 'DAILY',
+      daily_rate     DOUBLE PRECISION DEFAULT 0,
+      monthly_rate   DOUBLE PRECISION DEFAULT 0,
+      piece_rate     DOUBLE PRECISION DEFAULT 0,
+      effective_from TEXT NOT NULL,
+      created_at     BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      UNIQUE(staff_id, effective_from)
+    );
+
+    -- PAYROLL RUNS — computed payroll batches
+    CREATE TABLE IF NOT EXISTS payroll_runs (
+      id                TEXT PRIMARY KEY,
+      tenant_id         TEXT NOT NULL REFERENCES tenants(id),
+      site_id           TEXT REFERENCES sites(id),
+      period_start      TEXT NOT NULL,
+      period_end        TEXT NOT NULL,
+      status            TEXT CHECK(status IN ('DRAFT','APPROVED','PAID')) DEFAULT 'DRAFT',
+      total_gross       DOUBLE PRECISION DEFAULT 0,
+      total_net         DOUBLE PRECISION DEFAULT 0,
+      total_deductions  DOUBLE PRECISION DEFAULT 0,
+      headcount         INTEGER DEFAULT 0,
+      notes             TEXT,
+      computed_by       TEXT REFERENCES users(id),
+      approved_by       TEXT REFERENCES users(id),
+      created_at        BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      UNIQUE(tenant_id, site_id, period_start, period_end)
+    );
+
+    -- PAYROLL RUN LINES — one row per staff member per run
+    CREATE TABLE IF NOT EXISTS payroll_run_lines (
+      id           TEXT PRIMARY KEY,
+      run_id       TEXT NOT NULL REFERENCES payroll_runs(id) ON DELETE CASCADE,
+      tenant_id    TEXT NOT NULL REFERENCES tenants(id),
+      staff_id     TEXT REFERENCES staff(id),
+      staff_name   TEXT NOT NULL,
+      days_present INTEGER DEFAULT 0,
+      hours        DOUBLE PRECISION DEFAULT 0,
+      bags_bagged  INTEGER DEFAULT 0,
+      bags_loaded  INTEGER DEFAULT 0,
+      pay_type     TEXT,
+      rate         DOUBLE PRECISION DEFAULT 0,
+      gross_pay    DOUBLE PRECISION DEFAULT 0,
+      deductions   DOUBLE PRECISION DEFAULT 0,
+      net_pay      DOUBLE PRECISION DEFAULT 0,
+      notes        TEXT
+    );
+
+    -- Indexes
+    CREATE INDEX IF NOT EXISTS idx_distributors_t  ON distributors(tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_vehicles_dist   ON vehicles(distributor_id);
+    CREATE INDEX IF NOT EXISTS idx_loadord_td      ON loading_orders(tenant_id, load_date);
+    CREATE INDEX IF NOT EXISTS idx_loaditems_ord   ON loading_items(loading_order_id);
+    CREATE INDEX IF NOT EXISTS idx_cashbacks_td    ON cashbacks(tenant_id, distributor_id);
+    CREATE INDEX IF NOT EXISTS idx_payrates_staff  ON staff_pay_rates(staff_id);
+    CREATE INDEX IF NOT EXISTS idx_payruns_t       ON payroll_runs(tenant_id, period_start);
+    CREATE INDEX IF NOT EXISTS idx_paylines_run    ON payroll_run_lines(run_id);
+  `);
 }
 
-module.exports = { getDb };
+module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

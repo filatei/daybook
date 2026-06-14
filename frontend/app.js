@@ -685,14 +685,23 @@ async function adminSites() {
 async function adminMembers() {
   await loadSites();
   const data = await api(scoped('/members'));
-  const memHtml = data.members.map((m) => `<div class="list-item"><div class="av">👤</div><div class="meta"><div class="t">${esc(m.name || m.email)}</div>
+  const memHtml = data.members.map((m) => {
+    const dim = m.status === 'DISABLED';
+    return `<div class="list-item" style="${dim ? 'opacity:.62' : ''}"><div class="av">👤</div><div class="meta"><div class="t">${esc(m.name || m.email)} ${dim ? '<span class="pill-cat" style="background:#fee2e2;color:#991b1b">Dismissed</span>' : ''}</div>
     <div class="s">${esc(m.email)} · ${ROLE_LABEL[m.role]}${m.site_id ? ' · ' + esc(siteName(m.site_id)) : ''}${m.active_login ? '' : ' · <i>pending sign-in</i>'}</div></div>
-    <button class="x" data-rmm="${m.id}" style="background:#fee2e2;color:var(--err);border:none;width:34px;height:34px;border-radius:9px">×</button></div>`).join('');
+    <div class="row" style="gap:6px">
+      ${dim ? `<button class="btn ghost sm" data-restore="${m.id}" style="width:auto;padding:6px 11px">Restore</button>`
+            : `<button class="btn ghost sm" data-dismiss="${m.id}" style="width:auto;padding:6px 11px;color:#b45309;border-color:#fde68a">Dismiss</button>`}
+      <button class="x" data-rmm="${m.id}" title="Remove permanently" style="background:#fee2e2;color:var(--err);border:none;width:32px;height:32px;border-radius:9px">×</button>
+    </div></div>`;
+  }).join('');
   const invHtml = data.invites.map((i) => `<div class="list-item"><div class="av">✉️</div><div class="meta"><div class="t">${esc(i.email)}</div><div class="s">Invited · ${ROLE_LABEL[i.role]}${i.site_id ? ' · ' + esc(siteName(i.site_id)) : ''}</div></div>
     <button class="x" data-rmi="${i.id}" style="background:#fef3c7;color:#92400e;border:none;width:34px;height:34px;border-radius:9px">×</button></div>`).join('');
   const b = modal(`<div>${memHtml || '<div class="muted">No members</div>'}${invHtml}</div>
     <div style="height:12px"></div><button class="btn" id="addMember">＋ Add person</button>`, { title: 'People', sub: active().name });
-  $$('[data-rmm]', b).forEach((el) => el.onclick = () => confirmModal('Remove member?', '', async () => { try { await api('/members/' + el.dataset.rmm + '?tenant=' + State.tenant, { method: 'DELETE' }); toast('Removed', 'ok'); adminMembers(); } catch (e) { toast(e.message, 'err'); } }));
+  $$('[data-dismiss]', b).forEach((el) => el.onclick = () => confirmModal('Dismiss this person?', 'They lose app access immediately (e.g. left employment) but stay on the list — you can Restore anytime.', async () => { try { await api('/members/' + el.dataset.dismiss + '?tenant=' + State.tenant, { method: 'PATCH', body: { status: 'DISABLED' } }); toast('Dismissed — access revoked', 'ok'); adminMembers(); } catch (e) { toast(e.message, 'err'); } }));
+  $$('[data-restore]', b).forEach((el) => el.onclick = async () => { try { await api('/members/' + el.dataset.restore + '?tenant=' + State.tenant, { method: 'PATCH', body: { status: 'ACTIVE' } }); toast('Access restored', 'ok'); adminMembers(); } catch (e) { toast(e.message, 'err'); } });
+  $$('[data-rmm]', b).forEach((el) => el.onclick = () => confirmModal('Remove permanently?', 'This deletes the person from this workspace entirely. To just revoke access, use Dismiss instead.', async () => { try { await api('/members/' + el.dataset.rmm + '?tenant=' + State.tenant, { method: 'DELETE' }); toast('Removed', 'ok'); adminMembers(); } catch (e) { toast(e.message, 'err'); } }));
   $$('[data-rmi]', b).forEach((el) => el.onclick = async () => { try { await api('/invites/' + el.dataset.rmi + '?tenant=' + State.tenant, { method: 'DELETE' }); toast('Invite cancelled', 'ok'); adminMembers(); } catch (e) { toast(e.message, 'err'); } });
   $('#addMember', b).onclick = () => {
     const siteOpts = State.sites.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');

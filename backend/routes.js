@@ -239,17 +239,30 @@ router.post('/members', requireAuth, needTenant('ADMIN'), (req, res) => {
   res.status(201).json({ invited: true, email: lower });
 });
 
+// Active-admin count — used to stop a company from locking itself out.
+const activeAdminCount = (tenant_id) =>
+  db.prepare("SELECT COUNT(*) n FROM memberships WHERE tenant_id=? AND role='ADMIN' AND status='ACTIVE'").get(tenant_id).n;
+
 router.patch('/members/:id', requireAuth, needTenant('ADMIN'), (req, res) => {
   const m = db.prepare('SELECT * FROM memberships WHERE id=? AND tenant_id=?').get(req.params.id, req.ctx.tenant_id);
   if (!m) return res.status(404).json({ error: 'not found' });
   const f = req.body || {};
+  const newRole = f.role ?? m.role;
+  const newStatus = f.status ?? m.status;
+  const wasActiveAdmin = m.role === 'ADMIN' && m.status === 'ACTIVE';
+  const willBeActiveAdmin = newRole === 'ADMIN' && newStatus === 'ACTIVE';
+  if (wasActiveAdmin && !willBeActiveAdmin && activeAdminCount(req.ctx.tenant_id) <= 1)
+    return res.status(400).json({ error: 'This is the last active admin — promote another admin before dismissing or changing this one.' });
   db.prepare('UPDATE memberships SET role=?,site_id=?,status=? WHERE id=?')
-    .run(f.role ?? m.role, f.site_id !== undefined ? f.site_id : m.site_id, f.status ?? m.status, m.id);
+    .run(newRole, f.site_id !== undefined ? f.site_id : m.site_id, newStatus, m.id);
+  if (newStatus !== m.status) audit(req.ctx.tenant_id, req.user.id, newStatus === 'DISABLED' ? 'DISMISS_MEMBER' : 'RESTORE_MEMBER', 'membership', m.id);
   res.json({ ok: true });
 });
 router.delete('/members/:id', requireAuth, needTenant('ADMIN'), (req, res) => {
   const m = db.prepare('SELECT * FROM memberships WHERE id=? AND tenant_id=?').get(req.params.id, req.ctx.tenant_id);
   if (!m) return res.status(404).json({ error: 'not found' });
+  if (m.role === 'ADMIN' && m.status === 'ACTIVE' && activeAdminCount(req.ctx.tenant_id) <= 1)
+    return res.status(400).json({ error: 'This is the last active admin — promote another admin before removing this one.' });
   db.prepare('DELETE FROM memberships WHERE id=?').run(m.id);
   audit(req.ctx.tenant_id, req.user.id, 'REMOVE_MEMBER', 'membership', m.id);
   res.json({ ok: true });

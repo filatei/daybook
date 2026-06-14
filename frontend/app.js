@@ -171,12 +171,28 @@ async function viewDashboard() {
         <div class="stat"><div class="k">Deposits</div><div class="v">${ngn(t.deposit)}</div></div>
         <div class="stat"><div class="k">Diesel + Costs</div><div class="v" style="color:var(--err)">${ngn(t.costs)}</div></div>
       </div>
+      ${State.salesEnabled && State.tenant ? `<div class="card" style="margin-top:14px">
+        <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">⚡ Live POS sales</h3>
+          <input class="input" id="posDate" type="date" value="${today()}" style="width:auto;padding:8px 10px"/></div>
+        <div id="posList"><div class="skel"></div></div></div>` : ''}
       <div class="card" style="margin-top:14px"><h3>Sales by site</h3><canvas id="cSite" height="190"></canvas></div>
       <div class="card"><h3>Daily sales trend</h3><canvas id="cDay" height="190"></canvas></div>
       <div class="muted" style="text-align:center;font-size:12px">${t.reports} report(s) on record</div>`;
     drawBar('cSite', d.bySite.map((x) => x.site), d.bySite.map((x) => x.sales));
     drawLine('cDay', d.byDay.map((x) => x.day.slice(5)), d.byDay.map((x) => x.sales));
+    if ($('#posDate')) { $('#posDate').onchange = loadPosSales; loadPosSales(); }
   } catch (e) { v.innerHTML = errBox(e); }
+}
+async function loadPosSales() {
+  const list = $('#posList'); if (!list) return; list.innerHTML = '<div class="skel"></div>';
+  const date = $('#posDate').value;
+  try {
+    const d = await api(scoped('/sales/by-date?date=' + date));
+    if (!d.rows.length) { list.innerHTML = `<div class="muted" style="padding:10px 2px">No POS sales for ${date}</div>`; return; }
+    list.innerHTML = d.rows.map((r) => `<div class="row between" style="padding:7px 2px;border-bottom:1px solid var(--line)">
+        <span>${esc(r.group)}</span><span><b>${ngn(r.amount)}</b> <span class="muted" style="font-size:12px">· ${r.orders}</span></span></div>`).join('')
+      + `<div class="row between" style="padding:9px 2px 0"><b>Total</b><b style="color:var(--brand-d)">${ngn(d.total)}</b></div>`;
+  } catch (e) { list.innerHTML = `<div class="muted" style="padding:10px 2px">${esc(e.message.includes('not configured') ? 'Sales DB not connected' : e.message)}</div>`; }
 }
 const brandColor = () => getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() || '#0ea5e9';
 function drawBar(id, labels, data) {

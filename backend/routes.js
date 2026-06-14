@@ -511,6 +511,22 @@ router.get('/sales/preview', requireAuth, async (req, res) => {
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
 });
 
+// All of a company's sites' POS sales for ANY single date (live aggregate).
+router.get('/sales/by-date', requireAuth, async (req, res) => {
+  if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });
+  const s = scope(req);
+  if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+  const date = req.query.date;
+  if (!date) return res.status(400).json({ error: 'date required' });
+  let codes = db.prepare('SELECT code FROM sites WHERE tenant_id=?').all(s.ctx.tenant_id).map((x) => x.code);
+  if (s.ctx.role === 'SITE_MANAGER') { const me = siteById(s.ctx.site_id); codes = me ? [me.code] : []; }
+  if (!codes.length) return res.json({ date, rows: [], total: 0 });
+  try {
+    const rows = await sales.query({ from: date, to: date, sites: codes, groupBy: 'site' });
+    res.json({ date, rows, total: rows.reduce((a, r) => a + (r.amount || 0), 0) });
+  } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
+});
+
 // Read computed payroll (already finalised in the POS) for a month/year.
 router.get('/payroll', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
   if (!sales.salesEnabled()) return res.status(503).json({ error: 'Sales source not configured', code: 'no_sales_source' });

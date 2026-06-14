@@ -290,6 +290,18 @@ router.get('/reports/:id', requireAuth, (req, res) => {
   if (!c || (c.role === 'SITE_MANAGER' && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
   res.json(reportView(r));
 });
+// Delete a report — its creator, or a GM/Admin of the company.
+router.delete('/reports/:id', requireAuth, (req, res) => {
+  const r = db.prepare('SELECT * FROM daily_reports WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  const c = contextFor(req.user, r.tenant_id);
+  if (!c || (c.role === 'SITE_MANAGER' && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
+  const allowed = r.created_by === req.user.id || req.user.is_superadmin || atLeast(c.role, 'GENERAL_MANAGER');
+  if (!allowed) return res.status(403).json({ error: 'only the report’s creator or a manager can delete it' });
+  db.prepare('DELETE FROM daily_reports WHERE id=?').run(r.id);
+  audit(r.tenant_id, req.user.id, 'DELETE', 'report', r.id, { date: r.report_date, site: r.site_id });
+  res.json({ ok: true });
+});
 
 router.post('/reports', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
   const b = req.body || {};

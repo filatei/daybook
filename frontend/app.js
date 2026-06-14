@@ -73,7 +73,7 @@ function toast(msg, kind = 'info', ms = 3200) {
   el.className = `toast ${kind}`; el.innerHTML = `<span class="ti">${ic}</span><span>${esc(msg)}</span>`;
   $('#toasts').appendChild(el); setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, ms);
 }
-let modalOpen = false, modalPopGuard = false;
+let modalOpen = false;
 function modal(html, { title, sub } = {}) {
   const root = $('#modalRoot');
   root.innerHTML = `<div class="modal-bg"><div class="modal"><div class="grip"></div>
@@ -82,25 +82,25 @@ function modal(html, { title, sub } = {}) {
     <div id="modalBody">${html}</div></div></div>`;
   const bg = $('.modal-bg', root); bg.addEventListener('click', (e) => { if (e.target === bg) closeModal(); });
   $('#modalX', root).addEventListener('click', () => closeModal());
-  modalOpen = true;
   // Push one history entry for the modal layer so the phone Back button closes it
-  // (instead of leaving the app). Nested modal() calls reuse the same entry.
+  // (instead of leaving the app). Reuse the entry when replacing one modal with another.
   if (!(history.state && history.state.dbkModal)) history.pushState({ dbkModal: true }, '');
+  modalOpen = true;
   return $('#modalBody', root);
 }
-function closeModal(fromPop) {
+// Closing never touches history (so "close then open another modal" works). A
+// leftover modal history entry is harmlessly consumed by the next Back press.
+function closeModal() {
   if (!modalOpen) return;
   if (typeof stopCam === 'function') stopCam();          // release camera if an attendance capture was open
   modalOpen = false;
   const m = $('.modal', $('#modalRoot'));
-  if (m) { m.style.animation = 'sheet .25s reverse'; setTimeout(() => ($('#modalRoot').innerHTML = ''), 220); }
-  if (!fromPop && history.state && history.state.dbkModal) { modalPopGuard = true; history.back(); }
+  if (m) { m.style.animation = 'sheet .25s reverse'; setTimeout(() => { if (!modalOpen) $('#modalRoot').innerHTML = ''; }, 220); }
 }
 // Phone/browser Back: close an open modal first; otherwise keep the user in the
 // app (route to dashboard) rather than letting Back exit the PWA.
 window.addEventListener('popstate', () => {
-  if (modalOpen) { closeModal(true); return; }
-  if (modalPopGuard) { modalPopGuard = false; return; }      // our own back() after a button-close
+  if (modalOpen) { closeModal(); return; }
   if (State.token && !$('#app').classList.contains('hidden')) {
     if (State.tab && State.tab !== 'dashboard') go('dashboard');
     history.pushState({ dbkAnchor: true }, '');               // re-anchor so Back never exits the app
@@ -182,7 +182,7 @@ async function boot() {
   updateTabs(); mountAssistant(); mountChat(); mountNotifications(); updatePill();
   syncOutbox(); syncChatOutbox(); pollNotifs();
   go(!State.online && internalPos() ? 'sell' : 'dashboard');  // offline → straight to selling
-  history.replaceState({ dbkAnchor: true }, '');              // base entry so Back stays inside the app
+  history.pushState({ dbkAnchor: true }, '');                 // extra entry so Back has something to pop (stays in app)
   handlePaymentReturn();                                      // confirm a Paystack return, if any
 }
 function applyBrand() {
@@ -348,9 +348,14 @@ async function openReport(id) {
       <div style="height:16px"></div>
       <button class="btn ghost sm" id="r-edit" style="width:100%">✎ Edit report</button>
       <div style="height:8px"></div><button class="btn ghost sm" id="r-analyse" style="width:100%;color:#5b21b6;border-color:#ddd6fe">✨ AI analyse this day</button>
-      ${isGMup() ? `<div style="height:8px"></div><button class="btn sm" id="r-email" style="width:100%">✉ Email report to recipients</button>` : ''}`,
+      ${isGMup() ? `<div style="height:8px"></div><button class="btn sm" id="r-email" style="width:100%">✉ Email report to recipients</button>` : ''}
+      ${(r.created_by === State.user.id || isGMup()) ? `<div style="height:8px"></div><button class="btn ghost sm" id="r-del" style="width:100%;color:var(--err);border-color:#fecaca">🗑 Delete report</button>` : ''}`,
       { title: r.site_name || siteName(r.site_id), sub: r.report_date + ' · ' + r.status });
     $('#r-edit', b).onclick = () => { closeModal(); reportForm(r); };
+    if ($('#r-del', b)) $('#r-del', b).onclick = () => confirmModal('Delete this report?', `${r.site_name || siteName(r.site_id)} · ${r.report_date}. This can’t be undone.`, async () => {
+      try { await api('/reports/' + r.id, { method: 'DELETE' }); toast('Report deleted', 'ok'); closeModal(); go('reports'); }
+      catch (e) { toast(e.message, 'err'); }
+    });
     $('#r-analyse', b).onclick = async (ev) => {
       ev.target.disabled = true; ev.target.innerHTML = '<span class="spin"></span>Analysing…';
       try { const a = await api('/ai/analyse', { method: 'POST', body: { site: r.site_id, date: r.report_date } });

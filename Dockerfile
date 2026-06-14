@@ -1,12 +1,25 @@
-# pg is pure JS — no native compilation needed; single-stage build.
+# Two-stage build: stage 1 compiles the React PWA, stage 2 runs the API.
+# pg is pure JS so no native compilation needed in stage 2.
+
+# ── Stage 1: build the React frontend ────────────────────────────────────────
+FROM node:20-bookworm-slim AS builder
+WORKDIR /build
+COPY package.json package-lock.json* ./
+RUN npm install
+COPY frontend/ ./frontend/
+COPY vite.config.js ./
+RUN npm run build
+# Output is in /build/frontend/dist
+
+# ── Stage 2: production API server ───────────────────────────────────────────
 FROM node:20-bookworm-slim
-# /data holds uploaded files (volume-mounted in production)
 RUN mkdir -p /data/uploads && chown -R node:node /data
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 COPY --chown=node:node backend/ ./backend/
-COPY --chown=node:node frontend/ ./frontend/
+# Ship only the compiled frontend assets (not the React source)
+COPY --chown=node:node --from=builder /build/frontend/dist ./frontend/dist/
 COPY --chown=node:node package.json ./
 RUN chmod -R u+rwX,go-w /app
 USER node

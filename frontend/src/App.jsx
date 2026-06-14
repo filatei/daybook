@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { StoreProvider, useStore, useRole } from './store.jsx';
+import { StoreProvider, useStore } from './store.jsx';
 import { api, scoped, setToken } from './api.js';
 import Nav from './components/Nav.jsx';
 import Modal from './components/Modal.jsx';
@@ -88,16 +88,32 @@ function Inner() {
 
 function LoginScreen({ devLogin }) {
   useEffect(() => {
-    const gid = window.__GOOGLE_CLIENT_ID__ || document.querySelector('meta[name="google-client-id"]')?.content;
-    if (!window.google?.accounts?.id || !gid) return;
-    window.google.accounts.id.initialize({
-      client_id: gid,
-      callback: (r) => window.__daybookGoogleCb?.(r),
-    });
-    window.google.accounts.id.renderButton(
-      document.getElementById('gsi-button'),
-      { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', width: 280 },
-    );
+    const initGsi = (gid) => {
+      if (!window.google?.accounts?.id || !gid) return;
+      window.google.accounts.id.initialize({
+        client_id: gid,
+        callback: (r) => window.__daybookGoogleCb?.(r),
+      });
+      window.google.accounts.id.renderButton(
+        document.getElementById('gsi-button'),
+        { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with', width: 280 },
+      );
+    };
+
+    // Try cached value first, then fetch from /api/config
+    const cached = window.__GOOGLE_CLIENT_ID__;
+    if (cached) { initGsi(cached); return; }
+    fetch('/api/config').then((r) => r.json()).then((cfg) => {
+      if (cfg.google_client_id) {
+        window.__GOOGLE_CLIENT_ID__ = cfg.google_client_id;
+        // GSI script may still be loading — wait for it
+        const tryInit = () => {
+          if (window.google?.accounts?.id) initGsi(cfg.google_client_id);
+          else setTimeout(tryInit, 200);
+        };
+        tryInit();
+      }
+    }).catch(() => {});
   }, []);
 
   return (

@@ -97,7 +97,7 @@ export default function Admin() {
   };
 
   const inviteMember = async (email, inviteRole) => {
-    await api(scoped('/members/invite'), { method: 'POST', body: { email, role: inviteRole } });
+    await api(scoped('/members'), { method: 'POST', body: { email, role: inviteRole } });
     toast(`Invited ${email}`, 'ok');
     await loadMembers();
   };

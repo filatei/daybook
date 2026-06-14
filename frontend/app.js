@@ -1232,7 +1232,9 @@ function mountAssistant() {
   $('#app').appendChild(b);
 }
 async function openAssistant() {
-  const greeting = aiHistory.length ? '' : `<div class="bub sys">Ask me about ${esc(active()?.name || 'your companies')}'s sales, balances, trends, or which site to look at. I read your live report data.</div>`;
+  const greeting = aiHistory.length ? '' : (active()
+    ? `<div class="bub sys">Ask me anything about ${esc(active().name)} — live sales, expenses, payroll, staff, generators or reports, for any site or date. e.g. “Tell me about Swali today”.</div>`
+    : `<div class="bub sys">Pick a company at the top, then ask me anything about its sales, staff, expenses or reports.</div>`);
   const body = modal(`
     <div class="chat" id="aiChat">${greeting}${aiHistory.map(renderBub).join('')}</div>
     <div class="chat-input">
@@ -1251,7 +1253,7 @@ async function openAssistant() {
     const typing = document.createElement('div'); typing.className = 'bub a'; typing.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
     chat.appendChild(typing); chat.scrollTop = chat.scrollHeight; send.disabled = true;
     try {
-      const r = await api('/ai/chat', { method: 'POST', body: { message: q, history: aiHistory.slice(0, -1) } });
+      const r = await api(scoped('/ai/chat'), { method: 'POST', body: { message: q, history: aiHistory.slice(0, -1) } });
       typing.remove();
       aiHistory.push({ role: 'assistant', content: r.reply });
       chat.insertAdjacentHTML('beforeend', renderBub({ role: 'assistant', content: r.reply }));

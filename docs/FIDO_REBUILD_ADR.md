@@ -1,9 +1,49 @@
-# Rebuilding Fido as `fido.torama.money` — Architecture Decision Record
+# Replacing Fido with Daybook — Architecture Decision Record
 
-**Status:** Proposed (awaiting your go / override)
-**Date:** 2026-06-14
-**Decider:** Torama (you make the call; this is my recommendation)
-**Context inputs:** live Fido backend (`tor-pos-backend`, ~34k LOC, 65 Mongo models, 65 routes), Fido Mongo dump (~57 collections, multi-GB), Daybook codebase, and your attached MT5-style resilience notes.
+**Status: ACCEPTED — 2026-06-14.** Daybook becomes the single platform; **there is no separate `fido.torama.money`**. Fido/Fiafia run as full tenants inside Daybook, and the live Fido MongoDB is transformed (ETL) into Daybook's database. Confirmed by Torama:
+- Nothing in current Fido is sacred — clean-slate behaviour is fine.
+- Same Linode as otuburu/daybook (139.162.170.253).
+- **Postgres** is the database, **React PWA** the client.
+- One codebase / one deployment (Daybook). No second project.
+
+## What this changes for Daybook
+
+Daybook today runs on **SQLite**. Because Daybook now becomes Fido's **production** system (high volume — `fidoorders` ≈495 MB and growing, concurrent depot writes, heavy reporting), Daybook's own datastore moves to **Postgres**. This is the single biggest engineering item: porting the data layer (`better-sqlite3`, synchronous) to Postgres (`pg`, async) and adapting the SQL (`?`→`$n` params, `ON CONFLICT`, `unixepoch()`, partial indexes). The application logic, routes, auth, multi-tenant model, and all the features already built stay; only the DB layer and query calls change.
+
+## Execution plan (revised — single platform)
+
+- **Phase 1 — Postgres foundation.** Port `db.js` to `pg` + a small query adapter; translate the schema; bring up a `postgres` service in `docker-compose.yml`; make the smoke suite pass on Postgres. Provision Postgres on the Linode (own container, persisted volume). *Nothing user-facing changes.*
+- **Phase 2 — Data ETL (Mongo → Postgres).** Idempotent, re-runnable scripts that map the in-use Fido collections into Daybook tables, reconciled to the kobo. Run repeatedly in shadow while the old system still operates. Mapping below.
+- **Phase 3 — Fido feature parity in Daybook.** Port the remaining Fido modules (payments/reconciliation, distributor/vehicle/loading logistics, cashback, QA/QC, payroll engine, produce line, terminals) one at a time behind flags, dual-writing/reconciling against live Fido.
+- **Phase 4 — Resilience tier.** Layer the MT5-style transport (idempotent ops already in Daybook's offline sales; add WS gateway + outbox + resume protocol + Redis ring buffer) onto the gate/loading + POS write paths.
+- **Phase 5 — Cutover.** Freeze old Fido, final ETL delta, flip `fido.torama.ng` traffic to Daybook. POS write-path last, once printing + payments + gate/loading proven in shadow.
+
+## ETL mapping (Fido Mongo → Daybook Postgres) — in-use collections
+
+| Fido collection (size) | → Daybook table | Notes |
+|---|---|---|
+| `fidoorders` (~495 MB) | `pos_sales` (+ `inventory_moves`) | core sales; map site, items, payment method, totals; preserve original `_id` as `ext_id` for idempotency |
+| `recuploads` (~235 MB) | `documents` / object store | receipt/reconciliation uploads — store files, index metadata |
+| `expenses` (~89 MB) | `expenses` (new) / report expenses | by site + category + date |
+| `messages` (~84 MB) | `messages` | staff chat history (optional import) |
+| `inventories` (~53 MB) | `products` + `inventory_moves` | current stock + movement history |
+| `payrolls` (~12 MB) | `payroll` (new) | gross/net by staff/month |
+| `cashdeposits`, `eods` | report fields / `pos_sales` | cash banking + end-of-day |
+| `peoples` | `staff` | already mapped via `ext_people_id`; finish import |
+| `customers` | `customers` | already type-ahead linked; finish import |
+| `sites` | `sites` | code/name mapping (SWALI, etc.) |
+
+Sites, staff and customers already have an `ext_id` link in Daybook, so those ETL paths are partly proven.
+
+## Risks / guardrails (unchanged)
+
+Revenue-critical, so every cutover runs in shadow mode and reconciles before flipping. Payments re-integration and thermal-printing parity are the slow external dependencies. The Postgres port is mechanical but broad — it must keep the smoke + feature tests green at each step.
+
+---
+
+## Original analysis (superseded by the decision above — kept for reference)
+
+The recommendation below proposed an optional separate `fido.torama.money` deployment. Torama chose the simpler single-platform path (Daybook does it all), so the "separate project" option is **not** being taken; the Postgres/React/ETL/strangler reasoning still applies and is folded into the plan above.
 
 ---
 

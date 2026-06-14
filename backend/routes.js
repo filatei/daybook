@@ -626,7 +626,7 @@ router.post('/staff', requireAuth, needTenant('SITE_MANAGER'), (req, res) => {
   if (!b.full_name || !site_id) return res.status(400).json({ error: 'full_name and site_id required' });
   const site = siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
   const id = uuid();
-  try { db.prepare('INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type) VALUES (?,?,?,?,?,?,?)').run(id, req.ctx.tenant_id, site_id, b.full_name.trim(), b.role_title || null, b.phone || null, b.pay_type || 'DAILY'); }
+  try { db.prepare('INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext_people_id) VALUES (?,?,?,?,?,?,?,?)').run(id, req.ctx.tenant_id, site_id, b.full_name.trim(), b.role_title || null, b.phone || null, b.pay_type || 'DAILY', b.ext_people_id || null); }
   catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
   res.status(201).json(db.prepare('SELECT * FROM staff WHERE id=?').get(id));
 });
@@ -657,6 +657,22 @@ router.post('/staff/import', requireAuth, needTenant('GENERAL_MANAGER'), async (
     audit(req.ctx.tenant_id, req.user.id, 'IMPORT', 'staff', null, { added });
     res.json({ imported: added, scanned: people.length });
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
+});
+
+// ── TYPE-AHEAD SUGGESTIONS (staff + customers) ────────────────────────────────
+// Fido/Fiafia (pos_source) draw from the live fido directory; other companies
+// suggest from their own previously-entered records.
+router.get('/suggest/staff', requireAuth, async (req, res) => {
+  const s = scope(req); if (!s.ctx) return res.json([]);
+  const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
+  if (posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchStaff(q)); } catch { /* fall back to local */ } }
+  res.json(db.prepare("SELECT DISTINCT full_name AS name, role_title AS role, phone FROM staff WHERE tenant_id=? AND full_name LIKE ? ORDER BY full_name LIMIT 8").all(s.ctx.tenant_id, `%${q}%`));
+});
+router.get('/suggest/customers', requireAuth, async (req, res) => {
+  const s = scope(req); if (!s.ctx) return res.json([]);
+  const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
+  if (posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchCustomers(q)); } catch { /* fall back to local */ } }
+  res.json(db.prepare('SELECT DISTINCT name, phone FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 8').all(s.ctx.tenant_id, `%${q}%`));
 });
 
 // ── STAFF ATTENDANCE (shared-device clock-in: photo + signature + GPS) ────────

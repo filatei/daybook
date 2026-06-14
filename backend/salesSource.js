@@ -117,6 +117,22 @@ async function getStaff() {
   ]).toArray();
 }
 
+const rxEscape = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Type-ahead over fido `peoples` (staff) by name. */
+async function searchStaff(q, limit = 8) {
+  const db = await getDb();
+  const rx = new RegExp(rxEscape(q), 'i');
+  const rows = await db.collection('peoples').find({ name: rx }, { projection: { _id: 1, name: 1, jobName: 1, department: 1, phone: 1 } }).limit(limit).toArray();
+  return rows.map((r) => ({ ext_id: String(r._id), name: r.name, role: r.jobName || r.department || null, phone: r.phone || null }));
+}
+/** Type-ahead over fido `customers` by name. */
+async function searchCustomers(q, limit = 8) {
+  const db = await getDb();
+  const rx = new RegExp(rxEscape(q), 'i');
+  const rows = await db.collection('customers').find({ name: rx }, { projection: { _id: 1, name: 1, phone: 1 } }).limit(limit).toArray();
+  return rows.map((r) => ({ ext_id: String(r._id), name: r.name, phone: r.phone || null }));
+}
+
 /**
  * Flexible read-only aggregation over fidoorders — the surface the AI tool calls.
  * args: { from:'YYYY-MM-DD', to:'YYYY-MM-DD', site?, groupBy?:'site'|'paymentMethod'|'product'|'day' }
@@ -190,4 +206,4 @@ async function ping() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getSales, getExpensesTotal, getPayroll, getStaff, query, queryExpenses, payrollAgg, staffCount, ping };
+module.exports = { salesEnabled, getSales, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping };

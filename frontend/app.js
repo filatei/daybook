@@ -107,6 +107,32 @@ window.addEventListener('popstate', () => {
   }
 });
 function setErr(id, show) { const i = $('#' + id), e = $('#' + id + '-e'); if (i) i.classList.toggle('err', show); if (e) e.classList.toggle('show', show); }
+// Attach a debounced suggestion dropdown to a text input. kind = 'staff' | 'customers'.
+// Fido/Fiafia draw from the live fido directory; other companies from their own records.
+function attachTypeahead(input, kind, onPick) {
+  if (!input) return;
+  const wrap = document.createElement('div'); wrap.className = 'ta';
+  input.parentNode.insertBefore(wrap, input); wrap.appendChild(input);
+  const list = document.createElement('div'); list.className = 'ta-list hidden'; wrap.appendChild(list);
+  const close = () => { list.classList.add('hidden'); list.innerHTML = ''; };
+  let timer, lastQ = '';
+  input.setAttribute('autocomplete', 'off');
+  input.addEventListener('input', () => {
+    const q = input.value.trim(); clearTimeout(timer);
+    if (q.length < 2) { close(); return; }
+    timer = setTimeout(async () => {
+      if (q === lastQ) return; lastQ = q;
+      try {
+        const items = await api(scoped('/suggest/' + kind + '?q=' + encodeURIComponent(q)));
+        if (!items.length) { close(); return; }
+        list.innerHTML = items.map((it, i) => `<button type="button" class="ta-item" data-i="${i}">${esc(it.name)}${it.phone ? ` · <span class="muted">${esc(it.phone)}</span>` : it.role ? ` · <span class="muted">${esc(it.role)}</span>` : ''}</button>`).join('');
+        list.classList.remove('hidden');
+        $$('.ta-item', list).forEach((el) => el.onclick = () => { const it = items[+el.dataset.i]; input.value = it.name; close(); if (onPick) onPick(it); });
+      } catch { close(); }
+    }, 250);
+  });
+  input.addEventListener('blur', () => setTimeout(close, 180));
+}
 const isEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
 /* ── Google Sign-In ──────────────────────────────────── */
@@ -775,8 +801,11 @@ function addStaffForm() {
     <label class="fl">Role (optional)</label><input class="input" id="ns-role" placeholder="e.g. Bagger, Loader"/>
     <label class="fl">Pay type</label><select class="input" id="ns-pay"><option>DAILY</option><option>HOURLY</option><option>MONTHLY</option><option>PIECE</option></select>
     <div style="height:14px"></div><button class="btn" type="submit">Add staff</button></form>`, { title: 'Add staff', sub: isSiteMgr() ? active().name : siteName(staffSite) });
+  let pickedExt = null;
+  attachTypeahead($('#ns-name', f), 'staff', (it) => { pickedExt = it.ext_id || null; if (it.role && !$('#ns-role', f).value) $('#ns-role', f).value = it.role; });
+  $('#ns-name', f).addEventListener('input', () => { pickedExt = null; });   // typing again clears the link
   $('#sf', f).onsubmit = async (e) => { e.preventDefault(); const name = $('#ns-name', f).value.trim(); if (!name) { toast('Name required', 'err'); return; }
-    try { await api('/staff?tenant=' + State.tenant, { method: 'POST', body: { full_name: name, role_title: $('#ns-role', f).value.trim(), pay_type: $('#ns-pay', f).value, site_id: isSiteMgr() ? active().site_id : staffSite } });
+    try { await api('/staff?tenant=' + State.tenant, { method: 'POST', body: { full_name: name, role_title: $('#ns-role', f).value.trim(), pay_type: $('#ns-pay', f).value, site_id: isSiteMgr() ? active().site_id : staffSite, ext_people_id: pickedExt } });
       toast('Staff added', 'ok'); closeModal(); loadStaffGrid(); } catch (er) { toast(er.message, 'err'); } };
 }
 async function importStaff() {
@@ -1125,6 +1154,7 @@ async function manageCustomers() {
     <form id="ncf" style="margin-top:10px"><label class="fl">Add customer</label><input class="input" id="nc-name" placeholder="Name"/>
       <div class="grid2"><input class="input" id="nc-phone" placeholder="Phone"/><input class="input" id="nc-email" placeholder="Email"/></div>
       <div style="height:10px"></div><button class="btn" type="submit">Add</button></form>`, { title: 'Customers' });
+  attachTypeahead($('#nc-name', b), 'customers', (it) => { if (it.phone && !$('#nc-phone', b).value) $('#nc-phone', b).value = it.phone; });
   $('#ncf', b).onsubmit = async (e) => { e.preventDefault(); const name = $('#nc-name', b).value.trim(); if (!name) { toast('Name required', 'err'); return; }
     try { await api('/customers?tenant=' + State.tenant, { method: 'POST', body: { name, phone: $('#nc-phone', b).value.trim(), email: $('#nc-email', b).value.trim() } }); toast('Added', 'ok'); manageCustomers(); } catch (er) { toast(er.message, 'err'); } };
 }

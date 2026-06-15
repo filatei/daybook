@@ -1037,6 +1037,27 @@ router.get('/pos/sales/:id', requireAuth, async (req, res) => {
   res.json({ ...sale, items: J(sale.items_json, []), tenant: await tenantById(sale.tenant_id), site: sale.site_id ? await siteById(sale.site_id) : null });
 });
 
+// Delete a sale (GM/Admin) — used during testing.  Restores tracked stock and
+// reverses inventory moves so figures stay consistent.
+router.delete('/pos/sales/:id', requireAuth, async (req, res) => {
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  if (!sale) return res.status(404).json({ error: 'not found' });
+  const c = await contextFor(req.user, sale.tenant_id);
+  if (!c || !atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'only a manager can delete a sale' });
+  // Restore stock for any tracked products on the receipt.
+  const lines = J(sale.items_json, []);
+  for (const l of lines) {
+    if (!l.product_id) continue;
+    const p = await qone('SELECT track_stock FROM products WHERE id=?', [l.product_id]);
+    if (p && p.track_stock) await qrun('UPDATE products SET stock_qty=stock_qty+? WHERE id=?', [+l.qty || 0, l.product_id]);
+  }
+  await qrun('DELETE FROM inventory_moves WHERE tenant_id=? AND ref=?', [sale.tenant_id, 'receipt#' + sale.receipt_no]);
+  await qrun('DELETE FROM pos_sales WHERE id=?', [sale.id]);
+  audit(sale.tenant_id, req.user.id, 'DELETE', 'pos_sale', sale.id, { receipt_no: sale.receipt_no, total: sale.total });
+  emitEvent(sale.tenant_id, sale.site_id, 'sale.deleted', { sale_id: sale.id, receipt_no: sale.receipt_no });
+  res.json({ ok: true });
+});
+
 // Gate: look up receipt by number (for gate staff to verify before releasing vehicle)
 router.get('/pos/gate/:receiptNo', requireAuth, async (req, res) => {
   const s = await scope(req);

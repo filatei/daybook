@@ -103,14 +103,38 @@ export default function Sell() {
   const orderRef = useRef(null);
   const goCheckout = () => orderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
+  // Post-sale receipt prompt: holds the built receipt until the cashier okays the print.
+  const [receipt, setReceipt] = useState(null);
+  const [printingReceipt, setPrintingReceipt] = useState(false);
+  const doPrint = async () => {
+    if (!receipt) return;
+    setPrintingReceipt(true);
+    try {
+      if (bt.status !== 'ready') await bt.connect();   // user gesture → pick/connect printer
+      await bt.print(receipt);
+      toast(`Receipt ${receipt.receipt_no === 'OFFLINE' ? '' : '#' + receipt.receipt_no} printed ✓`, 'ok');
+      setReceipt(null);
+    } catch (e) { toast(e.message || 'Print failed', 'err'); }
+    setPrintingReceipt(false);
+  };
+
   // ── Live "today's sales" ticker ────────────────────────────────────────────
   // Seeds with today's sales already on record, then prepends each new sale as
   // it happens (in-app sale.created + live fido.sale from the running POS).
   const [feed, setFeed] = useState([]);
   const seedFeed = useCallback(async () => {
-    try { setFeed(await api(scoped('/pos/recent?limit=40'))); } catch { /* not selected / offline */ }
+    try { setFeed((await api(scoped('/pos/recent?limit=40'))).map((r) => ({ ...r, src: 'db' }))); } catch { /* not selected / offline */ }
   }, [tenant]);
   useEffect(() => { seedFeed(); }, [seedFeed]);
+  // Testing: delete an in-app sale (GM only). Restores stock server-side.
+  const deleteOrder = async (s) => {
+    if (!window.confirm(`Delete sale ${s.receipt_no ? '#' + s.receipt_no : ''} (${ngn(s.amount)})? This cannot be undone.`)) return;
+    try {
+      await api(scoped(`/pos/sales/${s.id}`), { method: 'DELETE' });
+      setFeed((f) => f.filter((x) => x.id !== s.id));
+      toast('Sale deleted', 'ok');
+    } catch (e) { toast(e.message || 'Delete failed', 'err'); }
+  };
   const { connected: liveConnected } = useRealtime((evt) => {
     if (evt.type !== 'fido.sale' && evt.type !== 'sale.created') return;
     const p = evt.payload || {};
@@ -223,29 +247,33 @@ export default function Sell() {
       const sale = await api(scoped('/pos/sales'), { method: 'POST', body });
 
       setLastSale(sale);
+      const now = new Date();
+      const rdata = {
+        company:        activeTenant?.name || 'FIDO WATER',
+        receipt_no:     sale.receipt_no,
+        date_str:       now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+        time_str:       now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+        items:          JSON.parse(sale.items_json || '[]'),
+        total:          sale.total,
+        payment_method: payMethod,
+        amount_paid:    payMethod === 'CASH' ? tenderedAmt : sale.total,
+        change:         payMethod === 'CASH' ? change : 0,
+        customer_name:  custName.trim() || null,
+      };
 
       if (withPrint && bt.status === 'ready') {
-        const now = new Date();
-        await bt.print({
-          company:        activeTenant?.name || 'FIDO WATER',
-          receipt_no:     sale.receipt_no,
-          date_str:       now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
-          time_str:       now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
-          items:          JSON.parse(sale.items_json || '[]'),
-          total:          sale.total,
-          payment_method: payMethod,
-          amount_paid:    payMethod === 'CASH' ? tenderedAmt : sale.total,
-          change:         payMethod === 'CASH' ? change : 0,
-          customer_name:  custName.trim() || null,
-        });
+        await bt.print(rdata);
         toast(`Receipt #${sale.receipt_no} printed ✓`, 'ok');
       } else {
+        // No silent print — prompt the cashier to send the receipt to the printer.
         toast(`Sale #${sale.receipt_no} saved ✓`, 'ok');
+        setReceipt(rdata);
       }
 
       // Reset cart, new uid for next transaction
       setCart([]); setCustName(''); setTendered('');
       clientUid.current = genUid();
+      seedFeed();   // refresh ticker so the new sale shows (and is deletable while testing)
     } catch (e) {
       if (isNetErr(e)) {
         // Offline: keep the sale in the local outbox (idempotent client_uid) and
@@ -254,20 +282,21 @@ export default function Sell() {
         setPending(outboxCount());
         const items_json = JSON.stringify(cartLines.map((c) => ({ product_id: c.product.id, name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })));
         setLastSale({ pending: true, receipt_no: null, total: subtotal, items_json });
+        const now = new Date();
+        const rdata = {
+          company: activeTenant?.name || 'FIDO WATER', receipt_no: 'OFFLINE',
+          date_str: now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+          time_str: now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+          items: cartLines.map((c) => ({ name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })),
+          total: subtotal, payment_method: payMethod,
+          amount_paid: payMethod === 'CASH' ? tenderedAmt : subtotal,
+          change: payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0,
+          customer_name: custName.trim() || null,
+        };
         if (withPrint && bt.status === 'ready') {
-          const now = new Date();
-          try {
-            await bt.print({
-              company: activeTenant?.name || 'FIDO WATER', receipt_no: 'OFFLINE',
-              date_str: now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
-              time_str: now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
-              items: cartLines.map((c) => ({ name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })),
-              total: subtotal, payment_method: payMethod,
-              amount_paid: payMethod === 'CASH' ? tenderedAmt : subtotal,
-              change: payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0,
-              customer_name: custName.trim() || null,
-            });
-          } catch { /* printer optional */ }
+          try { await bt.print(rdata); } catch { /* printer optional */ }
+        } else {
+          setReceipt(rdata);
         }
         toast('Offline — sale queued, will sync when back online ⚡', 'info');
         setCart([]); setCustName(''); setTendered('');
@@ -311,7 +340,13 @@ export default function Sell() {
                   <strong style={{ fontWeight: 700 }}>{s.customer || 'Walk-in'}</strong>
                   <span style={{ color: 'var(--muted)' }}>{s.site ? ` · ${s.site}` : ''}{s.payment_method ? ` · ${s.payment_method}` : ''} · {saleTime(s.at)}</span>
                 </span>
-                <span style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>{ngn(s.amount)}</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
+                  <span style={{ fontWeight: 700 }}>{ngn(s.amount)}</span>
+                  {s.src === 'db' && s.receipt_no != null && (
+                    <button title="Delete sale (testing)" onClick={() => deleteOrder(s)}
+                      style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 6, width: 22, height: 22, fontSize: 13, cursor: 'pointer', lineHeight: 1, display: 'grid', placeItems: 'center' }}>🗑</button>
+                  )}
+                </span>
               </div>
             ))}
           </div>
@@ -456,6 +491,30 @@ export default function Sell() {
             <button className="btn" onClick={() => charge(bt.status === 'ready')} disabled={!canCharge || posting}>
               {posting ? <span className="spin" /> : (bt.status === 'ready' ? '🖨 ' : null)}
               {bt.status === 'ready' ? 'Charge & Print' : 'Charge'} {ngn(subtotal)}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Post-sale receipt prompt — okay sending the receipt to the printer */}
+      {receipt && (
+        <div onClick={() => setReceipt(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
+          <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 360, margin: 0, textAlign: 'center' }}>
+            <div style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Sale recorded ✓</div>
+            <div style={{ fontWeight: 900, fontSize: 26, letterSpacing: '-1px', margin: '4px 0' }}>
+              {receipt.receipt_no === 'OFFLINE' ? 'Offline sale' : `#${String(receipt.receipt_no).padStart(4, '0')}`}
+            </div>
+            <div style={{ fontWeight: 800, fontSize: 20, color: 'var(--brand-d)' }}>{ngn(receipt.total)}</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16 }}>
+              {receipt.payment_method}{receipt.customer_name ? ` · ${receipt.customer_name}` : ''}
+            </div>
+            <button className="btn" onClick={doPrint} disabled={printingReceipt} style={{ marginBottom: 8 }}>
+              {printingReceipt ? <span className="spin" /> : '🖨 '}
+              {bt.status === 'ready' ? 'Print receipt' : 'Connect printer & print'}
+            </button>
+            <button className="btn btn-ghost" onClick={() => setReceipt(null)} disabled={printingReceipt}>
+              Skip — no receipt
             </button>
           </div>
         </div>

@@ -11,6 +11,9 @@
  */
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { api, scoped, ngn } from '../api.js';
+import { useRealtime } from '../hooks/useRealtime.js';
+
+const evClock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 import { useStore } from '../store.jsx';
 
 function fmtTime(ts) {
@@ -40,7 +43,22 @@ export default function Gate() {
   const [sale,    setSale]    = useState(null);
   const [loading, setLoading] = useState(false);
   const [acting,  setActing]  = useState(false);
+  const [feed,    setFeed]    = useState([]);   // live gate/loading activity
   const inputRef = useRef(null);
+  const saleRef = useRef(null); saleRef.current = sale;
+
+  // Live: new sales pop in; loadings/exits show across stations; reflect changes
+  // on the receipt currently open at this station.
+  const { connected } = useRealtime((evt) => {
+    if (!['sale.created', 'sale.loaded', 'sale.exited', 'fido.sale'].includes(evt.type)) return;
+    const p = evt.payload || {};
+    setFeed((f) => [{ id: `${evt.seq}-${Date.now()}`, type: evt.type, receipt_no: p.receipt_no, total: p.total ?? p.amount, at: Math.floor(Date.now() / 1000) }, ...f].slice(0, 12));
+    const cur = saleRef.current;
+    if (cur && p.sale_id && cur.id === p.sale_id) {
+      if (evt.type === 'sale.loaded') setSale((s) => ({ ...s, loaded_at: p.loaded_at }));
+      if (evt.type === 'sale.exited') setSale((s) => ({ ...s, exited_at: p.exited_at }));
+    }
+  });
 
   // Auto-focus so barcode scanner fires immediately
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -213,6 +231,25 @@ export default function Gate() {
           <p>Scan receipt barcode or enter number</p>
         </div>
       )}
+
+      {/* Live gate/loading activity */}
+      <div className="card" style={{ marginTop: 14, borderLeft: '3px solid #16a34a' }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6, marginBottom: feed.length ? 8 : 0 }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: connected ? '#16a34a' : '#94a3b8', boxShadow: connected ? '0 0 0 4px rgba(22,163,74,.18)' : 'none' }} />
+          LIVE ACTIVITY{connected ? '' : ' (reconnecting…)'}
+        </div>
+        {feed.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Waiting for activity…</div>
+        ) : feed.map((e) => {
+          const label = e.type === 'sale.loaded' ? '📦 Loaded' : e.type === 'sale.exited' ? '🚪 Exited' : e.type === 'fido.sale' ? '🟢 Fido sale' : '🧾 New sale';
+          return (
+            <div key={e.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '3px 0' }}>
+              <span style={{ color: 'var(--muted)' }}>{label}{e.receipt_no ? ` · #${e.receipt_no}` : ''} · {evClock(e.at)}</span>
+              {e.total != null && <span style={{ fontWeight: 700 }}>{ngn(e.total)}</span>}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

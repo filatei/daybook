@@ -20,6 +20,7 @@ const sales = require('./salesSource');
 const scheduler = require('./scheduler');
 const payments = require('./payments');
 const ls = require('./lemonsqueezy');
+const { emitEvent } = require('./realtime');
 
 const router = express.Router();
 
@@ -1001,6 +1002,7 @@ router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), async (req, r
     await qrun('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,ref,created_by) VALUES (?,?,?,?,?,?,?,?)',
       [uuid(), req.ctx.tenant_id, l.product_id, site_id, 'SALE', -l.qty, 'receipt#' + nextNo, req.user.id]);
   }
+  emitEvent(req.ctx.tenant_id, site_id, 'sale.created', { sale_id: id, receipt_no: nextNo, total, customer_name: b.customer_name || null, payment_method: (b.payment_method || 'CASH').toUpperCase(), status });
   res.status(201).json(await qone('SELECT * FROM pos_sales WHERE id=?', [id]));
 });
 router.get('/pos/sales', requireAuth, async (req, res) => {
@@ -1046,6 +1048,7 @@ router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
   const ts = nowS();
   await qrun('UPDATE pos_sales SET exited_at=? WHERE id=?', [ts, sale.id]);
   await audit(sale.tenant_id, req.user.id, 'EXIT', 'pos_sale', sale.id, { receipt_no: sale.receipt_no });
+  emitEvent(sale.tenant_id, sale.site_id, 'sale.exited', { sale_id: sale.id, receipt_no: sale.receipt_no, exited_at: ts });
   res.json({ ...sale, exited_at: ts, items: J(sale.items_json, []) });
 });
 
@@ -1059,6 +1062,7 @@ router.post('/pos/sales/:id/loaded', requireAuth, async (req, res) => {
   const ts = nowS();
   await qrun('UPDATE pos_sales SET loaded_at=? WHERE id=?', [ts, sale.id]);
   await audit(sale.tenant_id, req.user.id, 'LOADED', 'pos_sale', sale.id, { receipt_no: sale.receipt_no });
+  emitEvent(sale.tenant_id, sale.site_id, 'sale.loaded', { sale_id: sale.id, receipt_no: sale.receipt_no, loaded_at: ts });
   res.json({ ...sale, loaded_at: ts, items: J(sale.items_json, []) });
 });
 

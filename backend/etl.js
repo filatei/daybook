@@ -171,10 +171,9 @@ async function etlCustomers(mongoDB, { nameMap, oidMap, norm }, defaultTenantId)
       const r = await qrun(
         `INSERT INTO customers (id,tenant_id,name,phone,email,ext_id)
          VALUES (?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) DO UPDATE SET
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
            name=EXCLUDED.name,
-           phone=COALESCE(EXCLUDED.phone, customers.phone)
-         WHERE customers.ext_id IS NOT NULL`,
+           phone=COALESCE(EXCLUDED.phone, customers.phone)`,
         [uuid(), tenantId, name, c.phone || firstOf(c.phones) || null, c.email || firstOf(c.emails) || null, ext_id]);
       if (r.rowCount) stats.inserted++;
     } catch { stats.errors++; }
@@ -205,7 +204,7 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
       const r = await qrun(
         `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,amount,created_at)
          VALUES (?,?,?,?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) DO NOTHING`,
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
         [uuid(), site.tenant_id, site.id, ext_id, expDate,
           (e.category || 'OTHER').toUpperCase().slice(0, 40),
           e.description || e.remarks || e.note || (Array.isArray(e.products) && e.products[0] && e.products[0].name) || null, amount,
@@ -249,7 +248,7 @@ async function etlPayroll(mongoDB, { nameMap, oidMap, norm }) {
           (id,tenant_id,site_id,staff_id,ext_id,ext_staff_id,staff_name,month,year,
            gross_pay,net_pay,deductions,days_worked,bags_bagged,status,created_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) DO NOTHING`,
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
         [uuid(), site.tenant_id, site.id,
           staffRow ? staffRow.id : null,
           ext_id, extStaffId, row.staffName || null,
@@ -331,7 +330,7 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
            subtotal,discount,total,payment_method,amount_paid,balance,status,
            sale_date,ext_id,created_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) DO NOTHING`,
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
         [uuid(), site.tenant_id, site.id, nextReceipt(site.tenant_id),
           custId, custName, JSON.stringify(items),
           total_amount, 0, total_amount, pm, total_amount, 0, 'PAID',

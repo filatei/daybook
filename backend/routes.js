@@ -699,13 +699,23 @@ router.get('/suggest/customers', requireAuth, async (req, res) => {
 
 router.get('/suggest/vendors', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.json([]);
-  const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
-  // Distinct vendor names from the expenses table for this tenant
+  const q = (req.query.q || '').toString().trim(); if (q.length < 1) return res.json([]);
+  // Primary source: the imported vendors directory (name + bank/phone hint).
   const rows = await qall(
-    `SELECT DISTINCT vendor FROM expenses WHERE tenant_id=? AND vendor IS NOT NULL AND vendor <> '' AND vendor ILIKE ? ORDER BY vendor LIMIT 10`,
-    [s.ctx.tenant_id, `%${q}%`],
-  );
-  res.json(rows.map((r) => ({ label: r.vendor })));
+    `SELECT name, phone, bank, account_no, category FROM vendors
+      WHERE tenant_id=? AND status='ACTIVE' AND name ILIKE ? ORDER BY name LIMIT 12`,
+    [s.ctx.tenant_id, `%${q}%`]);
+  const seen = new Set(rows.map((r) => r.name.toLowerCase()));
+  // Fallback: any free-typed vendor names already used on expenses but not in the directory.
+  const extra = await qall(
+    `SELECT DISTINCT vendor FROM expenses WHERE tenant_id=? AND vendor IS NOT NULL AND vendor <> '' AND vendor ILIKE ? ORDER BY vendor LIMIT 8`,
+    [s.ctx.tenant_id, `%${q}%`]);
+  const out = rows.map((r) => ({
+    label: r.name, vendor: r.name,
+    sub: [r.bank && r.account_no ? `${r.bank} · ${r.account_no}` : r.bank, r.phone, r.category].filter(Boolean).join(' · ') || undefined,
+  }));
+  for (const e of extra) { if (!seen.has(e.vendor.toLowerCase())) out.push({ label: e.vendor, vendor: e.vendor }); }
+  res.json(out);
 });
 
 // ── ATTENDANCE ────────────────────────────────────────────────────────────────

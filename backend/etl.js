@@ -9,7 +9,7 @@
  *   node backend/etl.js [options]
  *
  * Options:
- *   --collection  orders|expenses|staff|customers|products|payroll|all  (default: all)
+ *   --collection  orders|expenses|staff|customers|products|vendors|payroll|all  (default: all)
  *   --from        YYYY-MM-DD   (default: 2020-01-01)
  *   --to          YYYY-MM-DD   (default: today)
  *   --dry-run                  count + validate, no writes
@@ -194,6 +194,47 @@ async function etlCustomers(mongoDB, { nameMap, oidMap, norm }, defaultTenantId)
   return stats;
 }
 
+// ── contacts → vendors ─────────────────────────────────────────────────────────
+// Fido vendors/payees live in the global `contacts` collection (no site).  They
+// belong to the primary (Fido) tenant — pass its id as the default.  Deduped on
+// the unique (tenant_id, lower(name)) index.
+async function etlVendors(mongoDB, { nameMap, oidMap, norm }, defaultTenantId) {
+  const stats = { scanned: 0, inserted: 0, skipped: 0, errors: 0 };
+  if (DRY_RUN) {
+    stats.scanned = await mongoDB.collection('contacts').countDocuments();
+    done('vendors (dry-run)', stats);
+    return stats;
+  }
+  const cursor = mongoDB.collection('contacts').find({}).batchSize(BATCH_SIZE);
+  for await (const c of cursor) {
+    stats.scanned++;
+    const ext_id = String(c._id);
+    const site = resolveSiteByName(nameMap, norm, c.site);
+    const tenantId = (site && site.tenant_id) || defaultTenantId;
+    const name = clean(c.name); if (!name) { stats.skipped++; continue; }
+    if (!tenantId) { stats.skipped++; continue; }
+    const ba = c.bank_account || {};
+    try {
+      const r = await qrun(
+        `INSERT INTO vendors (id,tenant_id,name,phone,email,bank,account_no,category,ext_id)
+         VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id, lower(name)) DO UPDATE SET
+           ext_id  = COALESCE(vendors.ext_id, EXCLUDED.ext_id),
+           phone   = COALESCE(EXCLUDED.phone, vendors.phone),
+           email   = COALESCE(EXCLUDED.email, vendors.email),
+           bank    = COALESCE(EXCLUDED.bank, vendors.bank),
+           account_no = COALESCE(EXCLUDED.account_no, vendors.account_no),
+           category   = COALESCE(EXCLUDED.category, vendors.category)`,
+        [uuid(), tenantId, name, clean(c.phone) || firstStr(c.phones), clean(c.email) || firstStr(c.emails),
+          clean(ba.bank), clean(ba.acct_number) || clean(c.bankAcct), clean(c.category) || clean(c.type), ext_id]);
+      if (r.rowCount) stats.inserted++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] vendors error:', e.message.slice(0, 140)); }
+    progress('vendors', stats.scanned, 0);
+  }
+  done('vendors', stats);
+  return stats;
+}
+
 // ── expenses → expenses ────────────────────────────────────────────────────────
 async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
   const from = new Date(`${FROM_DATE}T00:00:00.000${TZ}`);
@@ -202,6 +243,9 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
   const match = { createdAt: { $gte: from, $lte: to } };
   const total = await mongoDB.collection('expenses').countDocuments(match);
   if (DRY_RUN) { stats.scanned = total; done('expenses (dry-run)', stats); return stats; }
+  // Resolve fido vendor ObjectId → vendor name via the already-imported vendors.
+  const vendorByExt = {};
+  for (const v of await qall('SELECT ext_id, name FROM vendors WHERE ext_id IS NOT NULL')) vendorByExt[v.ext_id] = v.name;
   const cursor = mongoDB.collection('expenses').find(match).batchSize(BATCH_SIZE);
   for await (const e of cursor) {
     stats.scanned++;
@@ -211,14 +255,15 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
     const expDate = dateStr(e.createdAt);
     if (!expDate) { stats.skipped++; continue; }
     const amount = num(e.txn_amount);
+    const vendorName = e.vendor ? (vendorByExt[String(e.vendor)] || null) : null;
     try {
       const r = await qrun(
-        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,amount,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,amount,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET vendor=COALESCE(EXCLUDED.vendor, expenses.vendor)`,
         [uuid(), site.tenant_id, site.id, ext_id, expDate,
           clean((e.category || 'OTHER').toUpperCase().slice(0, 40)) || 'OTHER',
-          clean(e.description || e.remarks || e.note || (Array.isArray(e.products) && e.products[0] && e.products[0].name)), amount,
+          clean(e.description || e.remarks || e.note || (Array.isArray(e.products) && e.products[0] && e.products[0].name)), vendorName, amount,
           Math.floor((e.createdAt instanceof Date ? e.createdAt : new Date()).getTime() / 1000)]);
       if (r.rowCount) stats.inserted++;
     } catch (e2) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] expenses error:', e2.message.slice(0, 140)); }
@@ -525,13 +570,14 @@ async function main() {
   const defaultTenantId = defTenant ? defTenant.id : null;
   console.log(`[ETL] default tenant for site-less rows: ${defTenant ? defTenant.slug : '(none — site-less customers will be skipped)'}`);
 
-  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
+  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'vendors', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
   const allStats = {};
   for (const col of run) {
     switch (col) {
       case 'staff':        allStats.staff        = await etlStaff(mongoDB, maps);     break;
       case 'customers':    allStats.customers    = await etlCustomers(mongoDB, maps, defaultTenantId); break;
       case 'products':     allStats.products     = await etlProducts(mongoDB, defaultTenantId); break;
+      case 'vendors':      allStats.vendors      = await etlVendors(mongoDB, maps, defaultTenantId); break;
       case 'expenses':     allStats.expenses     = await etlExpenses(mongoDB, maps);  break;
       case 'payroll':      allStats.payroll      = await etlPayroll(mongoDB, maps);   break;
       case 'orders':       allStats.orders       = await etlOrders(mongoDB, maps);    break;

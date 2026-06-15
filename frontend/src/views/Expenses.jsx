@@ -10,7 +10,7 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
   const [saving, setSaving] = useState(false);
   const fetchVendors = useCallback(async (q) => {
     const rows = await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`));
-    return rows.map((r) => ({ label: r.label }));
+    return rows.map((r) => ({ label: r.vendor || r.label, sub: r.sub || '' }));
   }, [tenant]);
   const [f, setF] = useState({
     category: expense?.category || CATS[0],

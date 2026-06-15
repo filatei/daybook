@@ -494,6 +494,28 @@ async function migrate() {
       created_at   BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     )
   `);
+  // Expenses carry a vendor/payee (distinct from sales customers).
+  await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS vendor TEXT`);
+
+  // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool
+  // per tenant (no site), deduped on lower(name).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS vendors (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      name        TEXT NOT NULL,
+      phone       TEXT,
+      email       TEXT,
+      bank        TEXT,
+      account_no  TEXT,
+      category    TEXT,
+      ext_id      TEXT,
+      status      TEXT DEFAULT 'ACTIVE',
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vendors_name ON vendors(tenant_id, lower(name));
+    CREATE INDEX IF NOT EXISTS idx_vendors_td ON vendors(tenant_id);
+  `);
 
   // ETL PAYROLL — from fido `payrolls` collection
   await pool.query(`

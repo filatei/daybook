@@ -365,6 +365,22 @@ tr:hover td { background: #f8fafc; }
 .bottom-nav button.active { color: var(--brand-d); }
 .bottom-nav button.active .ic { transform: scale(1.12); }
 
+/* ── Sticky checkout bar (Sell) ────────────────────────────────────────────── */
+.checkout-bar {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: 16px; width: min(608px, calc(100% - 24px)); z-index: 60;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px 12px 18px; border-radius: 16px;
+  background: var(--brand-d, #0369a1); color: #fff;
+  box-shadow: 0 12px 32px rgba(15,23,42,.28);
+  animation: rise .2s ease backwards;
+}
+.checkout-bar .cb-btn {
+  border: none; background: #fff; color: var(--brand-d, #0369a1);
+  font-weight: 800; font-size: 15px; padding: 10px 18px; border-radius: 11px; cursor: pointer;
+}
+.checkout-bar .cb-btn:active { transform: scale(.97); }
+
 /* ── Responsive: desktop override ──────────────────────────────────────────── */
 @media (min-width: 768px) {
   .bottom-nav { display: none !important; }  /* never show on desktop/iPad landscape */
@@ -378,4 +394,6 @@ tr:hover td { background: #f8fafc; }
   .main-content { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
   /* FAB sits above bottom nav on mobile */
   .fab { bottom: calc(72px + var(--safe-b)); }
+  /* Checkout bar clears the bottom nav on mobile */
+  .checkout-bar { bottom: calc(84px + env(safe-area-inset-bottom, 0px)); }
 }

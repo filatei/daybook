@@ -95,10 +95,16 @@ router.post('/', requireAuth, async (req, res) => {
   const category = EXPENSE_CATS.includes((b.category || '').toUpperCase()) ? b.category.toUpperCase() : 'OTHER';
 
   const id = uuid();
+  const vendor = (b.vendor || '').toString().trim() || null;
+  // Auto-register a newly-typed vendor into the directory (idempotent).
+  if (vendor) {
+    await qrun(`INSERT INTO vendors (id,tenant_id,name) VALUES (?,?,?) ON CONFLICT (tenant_id, lower(name)) DO NOTHING`,
+      [uuid(), tid, vendor]).catch(() => {});
+  }
   await qrun(
-    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,amount,recorded_by)
-     VALUES (?,?,?,?,?,?,?,?)`,
-    [id, tid, site_id, expense_date, category, b.description || null, amount, req.user.id]);
+    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,vendor,amount,recorded_by)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+    [id, tid, site_id, expense_date, category, b.description || null, vendor, amount, req.user.id]);
 
   // Keep daily_report.expenses in sync (update if report exists for same day/site)
   if (site_id) {
@@ -122,10 +128,15 @@ router.patch('/:id', requireAuth, async (req, res) => {
   const newAmount = b.amount != null ? parseFloat(b.amount) || 0 : oldAmount;
   const diff = newAmount - oldAmount;
 
+  const vendor = b.vendor !== undefined ? ((b.vendor || '').toString().trim() || null) : a.expense.vendor;
+  if (vendor && vendor !== a.expense.vendor) {
+    await qrun(`INSERT INTO vendors (id,tenant_id,name) VALUES (?,?,?) ON CONFLICT (tenant_id, lower(name)) DO NOTHING`,
+      [uuid(), a.expense.tenant_id, vendor]).catch(() => {});
+  }
   await qrun(
-    `UPDATE expenses SET category=?,description=?,amount=?,expense_date=? WHERE id=?`,
+    `UPDATE expenses SET category=?,description=?,vendor=?,amount=?,expense_date=? WHERE id=?`,
     [(b.category || a.expense.category).toUpperCase(), b.description ?? a.expense.description,
-      newAmount, b.expense_date ?? a.expense.expense_date, a.expense.id]);
+      vendor, newAmount, b.expense_date ?? a.expense.expense_date, a.expense.id]);
 
   // Sync report if amount changed
   if (diff !== 0 && a.expense.site_id) {

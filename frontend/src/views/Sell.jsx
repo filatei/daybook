@@ -100,6 +100,8 @@ export default function Sell() {
   const [pending,   setPending]   = useState(outboxCount());
   const [online,    setOnline]    = useState(navigator.onLine);
   const clientUid = useRef(genUid());
+  const orderRef = useRef(null);
+  const goCheckout = () => orderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   // ── Live "today's sales" ticker ────────────────────────────────────────────
   // Seeds with today's sales already on record, then prepends each new sale as
@@ -385,7 +387,7 @@ export default function Sell() {
 
       {/* Order card */}
       {cart.length > 0 && (
-        <div className="card" style={{ marginTop: 0 }}>
+        <div className="card" style={{ marginTop: 0 }} ref={orderRef}>
           {/* Cart header */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
             <div style={{ fontWeight: 700 }}>Order</div>
@@ -456,6 +458,16 @@ export default function Sell() {
               {bt.status === 'ready' ? 'Charge & Print' : 'Charge'} {ngn(subtotal)}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Sticky checkout bar — appears once items are in the cart */}
+      {cartLines.length > 0 && (
+        <div className="checkout-bar" role="button" onClick={goCheckout}>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>
+            🛒 {cartLines.length} item{cartLines.length > 1 ? 's' : ''} · <span style={{ fontWeight: 900 }}>{ngn(subtotal)}</span>
+          </span>
+          <button className="cb-btn" onClick={(e) => { e.stopPropagation(); goCheckout(); }}>Checkout →</button>
         </div>
       )}
     </div>

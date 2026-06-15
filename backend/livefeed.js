@@ -55,7 +55,10 @@ async function persistSale(o, site) {
   return !!r.rowCount;
 }
 
-let lastSeen = new Date(Date.now() - 3 * 60 * 1000); // look back 3 min on first tick
+// Look back on the first tick so a restart never misses recent sales (idempotent
+// upsert de-dupes). Default 180 min; widen via LIVEFEED_LOOKBACK_MIN.
+const LOOKBACK_MIN = parseInt(process.env.LIVEFEED_LOOKBACK_MIN || '180', 10);
+let lastSeen = new Date(Date.now() - LOOKBACK_MIN * 60 * 1000);
 let timer = null;
 
 async function poll() {

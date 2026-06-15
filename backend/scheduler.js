@@ -125,9 +125,34 @@ async function syncDay(dateStr, { email = false } = {}) {
   return out;
 }
 
+// Run the Fido→Postgres ETL as a child process. A short --from window keeps the
+// date-filtered collections (orders, expenses) to a delta while the small
+// reference sets (staff, customers, vendors, products, generators) refresh fully.
+function runEtl(label = 'scheduled') {
+  const { spawn } = require('child_process');
+  const days = parseInt(process.env.ETL_BACKFILL_DAYS || '2', 10);
+  const from = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const args = [path.join(__dirname, 'etl.js'), '--collection', 'all', '--from', from];
+  console.log(`[etl] ${label} run starting: node etl.js --collection all --from ${from}`);
+  const p = spawn('node', args, { env: process.env, stdio: 'inherit' });
+  p.on('close', (code) => console.log(`[etl] ${label} run finished (exit ${code})`));
+  p.on('error', (e) => console.error('[etl] spawn failed:', e.message));
+}
+
 function start() {
   const cron = require('node-cron');
   const tz = process.env.SYNC_TZ || 'Africa/Lagos';
+
+  // Scheduled ETL (opt-in) — keeps ALL Fido data (not just live sales) current.
+  if (process.env.ETL_ENABLED === '1') {
+    const ecron = process.env.ETL_CRON || '0 1 * * *'; // 01:00 nightly
+    if (cron.validate(ecron)) {
+      cron.schedule(ecron, () => runEtl('cron'), { timezone: tz });
+      console.log(`[etl] scheduled '${ecron}' (${tz}), --from = today-${process.env.ETL_BACKFILL_DAYS || '2'}d`);
+    } else { console.error('[etl] invalid ETL_CRON:', ecron); }
+  } else {
+    console.log('[etl] scheduled ETL disabled (set ETL_ENABLED=1 to keep all entities current)');
+  }
 
   // Daily trial enforcement (always on — suspension is safe; expunge is opt-in).
   const tcron = process.env.TRIAL_CRON || '0 2 * * *';

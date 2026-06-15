@@ -280,6 +280,21 @@ router.get('/me/activity', requireAuth, async (req, res) => {
   });
 });
 
+// Company-wide activity trail (GM+): every user's audited actions.
+router.get('/activity/all', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+  const { user_id, action, before } = req.query;
+  const where = ['a.tenant_id=?'], args = [req.ctx.tenant_id];
+  if (user_id) { where.push('a.user_id=?'); args.push(user_id); }
+  if (action)  { where.push('a.action=?'); args.push(action); }
+  if (before)  { where.push('a.created_at < ?'); args.push(parseInt(before, 10) || 0); }
+  const rows = await qall(
+    `SELECT a.action, a.entity, a.entity_id, a.meta, a.created_at, a.user_id,
+            u.name actor_name, u.email actor_email
+       FROM audit_log a LEFT JOIN users u ON u.id=a.user_id
+      WHERE ${where.join(' AND ')} ORDER BY a.created_at DESC LIMIT 100`, args);
+  res.json(rows.map((a) => ({ ...a, meta: J(a.meta, {}) })));
+});
+
 const activeAdminCount = async (tenant_id) => {
   const r = await qone("SELECT COUNT(*) n FROM memberships WHERE tenant_id=? AND role='ADMIN' AND status='ACTIVE'", [tenant_id]);
   return parseInt(r.n, 10);

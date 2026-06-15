@@ -23,7 +23,8 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.14",
     "pg": "^8.13.0",
-    "uuid": "^11.0.0"
+    "uuid": "^11.0.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

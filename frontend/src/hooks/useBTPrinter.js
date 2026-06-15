@@ -167,17 +167,11 @@ export function useBTPrinter() {
     setError(null);
 
     try {
+      // List ALL nearby Bluetooth devices so any printer can be picked — name
+      // filters hid printers whose name didn't match a known prefix, making the
+      // chooser "Scan…" forever when the real printer was named something else.
       const device = await navigator.bluetooth.requestDevice({
-        filters: [
-          { namePrefix: 'Xprinter' },
-          { namePrefix: 'XP-' },
-          { namePrefix: 'Printer' },
-          { namePrefix: 'BT' },
-          { namePrefix: 'EPSON' },
-          { namePrefix: 'TM-' },
-          { namePrefix: 'RPP' },
-          { namePrefix: 'MTP' },
-        ],
+        acceptAllDevices: true,
         optionalServices: PROFILES.map((p) => p.service),
       });
 

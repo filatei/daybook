@@ -82,9 +82,15 @@ app.use((err, _req, res, _next) => {
     const api = require('./routes');
     app.use('/api', api);
 
-    app.listen(PORT, () => {
+    // HTTP server + WebSocket realtime gateway (live sales / gate / loading).
+    const http = require('http');
+    const server = http.createServer(app);
+    try { require('./realtime').attach(server); } catch (e) { console.error('[rt] gateway not attached:', e.message); }
+
+    server.listen(PORT, () => {
       console.log(`[Daybook] listening on :${PORT} (${process.env.NODE_ENV || 'development'})`);
       try { require('./scheduler').start(); } catch (e) { console.error('[sync] scheduler not started:', e.message); }
+      try { require('./livefeed').start(); } catch (e) { console.error('[livefeed] not started:', e.message); }
     });
   } catch (e) {
     console.error('[FATAL] startup failed:', e.message);

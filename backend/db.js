@@ -542,6 +542,21 @@ async function migrate() {
     )
   `);
 
+  // REALTIME EVENTS — durable, monotonically-ordered event log. The WebSocket
+  // gateway broadcasts each new event; a reconnecting client replays everything
+  // since its last_seq (the MT5 resume protocol). One global sequence via BIGSERIAL.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS events (
+      seq         BIGSERIAL PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      site_id     TEXT,
+      type        TEXT NOT NULL,
+      payload     JSONB,
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_events_tenant_seq ON events(tenant_id, seq)');
+
   // Unique indexes for ETL idempotency (separate statements for WHERE clause)
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_possales_extid

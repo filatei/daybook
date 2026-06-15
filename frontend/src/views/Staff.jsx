@@ -217,6 +217,61 @@ function AttendanceReport({ siteFilter }) {
   );
 }
 
+// ── Daily production entry (bags loaded / bagged) ─────────────────────────────
+function ProductionGrid({ siteFilter }) {
+  const { tenant, toast } = useStore();
+  const [date, setDate] = useState(today());
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { const p = new URLSearchParams({ date }); if (siteFilter) p.set('site', siteFilter); setRows(await api(scoped(`/payroll/production?${p}`))); }
+    catch { setRows([]); }
+    setLoading(false);
+  }, [tenant, date, siteFilter]);
+  useEffect(() => { load(); }, [load]);
+
+  const setVal = (i, k, v) => setRows((p) => p.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
+  const save = async (r) => {
+    try { await api(scoped('/payroll/production'), { method: 'POST', body: { staff_id: r.staff_id, work_date: date, bags_loaded: +r.bags_loaded || 0, bags_bagged: +r.bags_bagged || 0 } }); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+  const totL = rows.reduce((s, r) => s + (+r.bags_loaded || 0), 0);
+  const totB = rows.reduce((s, r) => s + (+r.bags_bagged || 0), 0);
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+        <input type="date" className="input" value={date} max={today()} onChange={(e) => setDate(e.target.value)} />
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Loaded {totL} · Bagged {totB}</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px', gap: 6, fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', padding: '0 2px 4px' }}>
+        <span>Staff</span><span style={{ textAlign: 'center' }}>Loaded</span><span style={{ textAlign: 'center' }}>Bagged</span>
+      </div>
+      {loading ? <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</> : rows.length === 0 ? (
+        <div className="empty"><div className="ic">📦</div><p>No staff</p></div>
+      ) : (
+        <div className="card" style={{ padding: 8 }}>
+          {rows.map((r, i) => (
+            <div key={r.staff_id} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px', gap: 6, alignItems: 'center', padding: '4px 0', borderBottom: '1px solid var(--line)' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.full_name}</div>
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.pay_type === 'PIECE' ? 'piece' : (r.role_title || 'staff')}</div>
+              </div>
+              <input className="input" type="number" inputMode="numeric" style={{ padding: '7px 6px', textAlign: 'center' }} value={r.bags_loaded}
+                onChange={(e) => setVal(i, 'bags_loaded', e.target.value)} onBlur={() => save(r)} onFocus={(e) => e.target.select()} />
+              <input className="input" type="number" inputMode="numeric" style={{ padding: '7px 6px', textAlign: 'center' }} value={r.bags_bagged}
+                onChange={(e) => setVal(i, 'bags_bagged', e.target.value)} onBlur={() => save(r)} onFocus={(e) => e.target.select()} />
+            </div>
+          ))}
+        </div>
+      )}
+      <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Counts save as you leave each field. These feed payroll for loaders &amp; baggers.</p>
+    </div>
+  );
+}
+
 // ── Staff list ─────────────────────────────────────────────────────────────────
 export default function Staff() {
   const { openModal, closeModal, tenant, sites } = useStore();
@@ -267,9 +322,10 @@ export default function Staff() {
 
   return (
     <div>
-      <div className="seg" style={{ marginBottom: 14 }}>
-        <button className={`seg-b${mode === 'clock' ? ' on' : ''}`} onClick={() => setMode('clock')}>🟢 Clock in/out</button>
+      <div className="seg" style={{ marginBottom: 14, overflowX: 'auto', flexWrap: 'nowrap' }}>
+        <button className={`seg-b${mode === 'clock' ? ' on' : ''}`} onClick={() => setMode('clock')}>🟢 Clock</button>
         <button className={`seg-b${mode === 'report' ? ' on' : ''}`} onClick={() => setMode('report')}>🕑 Attendance</button>
+        <button className={`seg-b${mode === 'production' ? ' on' : ''}`} onClick={() => setMode('production')}>📦 Production</button>
       </div>
 
       {sites.length > 1 && (
@@ -280,7 +336,7 @@ export default function Staff() {
         </select>
       )}
 
-      {mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : (
+      {mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} /> : (
       <>
       <div className="stat-grid" style={{ marginBottom: 14 }}>
         <div className="stat accent"><div className="k">Present Today</div><div className="v">{present}</div></div>

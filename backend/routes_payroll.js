@@ -310,4 +310,83 @@ router.get('/runs/:id/export.csv', requireAuth, async (req, res) => {
   res.send(rows.join('\n'));
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAYROLL v2 — pay config, daily production capture, period compute
+//   Piece workers (loaders/baggers): pay = bags_loaded×rate_loaded + bags_bagged×rate_bagged
+//   Regular staff: pay = days_present (from attendance) × daily_rate
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Pay configuration (rates) — Snr Accountant+ ────────────────────────────────
+router.get('/pay-config', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const where = ['tenant_id=?', "status='ACTIVE'"], args = [c.tenant_id];
+  if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
+  res.json(await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
+    FROM staff WHERE ${where.join(' AND ')} ORDER BY full_name`, args));
+});
+router.patch('/pay-config/:id', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const st = await qone('SELECT * FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== c.tenant_id) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const pt = ['DAILY', 'PIECE', 'HOURLY', 'MONTHLY'].includes((b.pay_type || '').toUpperCase()) ? b.pay_type.toUpperCase() : st.pay_type;
+  await qrun('UPDATE staff SET pay_type=?, daily_rate=?, rate_loaded=?, rate_bagged=? WHERE id=?',
+    [pt, +b.daily_rate || 0, +b.rate_loaded || 0, +b.rate_bagged || 0, st.id]);
+  res.json(await qone('SELECT id, full_name, pay_type, daily_rate, rate_loaded, rate_bagged FROM staff WHERE id=?', [st.id]));
+});
+
+// ── Daily production entry (bags loaded / bagged) — Supervisor (Site Manager+) ──
+router.get('/production', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const date = (req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const where = ['s.tenant_id=?', "s.status='ACTIVE'"], args = [date, c.tenant_id];
+  if (c.role === 'SITE_MANAGER') { where.push('s.site_id=?'); args.push(c.site_id); }
+  else if (req.query.site) { where.push('s.site_id=?'); args.push(req.query.site); }
+  res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.site_id,
+    COALESCE(p.bags_loaded,0) bags_loaded, COALESCE(p.bags_bagged,0) bags_bagged
+    FROM staff s LEFT JOIN production p ON p.staff_id=s.id AND p.work_date=?
+    WHERE ${where.join(' AND ')} ORDER BY s.full_name`, args));
+});
+router.post('/production', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const b = req.body || {};
+  const st = await qone('SELECT * FROM staff WHERE id=?', [b.staff_id]);
+  if (!st || st.tenant_id !== c.tenant_id) return res.status(400).json({ error: 'invalid staff' });
+  if (c.role === 'SITE_MANAGER' && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
+  const date = (b.work_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  await qrun(`INSERT INTO production (id,tenant_id,site_id,staff_id,work_date,bags_loaded,bags_bagged,recorded_by,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT (tenant_id,staff_id,work_date) DO UPDATE SET
+      bags_loaded=EXCLUDED.bags_loaded, bags_bagged=EXCLUDED.bags_bagged, recorded_by=EXCLUDED.recorded_by, updated_at=EXCLUDED.updated_at`,
+    [uuid(), c.tenant_id, st.site_id, st.id, date, +b.bags_loaded || 0, +b.bags_bagged || 0, req.user.id, nowS()]);
+  res.json({ ok: true });
+});
+
+// ── Compute a payroll for a period — Snr Accountant+ ───────────────────────────
+router.post('/compute2', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const b = req.body || {};
+  const from = b.from, to = b.to;
+  if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+  const sWhere = ['tenant_id=?', "status='ACTIVE'"], sArgs = [c.tenant_id];
+  if (b.site) { sWhere.push('site_id=?'); sArgs.push(b.site); }
+  const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
+    FROM staff WHERE ${sWhere.join(' AND ')} ORDER BY full_name`, sArgs);
+  const att = await qall(`SELECT staff_id, COUNT(DISTINCT work_date) d FROM attendance
+    WHERE tenant_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [c.tenant_id, from, to]);
+  const daysBy = {}; for (const a of att) daysBy[a.staff_id] = Number(a.d);
+  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g FROM production
+    WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [c.tenant_id, from, to]);
+  const prodBy = {}; for (const p of prod) prodBy[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  const lines = staff.map((s) => {
+    const days = daysBy[s.id] || 0;
+    const pb = prodBy[s.id] || { l: 0, g: 0 };
+    const piece = (s.pay_type || '').toUpperCase() === 'PIECE';
+    const gross = piece ? (pb.l * (s.rate_loaded || 0) + pb.g * (s.rate_bagged || 0)) : (days * (s.daily_rate || 0));
+    return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
+      days_present: days, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100 };
+  }).filter((l) => l.gross > 0 || l.days_present > 0 || l.bags_loaded > 0 || l.bags_bagged > 0);
+  res.json({ from, to, lines, total: Math.round(lines.reduce((a, l) => a + l.gross, 0) * 100) / 100 });
+});
+
 module.exports = router;

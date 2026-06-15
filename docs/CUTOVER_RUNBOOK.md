@@ -66,10 +66,13 @@ ETL_BACKFILL_DAYS=2
    wipe it. It stays a dormant, complete backup until Daybook has been used
    successfully for a sustained period. This is the rollback insurance.
 
-> **Scope note — payroll is excluded from this migration.** Payroll data has NOT been
-> moved yet, pending a review and a likely **new payroll system built in Daybook**
-> (attendance-driven). Do not treat payroll as migrated at cutover; it is a separate
-> workstream. Fido's payroll history remains in the offline Fido backup until then.
+> **Payroll.** Historical payroll **is migrated** via the ETL (`payrolls` → `payroll`,
+> shown under Payroll → History). Going forward, payroll is computed in Daybook from
+> **daily production capture** (bags loaded / bagged per worker, entered by supervisors
+> under Staff → Production) and **attendance** (days present), using per-staff rates set
+> under Payroll → Rates: piece workers = bags×rate (separate loaded/bagged rates),
+> regular staff = days present × daily rate. Runs support mid-month (1–15), 16–end, and
+> full-month periods.
 
 ---
 

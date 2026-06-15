@@ -505,6 +505,28 @@ async function migrate() {
     ALTER TABLE tenants    ADD COLUMN IF NOT EXISTS face_match_threshold DOUBLE PRECISION DEFAULT 0.55;
   `);
 
+  // Payroll v2 — pay config per staff (pay_type already exists: DAILY | PIECE | …).
+  // Piece workers earn per bag loaded and/or bagged; regular staff a daily rate.
+  await pool.query(`
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS daily_rate  DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS rate_loaded DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS rate_bagged DOUBLE PRECISION DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS production (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      site_id     TEXT REFERENCES sites(id),
+      staff_id    TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      work_date   TEXT NOT NULL,
+      bags_loaded DOUBLE PRECISION DEFAULT 0,
+      bags_bagged DOUBLE PRECISION DEFAULT 0,
+      recorded_by TEXT,
+      updated_at  BIGINT,
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      UNIQUE(tenant_id, staff_id, work_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_production_td ON production(tenant_id, work_date);
+  `);
+
   // ETL EXPENSES — from fido `expenses` collection
   await pool.query(`
     CREATE TABLE IF NOT EXISTS expenses (

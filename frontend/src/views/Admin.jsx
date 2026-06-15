@@ -57,7 +57,8 @@ function MemberForm({ sites = [], onInvite, onClose }) {
   return (
     <div>
       <div className="grip" />
-      <h3>Invite Member</h3>
+      <h3>Add Member</h3>
+      <p className="sub" style={{ marginTop: -4 }}>They auto-join this company with the role you pick the moment they sign in with this Google email. A member can belong to several companies.</p>
       <label className="fl">Email</label>
       <input type="email" className="input" value={email} onChange={(e) => setEmail(e.target.value)} />
       <label className="fl">Role</label>
@@ -86,7 +87,7 @@ function MemberForm({ sites = [], onInvite, onClose }) {
       )}
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" onClick={invite} disabled={saving}>{saving ? <span className="spin" /> : null} Invite</button>
+        <button className="btn" onClick={invite} disabled={saving}>{saving ? <span className="spin" /> : null} Add Member</button>
       </div>
     </div>
   );
@@ -180,6 +181,7 @@ export default function Admin() {
   const [tab, setTab] = useState('sites');
   const [sites,    setSites]    = useState([]);
   const [members,  setMembers]  = useState([]);
+  const [invites,  setInvites]  = useState([]);
   const [products, setProducts] = useState([]);
   const [loading,  setLoading]  = useState(true);
 
@@ -191,8 +193,14 @@ export default function Admin() {
     try {
       const data = await api(scoped('/members'));
       setMembers(data.members || []);
-    } catch { setMembers([]); }
+      setInvites(data.invites || []);
+    } catch { setMembers([]); setInvites([]); }
   }, [tenant]);
+
+  const revokeInvite = async (id) => {
+    try { await api(scoped(`/invites/${id}`), { method: 'DELETE' }); toast('Pending member removed', 'ok'); loadMembers(); }
+    catch (e) { toast(e.message, 'err'); }
+  };
 
   const loadProducts = useCallback(async () => {
     try { setProducts(await api(scoped('/products'))); } catch { setProducts([]); }
@@ -212,7 +220,7 @@ export default function Admin() {
 
   const inviteMember = async (email, inviteRole, site_id) => {
     const r = await api(scoped('/members'), { method: 'POST', body: { email, role: inviteRole, site_id } });
-    toast(r.added ? `${email} added ✓` : `Invite saved — ${email} gets access when they sign in with Google`, 'ok');
+    toast(r.added ? `${email} added ✓` : `${email} added — auto-joins when they sign in`, 'ok');
     await loadMembers();
   };
 
@@ -252,20 +260,41 @@ export default function Admin() {
         </>
       ) : tab === 'members' ? (
         <>
-          {members.length === 0 ? (
+          {members.length === 0 && invites.length === 0 ? (
             <div className="empty"><div className="ic">👥</div><p>No members yet</p></div>
           ) : (
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-              {members.map((m) => (
-                <div key={m.id || m.user_id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
-                  <div className="av">{(m.name || m.email || '?')[0].toUpperCase()}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 700 }}>{m.name || m.email}</div>
-                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>{m.email} · {m.role}</div>
-                  </div>
+            <>
+              {members.length > 0 && (
+                <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                  {members.map((m) => (
+                    <div key={m.id || m.user_id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
+                      <div className="av">{(m.name || m.email || '?')[0].toUpperCase()}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 700 }}>{m.name || m.email}</div>
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{m.email} · {ROLE_LABELS[m.role] || m.role}</div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+              {invites.length > 0 && (
+                <>
+                  <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.5px', margin: '18px 0 8px' }}>Pending — first sign-in</div>
+                  <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                    {invites.map((iv) => (
+                      <div key={iv.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
+                        <div className="av" style={{ background: '#fef3c7', color: '#92400e' }}>⏳</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iv.email}</div>
+                          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Joins as {ROLE_LABELS[iv.role] || iv.role} when they sign in</div>
+                        </div>
+                        {isAdmin && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => revokeInvite(iv.id)}>Remove</button>}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </>
           )}
           {isAdmin && (
             <button className="fab" onClick={() => openModal(<MemberForm sites={sites} onInvite={inviteMember} onClose={closeModal} />)}>+</button>

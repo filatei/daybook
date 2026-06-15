@@ -9,10 +9,11 @@
  * - Idempotent via client_uid
  */
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { api, scoped, ngn, today } from '../api.js';
+import { api, scoped, ngn, today, isNetErr } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import Typeahead from '../components/Typeahead.jsx';
+import { queueSale, syncOutbox, outboxCount } from '../offline.js';
 
 const PAY = ['CASH', 'TRANSFER', 'POS'];
 const PAY_LABELS = { CASH: '💵 Cash', TRANSFER: '🏦 Transfer', POS: '💳 POS' };
@@ -93,7 +94,22 @@ export default function Sell() {
   const [tendered,  setTendered]  = useState('');
   const [posting,   setPosting]   = useState(false);
   const [lastSale,  setLastSale]  = useState(null);
+  const [pending,   setPending]   = useState(outboxCount());
+  const [online,    setOnline]    = useState(navigator.onLine);
   const clientUid = useRef(genUid());
+
+  // Keep the offline queue badge in sync; flush on reconnect / mount.
+  useEffect(() => {
+    const refresh = () => setPending(outboxCount());
+    const goOnline = () => { setOnline(true); syncOutbox().then(refresh); };
+    const goOffline = () => setOnline(false);
+    window.addEventListener('pos-outbox', refresh);
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    syncOutbox().then(refresh);
+    return () => { window.removeEventListener('pos-outbox', refresh); window.removeEventListener('online', goOnline); window.removeEventListener('offline', goOffline); };
+  }, []);
+  const doSync = async () => { const n = await syncOutbox(); setPending(outboxCount()); if (n) toast(`Synced ${n} offline sale${n > 1 ? 's' : ''} ✓`, 'ok'); };
 
   // Customer typeahead: search existing customers, auto-create on charge
   const fetchCustomers = useCallback(async (q) => {
@@ -157,23 +173,21 @@ export default function Sell() {
   const charge = async (withPrint = false) => {
     if (!canCharge) return;
     setPosting(true);
+    const items = cartLines.map((c) => ({
+      product_id: c.product.id,
+      qty:        parseFloat(c.qty),
+      price:      c.product.price,
+    }));
+    const body = {
+      items,
+      payment_method: payMethod,
+      amount_paid: payMethod === 'CASH' ? tenderedAmt : subtotal,
+      sale_date: today(),
+      client_uid: clientUid.current,
+      customer_name: custName.trim() || null,
+    };
     try {
-      const items = cartLines.map((c) => ({
-        product_id: c.product.id,
-        qty:        parseFloat(c.qty),
-        price:      c.product.price,
-      }));
-      const sale = await api(scoped('/pos/sales'), {
-        method: 'POST',
-        body: {
-          items,
-          payment_method: payMethod,
-          amount_paid: payMethod === 'CASH' ? tenderedAmt : subtotal,
-          sale_date: today(),
-          client_uid: clientUid.current,
-          customer_name: custName.trim() || null,
-        },
-      });
+      const sale = await api(scoped('/pos/sales'), { method: 'POST', body });
 
       setLastSale(sale);
 
@@ -200,7 +214,34 @@ export default function Sell() {
       setCart([]); setCustName(''); setTendered('');
       clientUid.current = genUid();
     } catch (e) {
-      toast(e.message || 'Charge failed', 'err');
+      if (isNetErr(e)) {
+        // Offline: keep the sale in the local outbox (idempotent client_uid) and
+        // give the cashier an optimistic receipt so selling never blocks.
+        queueSale(tenant, body);
+        setPending(outboxCount());
+        const items_json = JSON.stringify(cartLines.map((c) => ({ product_id: c.product.id, name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })));
+        setLastSale({ pending: true, receipt_no: null, total: subtotal, items_json });
+        if (withPrint && bt.status === 'ready') {
+          const now = new Date();
+          try {
+            await bt.print({
+              company: activeTenant?.name || 'FIDO WATER', receipt_no: 'OFFLINE',
+              date_str: now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+              time_str: now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+              items: cartLines.map((c) => ({ name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })),
+              total: subtotal, payment_method: payMethod,
+              amount_paid: payMethod === 'CASH' ? tenderedAmt : subtotal,
+              change: payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0,
+              customer_name: custName.trim() || null,
+            });
+          } catch { /* printer optional */ }
+        }
+        toast('Offline — sale queued, will sync when back online ⚡', 'info');
+        setCart([]); setCustName(''); setTendered('');
+        clientUid.current = genUid();
+      } else {
+        toast(e.message || 'Charge failed', 'err');
+      }
     }
     setPosting(false);
   };
@@ -208,6 +249,16 @@ export default function Sell() {
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div>
+      {/* Offline / pending-sync pill */}
+      {(!online || pending > 0) && (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, background: online ? '#eff6ff' : '#fffbeb', border: `1px solid ${online ? '#bfdbfe' : '#fde68a'}`, borderRadius: 10, padding: '8px 12px', marginBottom: 12 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: online ? '#1e40af' : '#92400e' }}>
+            {online ? `↻ ${pending} sale${pending > 1 ? 's' : ''} waiting to sync` : `⚡ Offline${pending > 0 ? ` · ${pending} queued` : ''}`}
+          </span>
+          {online && pending > 0 && <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={doSync}>Sync now</button>}
+        </div>
+      )}
+
       {/* Top bar: title + BT status */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
         <div className="section-title" style={{ margin: 0 }}>New Sale</div>
@@ -219,9 +270,9 @@ export default function Sell() {
 
       {/* Last sale banner */}
       {lastSale && (
-        <div style={{ background: '#dcfce7', border: '1px solid #86efac', borderRadius: 12, padding: '10px 14px', marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontWeight: 700, color: '#166534', fontSize: 14 }}>
-            ✓ Receipt #{lastSale.receipt_no} — {ngn(lastSale.total)}
+        <div style={{ background: lastSale.pending ? '#fffbeb' : '#dcfce7', border: `1px solid ${lastSale.pending ? '#fde68a' : '#86efac'}`, borderRadius: 12, padding: '10px 14px', marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontWeight: 700, color: lastSale.pending ? '#92400e' : '#166534', fontSize: 14 }}>
+            {lastSale.pending ? `⚡ Saved offline — ${ngn(lastSale.total)} (syncs when online)` : `✓ Receipt #${lastSale.receipt_no} — ${ngn(lastSale.total)}`}
           </div>
           <button className="btn btn-ghost btn-sm" onClick={newSale}>New Sale</button>
         </div>

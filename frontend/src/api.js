@@ -26,6 +26,11 @@ export async function api(path, { method = 'GET', body, form } = {}) {
   }
   const res = await fetch('/api' + path, { method, headers, body: bodyData });
   const json = await res.json().catch(() => ({}));
+  // Session expired/invalid → tell the app to sign the user out cleanly instead
+  // of leaving every action failing with a generic error for the rest of the day.
+  if (res.status === 401 && !path.startsWith('/auth/')) {
+    try { window.dispatchEvent(new CustomEvent('daybook-session-expired')); } catch { /* ignore */ }
+  }
   if (!res.ok) throw Object.assign(new Error(json.error || res.statusText), { status: res.status, code: json.code });
   return json;
 }

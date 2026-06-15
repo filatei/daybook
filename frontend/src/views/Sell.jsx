@@ -18,6 +18,7 @@ import ReceiptPreview from '../components/ReceiptPreview.jsx';
 import { queueSale, syncOutbox, outboxCount } from '../offline.js';
 
 const saleTime = (at) => { try { return new Date(typeof at === 'number' ? at * 1000 : at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+const safeJson = (s, d = []) => { try { return JSON.parse(s || ''); } catch { return d; } };
 
 const PAY = ['CASH', 'TRANSFER', 'POS'];
 const PAY_LABELS = { CASH: '💵 Cash', TRANSFER: '🏦 Transfer', POS: '💳 POS' };
@@ -265,7 +266,7 @@ export default function Sell() {
         receipt_no:     sale.receipt_no,
         date_str:       now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
         time_str:       now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
-        items:          JSON.parse(sale.items_json || '[]'),
+        items:          safeJson(sale.items_json, []),
         total:          sale.total,
         payment_method: payMethod,
         amount_paid:    payMethod === 'CASH' ? tenderedAmt : sale.total,

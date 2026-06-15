@@ -28,6 +28,13 @@ function Inner() {
   // Gate-only roles (Gateman, Supervisor) are confined to the Gate screen.
   useEffect(() => { if (isGateRole(role) && tab !== 'gate') go('gate'); }, [role, tab, go]);
 
+  // Sign out cleanly when the session expires (api.js fires this on a 401).
+  useEffect(() => {
+    const onExpired = () => { localStorage.removeItem('daybook_token'); logout(); toast('Session expired — please sign in again', 'info'); };
+    window.addEventListener('daybook-session-expired', onExpired);
+    return () => window.removeEventListener('daybook-session-expired', onExpired);
+  }, [logout, toast]);
+
   // ── restore session from localStorage ───────────────────────────────────────
   useEffect(() => {
     const saved = localStorage.getItem('daybook_token');

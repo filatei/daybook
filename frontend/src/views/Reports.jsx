@@ -157,7 +157,8 @@ export default function Reports() {
   // pos_sales shape and the live-fido /pos/orders shape).
   const receiptOf = (o) => {
     const when = o.created_at ? new Date(o.created_at * 1000) : (o.at ? new Date(o.at) : new Date(`${o.sale_date}T00:00:00`));
-    const items = Array.isArray(o.items) ? o.items : JSON.parse(o.items_json || '[]');
+    let items = Array.isArray(o.items) ? o.items : [];
+    if (!Array.isArray(o.items) && o.items_json) { try { items = JSON.parse(o.items_json); } catch { items = []; } }
     const total = o.total ?? o.amount ?? 0;
     return {
       company: activeTenant?.name || 'FIDO WATER',

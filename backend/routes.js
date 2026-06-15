@@ -1079,6 +1079,32 @@ router.get('/pos/summary', requireAuth, async (req, res) => {
     payments: Object.entries(pay).map(([method, amount]) => ({ method, amount })), lines: Object.values(prod) });
 });
 
+// Date-range POS sales aggregate (the imported Fido history + live in-app sales
+// all live in pos_sales). Powers the Reports sales summary and the Dashboard.
+router.get('/pos/range', requireAuth, async (req, res) => {
+  const s = await scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
+  const { from, to, site } = req.query;
+  const where = ['tenant_id=?'], args = [s.ctx.tenant_id];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
+  if (from) { where.push('sale_date>=?'); args.push(from); }
+  if (to) { where.push('sale_date<=?'); args.push(to); }
+  const W = 'WHERE ' + where.join(' AND ');
+  const WP = 'WHERE ' + where.map((c) => 'p.' + c).join(' AND ');   // prefixed for the JOIN query
+  const totals = await qone(`SELECT COALESCE(SUM(total),0) sales, COUNT(*) orders,
+    COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0) cash,
+    COALESCE(SUM(CASE WHEN payment_method<>'CASH' THEN total ELSE 0 END),0) transfer FROM pos_sales ${W}`, args);
+  const bySite = await qall(`SELECT s.name site, s.code, COALESCE(SUM(p.total),0) sales, COUNT(*) orders
+    FROM pos_sales p JOIN sites s ON s.id=p.site_id ${WP} GROUP BY s.id, s.name, s.code ORDER BY sales DESC LIMIT 20`, args);
+  const byDay = await qall(`SELECT sale_date AS "day", COALESCE(SUM(total),0) sales FROM pos_sales ${W} GROUP BY sale_date ORDER BY sale_date DESC LIMIT 60`, args);
+  const byMethod = await qall(`SELECT payment_method method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method ORDER BY sales DESC`, args);
+  res.json({
+    totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer) },
+    bySite: bySite.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
+    byDay: byDay.reverse().map((r) => ({ ...r, sales: Number(r.sales) })),
+    byMethod: byMethod.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
+  });
+});
+
 // ── CHAT ──────────────────────────────────────────────────────────────────────
 router.get('/chat/channels', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });

@@ -195,7 +195,7 @@ export default function Staff() {
                 <div className="av">{s.full_name?.[0]?.toUpperCase() || '?'}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700 }}>{s.full_name}</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{s.position || 'Staff'} · {s.site_name || '—'}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}</div>
                 </div>
                 <div style={{ fontSize: 12, fontWeight: 700, color: st.color, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
                   <span style={{ fontSize: 18 }}>{st.icon}</span>

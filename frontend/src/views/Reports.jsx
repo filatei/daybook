@@ -119,6 +119,7 @@ export default function Reports() {
   const role = useRole();
   const isSM = role && !atLeast(role, 'GENERAL_MANAGER');
   const [reports, setReports] = useState([]);
+  const [pos, setPos] = useState(null);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ site: '', from: '', to: '' });
 
@@ -129,8 +130,11 @@ export default function Reports() {
       if (filters.site) params.set('site', filters.site);
       if (filters.from) params.set('from', filters.from);
       if (filters.to) params.set('to', filters.to);
-      const data = await api(scoped(`/reports?${params}`));
-      setReports(data);
+      const [data, posData] = await Promise.all([
+        api(scoped(`/reports?${params}`)),
+        api(scoped(`/pos/range?${params}`)).catch(() => null),  // imported + live POS sales
+      ]);
+      setReports(data); setPos(posData);
     } catch { setReports([]); }
     setLoading(false);
   }, [tenant, filters]);
@@ -165,10 +169,31 @@ export default function Reports() {
         )}
       </div>
 
+      {/* POS sales summary (imported Fido history + live in-app sales) */}
+      {pos && pos.totals.orders > 0 && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+            <strong>POS sales{filters.from || filters.to ? '' : ' · all time'}</strong>
+            <span style={{ fontWeight: 800 }}>{ngn(pos.totals.sales)}</span>
+          </div>
+          <div className="stat-grid" style={{ marginBottom: pos.bySite.length > 1 ? 8 : 0 }}>
+            <div className="stat"><div className="k">Orders</div><div className="v" style={{ fontSize: 18 }}>{pos.totals.orders.toLocaleString()}</div></div>
+            <div className="stat"><div className="k">Cash</div><div className="v" style={{ fontSize: 18 }}>{ngn(pos.totals.cash)}</div></div>
+            <div className="stat"><div className="k">Transfer/POS</div><div className="v" style={{ fontSize: 18 }}>{ngn(pos.totals.transfer)}</div></div>
+          </div>
+          {pos.bySite.length > 1 && pos.bySite.map((b) => (
+            <div key={b.code} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0' }}>
+              <span style={{ color: 'var(--muted)' }}>{b.site}</span>
+              <span style={{ fontWeight: 600 }}>{ngn(b.sales)} · {b.orders.toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {loading ? (
         <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : reports.length === 0 ? (
-        <div className="empty"><div className="ic">🧾</div><p>No reports found</p></div>
+        <div className="empty"><div className="ic">🧾</div><p>{pos && pos.totals.orders > 0 ? 'No daily reports yet — POS sales shown above' : 'No reports found'}</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {reports.map((r) => (

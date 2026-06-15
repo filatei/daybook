@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { api, scoped, ngn } from '../api.js';
+import { api, scoped, ngn, getToken, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 
 const when = (s) => new Date((s || 0) * 1000).toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -58,6 +58,22 @@ export default function Activity() {
   useEffect(() => { fetchTeam({}); }, [fetchTeam]);
   const loadMore = () => { if (team.length) fetchTeam({ before: team[team.length - 1].created_at, append: true }); };
 
+  const exportCsv = async () => {
+    const p = new URLSearchParams();
+    if (filters.user_id) p.set('user_id', filters.user_id);
+    if (filters.from) p.set('from', filters.from);
+    if (filters.to) p.set('to', filters.to);
+    if (tenant) p.set('tenant', tenant);
+    try {
+      const res = await fetch(`/api/activity/all.csv?${p}`, { headers: { Authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) throw new Error('export failed');
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url; a.download = `activity_${filters.from || 'all'}_${filters.to || today()}.csv`; a.click();
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  };
+
   const audits = data?.audits || [];
   const emails = data?.emails || [];
 
@@ -100,6 +116,7 @@ export default function Activity() {
             </select>
             <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filters.from} max={filters.to || undefined} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} />
             <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} />
+            <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={exportCsv} disabled={team.length === 0}>⬇ CSV</button>
           </div>
           {team.length === 0 ? (
             <div className="empty"><div className="ic">👥</div><p>No matching activity</p></div>

@@ -13,6 +13,7 @@
  *   --from        YYYY-MM-DD   (default: 2020-01-01)
  *   --to          YYYY-MM-DD   (default: today)
  *   --dry-run                  count + validate, no writes
+ *   --verify                   reconcile Mongo↔Postgres (counts + ₦ per site), no writes
  *   --batch       N            Mongo cursor batch size (default 500)
  *   --tenant-slug SLUG         target specific tenant (default: auto from site)
  *
@@ -35,6 +36,7 @@ const COLLECTION = arg('--collection', 'all');
 const FROM_DATE  = arg('--from', '2020-01-01');
 const TO_DATE    = arg('--to', new Date().toISOString().slice(0, 10));
 const DRY_RUN    = has('--dry-run');
+const VERIFY     = has('--verify');
 const BATCH_SIZE = parseInt(arg('--batch', '500'), 10);
 const TARGET_SLUG = arg('--tenant-slug', null);
 const TZ         = process.env.SALES_TZ_OFFSET || '+01:00';
@@ -347,13 +349,59 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
   return stats;
 }
 
+// ── Verify: reconcile Mongo (source) ↔ Postgres (imported rows) ─────────────────
+// Compares row counts per collection, and for orders the total ₦ per site, so you
+// get a clear pass/fail instead of eyeballing. Only counts IMPORTED rows in
+// Postgres (ext_id IS NOT NULL) so human-entered Daybook records don't skew it.
+async function verify(mongoDB, { nameMap, norm }) {
+  const from = new Date(`${FROM_DATE}T00:00:00.000${TZ}`);
+  const to   = new Date(`${TO_DATE}T23:59:59.999${TZ}`);
+  const SALE_STATUS = ['DELIVERED', 'PAID', 'LOADED', 'COMPLETED'];
+  const pgN = async (sql) => Number((await qone(sql)).count);
+  const fmt = (n) => '₦' + Math.round(n).toLocaleString('en-NG');
+  const line = (label, m, p) => {
+    const d = p - m; const ok = d === 0;
+    console.log(`  ${label.padEnd(12)} mongo ${String(m).padStart(8)} | pg ${String(p).padStart(8)} | Δ ${String(d).padStart(7)} ${ok ? '✓' : (d < 0 ? '(pg short — re-run / skips)' : '(pg extra)')}`);
+  };
+  console.log('\n=== VERIFY (counts: source vs imported) ===');
+  line('staff', await mongoDB.collection('peoples').countDocuments(),
+    await pgN('SELECT COUNT(*) FROM staff WHERE ext_people_id IS NOT NULL'));
+  line('customers', await mongoDB.collection('customers').countDocuments(),
+    await pgN('SELECT COUNT(*) FROM customers WHERE ext_id IS NOT NULL'));
+  line('expenses', await mongoDB.collection('expenses').countDocuments({ createdAt: { $gte: from, $lte: to } }),
+    await pgN('SELECT COUNT(*) FROM expenses WHERE ext_id IS NOT NULL'));
+  line('payroll', await mongoDB.collection('payrolls').countDocuments(),
+    await pgN('SELECT COUNT(*) FROM payroll WHERE ext_id IS NOT NULL'));
+  const mOrders = await mongoDB.collection('fidoorders').countDocuments({ createdAt: { $gte: from, $lte: to }, status: { $in: SALE_STATUS } });
+  line('orders', mOrders, await pgN('SELECT COUNT(*) FROM pos_sales WHERE ext_id IS NOT NULL'));
+
+  // Money reconciliation per site (orders)
+  console.log('\n=== VERIFY (orders ₦ per site) ===');
+  const mAgg = await mongoDB.collection('fidoorders').aggregate([
+    { $match: { createdAt: { $gte: from, $lte: to }, status: { $in: SALE_STATUS } } },
+    { $group: { _id: '$site', amt: { $sum: '$txn_amount' }, n: { $sum: 1 } } },
+  ]).toArray();
+  const pgAgg = await qall(`SELECT s.code, COALESCE(SUM(p.total),0) amt, COUNT(*) n
+    FROM pos_sales p JOIN sites s ON s.id=p.site_id WHERE p.ext_id IS NOT NULL GROUP BY s.code`);
+  const pgBy = {}; for (const r of pgAgg) pgBy[norm(r.code)] = { amt: Number(r.amt), n: Number(r.n) };
+  let mTot = 0, pTot = 0;
+  for (const m of mAgg.sort((a, b) => Number(b.amt) - Number(a.amt))) {
+    const key = norm(m._id); const pg = pgBy[key] || { amt: 0, n: 0 };
+    const ma = Number(m.amt), d = pg.amt - ma; mTot += ma; pTot += pg.amt;
+    console.log(`  ${String(m._id).padEnd(12)} mongo ${fmt(ma).padStart(16)} (${m.n}) | pg ${fmt(pg.amt).padStart(16)} (${pg.n}) | Δ ${fmt(d)} ${d === 0 ? '✓' : ''}`);
+  }
+  console.log(`  ${'TOTAL'.padEnd(12)} mongo ${fmt(mTot).padStart(16)}        | pg ${fmt(pTot).padStart(16)}        | Δ ${fmt(pTot - mTot)} ${pTot === mTot ? '✓ EXACT' : `(${((pTot / mTot) * 100).toFixed(2)}% imported)`}`);
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('[ETL] starting', { COLLECTION, FROM_DATE, TO_DATE, DRY_RUN, BATCH_SIZE });
+  console.log('[ETL] starting', { COLLECTION, FROM_DATE, TO_DATE, DRY_RUN, VERIFY, BATCH_SIZE });
   await initDb();
   const { db: mongoDB, close } = await getMongoDb();
   const maps = await buildSiteMaps(mongoDB);
   console.log(`[ETL] site map: ${Object.keys(maps.nameMap).length} name keys, ${Object.keys(maps.oidMap).length} OID keys`);
+
+  if (VERIFY) { await verify(mongoDB, maps); await close(); console.log('\n[ETL] verify complete'); return; }
 
   // Default tenant for site-less records (e.g. the global customer pool):
   // --tenant-slug if given, else the primary POS tenant 'fido'.

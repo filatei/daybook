@@ -23,4 +23,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."   # → the dir containing docker-compose.yml (/opt/daybook/backend)
 
-exec docker compose run --rm daybook node backend/etl.js "$@"
+# The image ENTRYPOINT is `node backend/server.js`; override it so we run the ETL
+# (otherwise the passed command is appended as ignored args and the SERVER starts).
+exec docker compose run --rm --entrypoint node daybook backend/etl.js "$@"

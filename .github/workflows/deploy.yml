@@ -60,7 +60,7 @@ jobs:
           username: ${{ secrets.LINODE_USER }}
           key: ${{ secrets.LINODE_SSH_KEY }}
           port: ${{ secrets.LINODE_SSH_PORT }}
-          source: "docker-compose.yml,infra/apache/daybook.torama.money.conf,infra/systemd/daybook.service,infra/systemd/daybook-mongo-tunnel.service,scripts/deploy.sh,scripts/server-setup.sh,scripts/remote-install.sh,scripts/bootstrap.sh"
+          source: "docker-compose.yml,infra/apache/daybook.torama.money.conf,infra/systemd/daybook.service,infra/systemd/daybook-mongo-tunnel.service,scripts/deploy.sh,scripts/server-setup.sh,scripts/remote-install.sh,scripts/bootstrap.sh,scripts/etl.sh"
           target: "/opt/daybook/backend"
 
       # The server's /opt/daybook/backend/.env is the single source of truth for
@@ -79,7 +79,7 @@ jobs:
             set -e
             cd /opt/daybook/backend
             [ -f .env ] || { echo "no .env on server — run scripts/bootstrap.sh once first"; exit 1; }
-            chmod +x scripts/deploy.sh scripts/server-setup.sh
+            chmod +x scripts/deploy.sh scripts/server-setup.sh scripts/etl.sh
             # GHCR login: needs a CLASSIC PAT with read:packages (or a public package).
             # Non-fatal — if it fails, deploy.sh falls back to the server's local image.
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u filatei --password-stdin \

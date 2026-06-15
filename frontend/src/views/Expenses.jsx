@@ -5,15 +5,17 @@ import Typeahead from '../components/Typeahead.jsx';
 
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
 
-function ExpenseForm({ expense, sites, onSave, onClose }) {
+function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
   const { toast, tenant } = useStore();
   const [saving, setSaving] = useState(false);
   const fetchVendors = useCallback(async (q) => {
     const rows = await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`));
     return rows.map((r) => ({ label: r.vendor || r.label, sub: r.sub || '' }));
   }, [tenant]);
+  let items = [];
+  try { items = expense?.items_json ? JSON.parse(expense.items_json) : []; } catch { items = []; }
   const [f, setF] = useState({
-    category: expense?.category || CATS[0],
+    category: expense?.category || categories[0] || 'OTHER',
     amount: expense?.amount ?? '',
     description: expense?.description || '',
     expense_date: expense?.expense_date || today(),
@@ -48,15 +50,26 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
         </div>
         <div>
           <label className="fl">Category</label>
-          <select className="input" value={f.category} onChange={(e) => set('category', e.target.value)}>
-            {CATS.map((c) => <option key={c}>{c}</option>)}
-          </select>
+          <input className="input" list="exp-cats" value={f.category} placeholder="Pick or type"
+            onChange={(e) => set('category', e.target.value)} />
+          <datalist id="exp-cats">{categories.map((c) => <option key={c} value={c} />)}</datalist>
         </div>
       </div>
       <label className="fl">Amount (₦)</label>
       <input type="number" className="input" value={f.amount} onChange={(e) => set('amount', e.target.value)} />
       <label className="fl">Description</label>
       <input type="text" className="input" value={f.description} onChange={(e) => set('description', e.target.value)} />
+      {items.length > 0 && (
+        <div style={{ marginTop: 10, background: 'var(--bg-soft, #f8fafc)', border: '1px solid var(--line)', borderRadius: 10, padding: '8px 12px' }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.5px', marginBottom: 4 }}>Line items</div>
+          {items.map((it, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+              <span>{it.name}{it.qty ? ` ×${it.qty}` : ''}{it.category ? ` · ${it.category}` : ''}</span>
+              <span style={{ fontWeight: 600 }}>{it.amount != null ? ngn(it.amount) : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <label className="fl">Vendor</label>
       <Typeahead
         value={f.vendor}
@@ -81,13 +94,19 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
   );
 }
 
-const CAT_ICONS = { Fuel: '⛽', Maintenance: '🔧', Utilities: '💡', Supplies: '📦', Salary: '👷', Transport: '🚛', Other: '💸' };
+const CAT_ICONS = { FUEL: '⛽', DIESEL: '⛽', MAINTENANCE: '🔧', UTILITIES: '💡', SUPPLIES: '📦', SALARY: '👷', TRANSPORT: '🚛', OTHER: '💸' };
+const catIcon = (c) => CAT_ICONS[(c || '').toUpperCase()] || '💸';
 
 export default function Expenses() {
   const { openModal, closeModal, tenant, sites } = useStore();
   const [expenses, setExpenses] = useState([]);
+  const [categories, setCategories] = useState(CATS.map((c) => c.toUpperCase()));
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState({ cat: '', from: '', to: '' });
+
+  useEffect(() => {
+    api(scoped('/expenses/categories')).then((c) => { if (Array.isArray(c) && c.length) setCategories(c); }).catch(() => {});
+  }, [tenant]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -104,7 +123,7 @@ export default function Expenses() {
   useEffect(() => { load(); }, [load]);
 
   const openForm = (exp = null) => {
-    openModal(<ExpenseForm expense={exp} sites={sites} onSave={load} onClose={closeModal} />);
+    openModal(<ExpenseForm expense={exp} sites={sites} categories={categories} onSave={load} onClose={closeModal} />);
   };
 
   const total = expenses.reduce((s, e) => s + (+e.amount || 0), 0);
@@ -116,7 +135,7 @@ export default function Expenses() {
         <select className="input" style={{ flex: '1 1 120px' }} value={filter.cat}
           onChange={(e) => setFilter((p) => ({ ...p, cat: e.target.value }))}>
           <option value="">All categories</option>
-          {CATS.map((c) => <option key={c}>{c}</option>)}
+          {categories.map((c) => <option key={c}>{c}</option>)}
         </select>
         <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filter.from}
           onChange={(e) => setFilter((p) => ({ ...p, from: e.target.value }))} />
@@ -140,7 +159,7 @@ export default function Expenses() {
           {expenses.map((e) => (
             <button key={e.id} onClick={() => openForm(e)}
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
-              <div className="av" style={{ fontSize: 22 }}>{CAT_ICONS[e.category] || '💸'}</div>
+              <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700 }}>{e.description || e.category}</div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>

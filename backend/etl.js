@@ -256,14 +256,29 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
     if (!expDate) { stats.skipped++; continue; }
     const amount = num(e.txn_amount);
     const vendorName = e.vendor ? (vendorByExt[String(e.vendor)] || null) : null;
+    // Fido expense line items (products[]): name, qty, price, amount, category, unit.
+    const rawItems = Array.isArray(e.products) ? e.products : [];
+    const items = rawItems.map((p) => ({
+      name: clean(p.name) || 'Item',
+      category: clean(p.category) || null,
+      qty: num(p.qty) || null,
+      unit: clean(p.unit) || null,
+      price: num(p.price) || (num(p.amount) && num(p.qty) ? num(p.amount) / num(p.qty) : null),
+      amount: num(p.amount) || null,
+    }));
+    // Category: explicit expense category, else the first line item's category.
+    const category = clean((e.category || (items[0] && items[0].category) || 'OTHER').toUpperCase().slice(0, 40)) || 'OTHER';
     try {
       const r = await qrun(
-        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,amount,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET vendor=COALESCE(EXCLUDED.vendor, expenses.vendor)`,
-        [uuid(), site.tenant_id, site.id, ext_id, expDate,
-          clean((e.category || 'OTHER').toUpperCase().slice(0, 40)) || 'OTHER',
-          clean(e.description || e.remarks || e.note || (Array.isArray(e.products) && e.products[0] && e.products[0].name)), vendorName, amount,
+        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,items_json,amount,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
+           vendor=COALESCE(EXCLUDED.vendor, expenses.vendor),
+           items_json=COALESCE(EXCLUDED.items_json, expenses.items_json),
+           category=EXCLUDED.category`,
+        [uuid(), site.tenant_id, site.id, ext_id, expDate, category,
+          clean(e.description || e.remarks || e.note || (items[0] && items[0].name)), vendorName,
+          items.length ? JSON.stringify(items) : null, amount,
           Math.floor((e.createdAt instanceof Date ? e.createdAt : new Date()).getTime() / 1000)]);
       if (r.rowCount) stats.inserted++;
     } catch (e2) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] expenses error:', e2.message.slice(0, 140)); }

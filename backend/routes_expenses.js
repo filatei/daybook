@@ -77,8 +77,15 @@ router.get('/summary', requireAuth, async (req, res) => {
   res.json({ totals: { ...totals, count: parseInt(totals.count, 10) }, byCategory, bySite, byDay: byDay.reverse() });
 });
 
-// ── GET /expenses/categories ───────────────────────────────────────────────────
-router.get('/categories', requireAuth, (_req, res) => res.json(EXPENSE_CATS));
+// ── GET /expenses/categories — categories actually used (incl. migrated Fido) + defaults
+router.get('/categories', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req);
+  if (!tid) return res.json(EXPENSE_CATS);
+  const rows = await qall(
+    "SELECT DISTINCT category FROM expenses WHERE tenant_id=? AND category IS NOT NULL AND category<>'' ORDER BY category", [tid]);
+  const merged = Array.from(new Set([...rows.map((r) => r.category), ...EXPENSE_CATS]));
+  res.json(merged);
+});
 
 // ── POST /expenses ─────────────────────────────────────────────────────────────
 router.post('/', requireAuth, async (req, res) => {
@@ -92,7 +99,8 @@ router.post('/', requireAuth, async (req, res) => {
   const expense_date = b.expense_date || new Date().toISOString().slice(0, 10);
   const amount = parseFloat(b.amount) || 0;
   if (!amount) return res.status(400).json({ error: 'amount required' });
-  const category = EXPENSE_CATS.includes((b.category || '').toUpperCase()) ? b.category.toUpperCase() : 'OTHER';
+  // Accept any category (so migrated Fido categories work), normalised to UPPER.
+  const category = ((b.category || '').toString().trim().toUpperCase().slice(0, 40)) || 'OTHER';
 
   const id = uuid();
   const vendor = (b.vendor || '').toString().trim() || null;

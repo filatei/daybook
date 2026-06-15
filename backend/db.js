@@ -520,8 +520,9 @@ async function migrate() {
       created_at   BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     )
   `);
-  // Expenses carry a vendor/payee (distinct from sales customers).
+  // Expenses carry a vendor/payee (distinct from sales customers) + line items.
   await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS vendor TEXT`);
+  await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS items_json TEXT`);
 
   // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool
   // per tenant (no site), deduped on lower(name).

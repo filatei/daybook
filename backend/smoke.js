@@ -39,7 +39,7 @@ const check = (n, c, x) => { if (c) { pass++; console.log('  ✅ ' + n); } else 
   check('superadmin role is ADMIN in tenant', fido.role === 'ADMIN');
 
   const sites = await api('GET', `/api/sites?tenant=${fido.id}`, { token: su });
-  check('fido has 6 sites', sites.json.length === 6, sites.json);
+  check('fido has 7 sites', sites.json.length === 7, sites.json);
   const kpansia = sites.json.find((s) => s.code === 'KPANSIA');
 
   const rep = await api('POST', '/api/reports', { token: su, body: {

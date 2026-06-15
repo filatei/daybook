@@ -1,9 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn } from '../api.js';
-import { useStore, useRole, atLeast } from '../store.jsx';
-import Staff from './Staff.jsx';
-import Documents from './Documents.jsx';
-import Reconcile from './Reconcile.jsx';
+import { useStore, useRole, atLeast, ROLE_LABELS } from '../store.jsx';
 
 function SiteForm({ site, onSave, onClose }) {
   const { toast } = useStore();
@@ -61,10 +58,18 @@ function MemberForm({ members, onInvite, onClose }) {
       <input type="email" className="input" value={email} onChange={(e) => setEmail(e.target.value)} />
       <label className="fl">Role</label>
       <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-        <option value="GATE">Gate &amp; Loading (scan, load &amp; release)</option>
-        <option value="SITE_MANAGER">Site Manager</option>
-        <option value="GENERAL_MANAGER">General Manager</option>
-        <option value="ADMIN">Admin</option>
+        <optgroup label="Gate / Loading (gate screen only)">
+          <option value="GATEMAN">{ROLE_LABELS.GATEMAN} — scan &amp; release (exit)</option>
+          <option value="SUPERVISOR">{ROLE_LABELS.SUPERVISOR} — scan &amp; mark loaded</option>
+        </optgroup>
+        <optgroup label="Office (privilege ladder)">
+          <option value="SECRETARY">{ROLE_LABELS.SECRETARY} — sales, expenses, docs</option>
+          <option value="ACCOUNTANT">{ROLE_LABELS.ACCOUNTANT} — + reconcile</option>
+          <option value="SNR_ACCOUNTANT">{ROLE_LABELS.SNR_ACCOUNTANT} — + payroll</option>
+          <option value="SITE_MANAGER">{ROLE_LABELS.SITE_MANAGER} — site operations</option>
+          <option value="GENERAL_MANAGER">{ROLE_LABELS.GENERAL_MANAGER} — all sites</option>
+          <option value="ADMIN">{ROLE_LABELS.ADMIN} — full access</option>
+        </optgroup>
       </select>
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
@@ -203,16 +208,13 @@ export default function Admin() {
 
   return (
     <div>
-      <div className="seg" style={{ marginBottom: 16, overflowX: 'auto', flexWrap: 'nowrap' }}>
+      <div className="seg" style={{ marginBottom: 16 }}>
         <button className={`seg-b${tab === 'sites'    ? ' on' : ''}`} onClick={() => setTab('sites')}>🏗️ Sites</button>
         <button className={`seg-b${tab === 'members'  ? ' on' : ''}`} onClick={() => setTab('members')}>👥 Members</button>
         <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>
-        <button className={`seg-b${tab === 'staff'     ? ' on' : ''}`} onClick={() => setTab('staff')}>👷 Staff</button>
-        <button className={`seg-b${tab === 'documents' ? ' on' : ''}`} onClick={() => setTab('documents')}>📁 Docs</button>
-        <button className={`seg-b${tab === 'reconcile' ? ' on' : ''}`} onClick={() => setTab('reconcile')}>🏦 Reconcile</button>
       </div>
 
-      {tab === 'staff' ? <Staff /> : tab === 'documents' ? <Documents /> : tab === 'reconcile' ? <Reconcile /> : loading ? (
+      {loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

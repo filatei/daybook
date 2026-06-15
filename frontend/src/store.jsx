@@ -72,9 +72,24 @@ export function StoreProvider({ children }) {
 
 export const useStore = () => useContext(Ctx);
 
-// Role helpers
-export const ROLES = ['SITE_MANAGER', 'GENERAL_MANAGER', 'ADMIN', 'SUPERADMIN'];
+// Role helpers — privilege ladder (low → high)
+export const ROLES = [
+  'GATEMAN', 'GATE', 'SUPERVISOR',
+  'SECRETARY', 'ACCOUNTANT', 'SNR_ACCOUNTANT',
+  'SITE_MANAGER', 'GENERAL_MANAGER', 'ADMIN', 'SUPERADMIN',
+];
 export const atLeast = (role, min) => ROLES.indexOf(role) >= ROLES.indexOf(min);
+// Gate-only roles are locked to the Gate & Loading screen.
+export const GATE_ROLES = ['GATEMAN', 'SUPERVISOR', 'GATE'];
+export const isGateRole = (role) => GATE_ROLES.includes(role);
+// Loading/exit capabilities: Supervisor loads, Gateman exits, Managers+ do both.
+export const canLoad = (role) => role === 'SUPERVISOR' || atLeast(role, 'SITE_MANAGER');
+export const canExit = (role) => role === 'GATEMAN' || role === 'GATE' || atLeast(role, 'SITE_MANAGER');
+export const ROLE_LABELS = {
+  GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
+  SECRETARY: 'Secretary', ACCOUNTANT: 'Accountant', SNR_ACCOUNTANT: 'Snr Accountant',
+  SITE_MANAGER: 'Manager', GENERAL_MANAGER: 'General Manager', ADMIN: 'Admin',
+};
 
 export function useRole() {
   const { user, tenant, tenants } = useStore();

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useStore, useRole, useActiveTenant, atLeast } from '../store.jsx';
+import { useStore, useRole, useActiveTenant, atLeast, isGateRole } from '../store.jsx';
 
 function useInstallPrompt() {
   const [canInstall, setCanInstall] = useState(() => !!window.__pwaInstallPrompt);
@@ -65,7 +65,7 @@ export default function Nav() {
 
   const isGMup       = role && atLeast(role, 'GENERAL_MANAGER');
   const isSuperAdmin = user?.is_superadmin && !tenant;
-  const isGate       = role === 'GATE';
+  const isGate       = isGateRole(role);
   const showSell = !!active;
 
   const brand = active?.brand_color || '#0ea5e9';

@@ -9,13 +9,18 @@ export default function More() {
   const { go } = useStore();
   const role = useRole();
   const active = useActiveTenant();
-  const isGM = role && atLeast(role, 'GENERAL_MANAGER');
-  const isMgr = role && atLeast(role, 'SITE_MANAGER');
+  const isMgr = role && atLeast(role, 'SITE_MANAGER');          // Manager+
+  const isAcct = role && atLeast(role, 'ACCOUNTANT');           // Accountant+
+  const isSnrAcct = role && atLeast(role, 'SNR_ACCOUNTANT');    // Snr Accountant+
+  const isSec = role && atLeast(role, 'SECRETARY');             // Secretary+
 
   const items = [
-    { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: !!active },
-    { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',     show: isGM },
-    { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',     show: isMgr },
+    { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: isMgr && !!active },
+    { id: 'documents',  icon: '📁', label: 'Documents',  desc: 'Incident reports & daily logs',           show: isSec },
+    { id: 'reconcile',  icon: '🏦', label: 'Reconcile',  desc: 'Transfers, POS & cash deposits',          show: isAcct },
+    { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isSnrAcct },
+    { id: 'staff',      icon: '👷', label: 'Staff',      desc: 'Clock-in & attendance',                   show: isMgr },
+    { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',       show: isMgr },
   ].filter((i) => i.show);
 
   return (

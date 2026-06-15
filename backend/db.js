@@ -148,7 +148,7 @@ async function migrate() {
       id          TEXT PRIMARY KEY,
       user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE')) NOT NULL,
+      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','SNR_ACCOUNTANT','ACCOUNTANT','SECRETARY','SUPERVISOR','GATEMAN','GATE')) NOT NULL,
       site_id     TEXT REFERENCES sites(id),
       status      TEXT CHECK(status IN ('ACTIVE','DISABLED')) DEFAULT 'ACTIVE',
       created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
@@ -213,7 +213,7 @@ async function migrate() {
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
       email       TEXT NOT NULL,
-      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE')) NOT NULL,
+      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','SNR_ACCOUNTANT','ACCOUNTANT','SECRETARY','SUPERVISOR','GATEMAN','GATE')) NOT NULL,
       site_id     TEXT REFERENCES sites(id),
       invited_by  TEXT REFERENCES users(id),
       created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
@@ -479,12 +479,14 @@ async function migrate() {
     ALTER TABLE sites      ADD COLUMN IF NOT EXISTS ext_mongo_id TEXT;
   `);
 
-  // Allow the limited GATE/Security role (widen the role CHECK on existing tables)
+  // Widen the role CHECK to the full ladder: Gateman/Supervisor (gate-only),
+  // Secretary, Accountant, Snr Accountant, (Site) Manager, General Manager, Admin.
+  const ROLE_LIST = "'ADMIN','GENERAL_MANAGER','SITE_MANAGER','SNR_ACCOUNTANT','ACCOUNTANT','SECRETARY','SUPERVISOR','GATEMAN','GATE'";
   await pool.query(`
     ALTER TABLE memberships DROP CONSTRAINT IF EXISTS memberships_role_check;
-    ALTER TABLE memberships ADD  CONSTRAINT memberships_role_check CHECK (role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE'));
+    ALTER TABLE memberships ADD  CONSTRAINT memberships_role_check CHECK (role IN (${ROLE_LIST}));
     ALTER TABLE invites     DROP CONSTRAINT IF EXISTS invites_role_check;
-    ALTER TABLE invites     ADD  CONSTRAINT invites_role_check CHECK (role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE'));
+    ALTER TABLE invites     ADD  CONSTRAINT invites_role_check CHECK (role IN (${ROLE_LIST}));
   `);
 
   // ext_id columns + idempotency indexes for generator ETL

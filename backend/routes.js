@@ -981,7 +981,7 @@ router.post('/customers', requireAuth, needTenant('SITE_MANAGER'), async (req, r
   }
 });
 
-router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/pos/sales', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {};
   if (b.client_uid) {
     const dup = await qone('SELECT * FROM pos_sales WHERE tenant_id=? AND client_uid=?', [req.ctx.tenant_id, b.client_uid]);
@@ -1095,7 +1095,9 @@ router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
   const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
-  if (!c) return res.status(403).json({ error: 'forbidden' });   // any member incl. GATE/security
+  // Gateman / Security release goods; Managers+ may also.  Supervisors only load.
+  const canExit = c && (c.role === 'GATEMAN' || c.role === 'GATE' || atLeast(c.role, 'SITE_MANAGER'));
+  if (!canExit) return res.status(403).json({ error: 'Not permitted to release/exit' });
   if (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   if (sale.exited_at) return res.status(400).json({ error: 'Already exited', exited_at: sale.exited_at });
   const ts = nowS();
@@ -1110,7 +1112,9 @@ router.post('/pos/sales/:id/loaded', requireAuth, async (req, res) => {
   const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
-  if (!c) return res.status(403).json({ error: 'forbidden' });   // any member incl. GATE/security
+  // Supervisors mark goods loaded; Managers+ may also.  Gatemen only release.
+  const canLoad = c && (c.role === 'SUPERVISOR' || atLeast(c.role, 'SITE_MANAGER'));
+  if (!canLoad) return res.status(403).json({ error: 'Not permitted to mark loaded' });
   if (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   if (sale.loaded_at) return res.status(400).json({ error: 'Already marked as loaded', loaded_at: sale.loaded_at });
   const ts = nowS();

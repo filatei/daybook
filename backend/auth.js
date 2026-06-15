@@ -111,9 +111,14 @@ function requestedTenant(req) {
   return req.query.tenant || req.headers['x-tenant'] || null;
 }
 
-// GATE = limited security/gate role (lowest privilege); can only scan receipts
-// and mark goods loaded/exited.
-const ROLE_RANK = { GATE: 0, SITE_MANAGER: 1, GENERAL_MANAGER: 2, ADMIN: 3 };
+// Privilege ladder (low → high).  GATEMAN/SUPERVISOR/GATE are gate-only and the
+// lowest privilege.  Office writers start at SECRETARY (can use Sales/Expenses);
+// (Site) MANAGER adds operational ownership; GM is cross-site; ADMIN manages users.
+const ROLE_RANK = {
+  GATEMAN: 1, GATE: 1, SUPERVISOR: 2,
+  SECRETARY: 3, ACCOUNTANT: 4, SNR_ACCOUNTANT: 5,
+  SITE_MANAGER: 6, GENERAL_MANAGER: 7, ADMIN: 8,
+};
 const atLeast = (role, min) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[min] || 0);
 
 module.exports = {

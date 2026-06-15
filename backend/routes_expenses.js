@@ -85,7 +85,7 @@ router.post('/', requireAuth, async (req, res) => {
   const tid = requestedTenant(req) || req.body?.tenant_id;
   if (!tid) return res.status(400).json({ error: 'select a workspace' });
   const c = await contextFor(req.user, tid);
-  if (!c || !atLeast(c.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'forbidden' });
+  if (!c || !atLeast(c.role, 'SECRETARY')) return res.status(403).json({ error: 'forbidden' });
 
   const b = req.body || {};
   const site_id = c.role === 'SITE_MANAGER' ? c.site_id : (b.site_id || null);

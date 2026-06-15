@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { StoreProvider, useStore, useRole } from './store.jsx';
+import { StoreProvider, useStore, useRole, isGateRole } from './store.jsx';
 import { api, scoped, setToken } from './api.js';
 import Nav from './components/Nav.jsx';
 import Modal from './components/Modal.jsx';
@@ -24,8 +24,8 @@ function Inner() {
   const role = useRole();
   const [booting, setBooting] = useState(true);
 
-  // Gate/security users are confined to the Gate screen.
-  useEffect(() => { if (role === 'GATE' && tab !== 'gate') go('gate'); }, [role, tab, go]);
+  // Gate-only roles (Gateman, Supervisor) are confined to the Gate screen.
+  useEffect(() => { if (isGateRole(role) && tab !== 'gate') go('gate'); }, [role, tab, go]);
 
   // ── restore session from localStorage ───────────────────────────────────────
   useEffect(() => {

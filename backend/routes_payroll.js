@@ -19,7 +19,7 @@ const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
 
 // ── helper ────────────────────────────────────────────────────────────────────
-async function needCtx(req, res, minRole = 'GENERAL_MANAGER') {
+async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
   const tid = requestedTenant(req) || req.body?.tenant_id;
   if (!tid) { res.status(400).json({ error: 'select a workspace' }); return null; }
   const c = await contextFor(req.user, tid);

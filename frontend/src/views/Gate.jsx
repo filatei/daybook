@@ -15,7 +15,7 @@ import { useRealtime } from '../hooks/useRealtime.js';
 import BarcodeScanner from '../components/BarcodeScanner.jsx';
 
 const evClock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-import { useStore } from '../store.jsx';
+import { useStore, useRole, canLoad as roleCanLoad, canExit as roleCanExit } from '../store.jsx';
 
 function fmtTime(ts) {
   if (!ts) return '';
@@ -40,6 +40,9 @@ function saleStatus(sale) {
 
 export default function Gate() {
   const { tenant, toast } = useStore();
+  const role = useRole();
+  const mayLoad = roleCanLoad(role);
+  const mayExit = roleCanExit(role);
   const [query,   setQuery]   = useState('');
   const [sale,    setSale]    = useState(null);
   const [loading, setLoading] = useState(false);
@@ -220,21 +223,29 @@ export default function Gate() {
             )}
           </div>
 
-          {/* Action buttons — one operator can mark loaded and/or released */}
+          {/* Action buttons — Supervisor loads, Gateman releases, Managers+ do both */}
           {status === 'PENDING' && (
             <div style={{ display: 'grid', gap: 8 }}>
-              <button className="btn" onClick={markLoaded} disabled={acting} style={{ background: '#1d4ed8' }}>
-                {acting ? <span className="spin" /> : '📦'} Mark as Loaded
-              </button>
-              <button className="btn btn-ghost" onClick={markExited} disabled={acting}>
-                {acting ? <span className="spin" /> : '🚪'} Allow / Mark as Exited
-              </button>
+              {mayLoad && (
+                <button className="btn" onClick={markLoaded} disabled={acting} style={{ background: '#1d4ed8' }}>
+                  {acting ? <span className="spin" /> : '📦'} Mark as Loaded
+                </button>
+              )}
+              {mayExit && (
+                <button className={mayLoad ? 'btn btn-ghost' : 'btn'} onClick={markExited} disabled={acting}>
+                  {acting ? <span className="spin" /> : '🚪'} Allow / Mark as Exited
+                </button>
+              )}
+              {!mayLoad && !mayExit && <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center' }}>View only — no gate action for your role</div>}
             </div>
           )}
-          {status === 'LOADED' && (
+          {status === 'LOADED' && mayExit && (
             <button className="btn" onClick={markExited} disabled={acting}>
               {acting ? <span className="spin" /> : '🚪'} Allow / Mark as Exited
             </button>
+          )}
+          {status === 'LOADED' && !mayExit && (
+            <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center' }}>Loaded — awaiting gate release</div>
           )}
           {status === 'EXITED' && (
             <button className="btn btn-ghost" onClick={reset} style={{ marginTop: 4 }}>

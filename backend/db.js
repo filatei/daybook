@@ -148,7 +148,7 @@ async function migrate() {
       id          TEXT PRIMARY KEY,
       user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER')) NOT NULL,
+      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE')) NOT NULL,
       site_id     TEXT REFERENCES sites(id),
       status      TEXT CHECK(status IN ('ACTIVE','DISABLED')) DEFAULT 'ACTIVE',
       created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
@@ -213,7 +213,7 @@ async function migrate() {
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
       email       TEXT NOT NULL,
-      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER')) NOT NULL,
+      role        TEXT CHECK(role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE')) NOT NULL,
       site_id     TEXT REFERENCES sites(id),
       invited_by  TEXT REFERENCES users(id),
       created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
@@ -477,6 +477,22 @@ async function migrate() {
     ALTER TABLE pos_sales  ADD COLUMN IF NOT EXISTS ext_id TEXT;
     ALTER TABLE customers  ADD COLUMN IF NOT EXISTS ext_id TEXT;
     ALTER TABLE sites      ADD COLUMN IF NOT EXISTS ext_mongo_id TEXT;
+  `);
+
+  // Allow the limited GATE/Security role (widen the role CHECK on existing tables)
+  await pool.query(`
+    ALTER TABLE memberships DROP CONSTRAINT IF EXISTS memberships_role_check;
+    ALTER TABLE memberships ADD  CONSTRAINT memberships_role_check CHECK (role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE'));
+    ALTER TABLE invites     DROP CONSTRAINT IF EXISTS invites_role_check;
+    ALTER TABLE invites     ADD  CONSTRAINT invites_role_check CHECK (role IN ('ADMIN','GENERAL_MANAGER','SITE_MANAGER','GATE'));
+  `);
+
+  // ext_id columns + idempotency indexes for generator ETL
+  await pool.query(`
+    ALTER TABLE generators     ADD COLUMN IF NOT EXISTS ext_id TEXT;
+    ALTER TABLE generator_logs ADD COLUMN IF NOT EXISTS ext_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_generators_extid ON generators(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_genlogs_extid    ON generator_logs(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
   `);
 
   // ETL EXPENSES — from fido `expenses` collection

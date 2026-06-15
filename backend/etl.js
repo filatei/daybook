@@ -9,7 +9,7 @@
  *   node backend/etl.js [options]
  *
  * Options:
- *   --collection  orders|expenses|staff|customers|products|vendors|payroll|all  (default: all)
+ *   --collection  orders|expenses|staff|customers|products|vendors|generators|payroll|all  (default: all)
  *   --from        YYYY-MM-DD   (default: 2020-01-01)
  *   --to          YYYY-MM-DD   (default: today)
  *   --dry-run                  count + validate, no writes
@@ -510,6 +510,55 @@ async function etlProducts(mongoDB, defaultTenantId) {
   return { fido, fiafia };
 }
 
+// ── gens → generators ; gendiesels/genmaints → generator_logs ────────────────────
+async function etlGenerators(mongoDB, { oidMap, nameMap, norm }) {
+  const stats = { gens: 0, logs: 0, skipped: 0, errors: 0 };
+  if (DRY_RUN) {
+    stats.gens = await mongoDB.collection('gens').countDocuments();
+    done('generators (dry-run)', stats); return stats;
+  }
+  // 1) Generators
+  for await (const g of mongoDB.collection('gens').find({}).batchSize(BATCH_SIZE)) {
+    const site = resolveSiteByOid(oidMap, g.site) || resolveSiteByName(nameMap, norm, g.siteName);
+    const name = clean(g.name);
+    if (!site || !name) { stats.skipped++; continue; }
+    const makeModel = [clean(g.brand), clean(g.model)].filter(Boolean).join(' ') || null;
+    try {
+      const r = await qrun(
+        `INSERT INTO generators (id,tenant_id,site_id,name,fuel_type,make_model,capacity_kva,serial_no,notes,ext_id,status)
+         VALUES (?,?,?,?,'DIESEL',?,?,?,?,?,'ACTIVE')
+         ON CONFLICT (tenant_id, ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+        [uuid(), site.tenant_id, site.id, name, makeModel, num(g.kva) || null, clean(g.sn), clean(g.description), String(g._id)]);
+      if (r.rowCount) stats.gens++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] generators error:', e.message.slice(0, 140)); }
+    progress('generators', stats.gens, 0);
+  }
+  // 2) Map fido gen _id → Daybook generator row
+  const genMap = {};
+  for (const row of await qall('SELECT id, ext_id, tenant_id, site_id FROM generators WHERE ext_id IS NOT NULL')) genMap[row.ext_id] = row;
+
+  const importLogs = async (coll, type, fields) => {
+    for await (const d of mongoDB.collection(coll).find({}).batchSize(BATCH_SIZE)) {
+      const g = genMap[String(d.gen)];
+      const logDate = dateStr(d.date);
+      if (!g || !logDate) { stats.skipped++; continue; }
+      try {
+        const r = await qrun(
+          `INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,runtime_hours,detail,ext_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (tenant_id, ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+          [uuid(), g.tenant_id, g.id, g.site_id, logDate, type, fields.litres(d), fields.hours(d), fields.detail(d), String(d._id)]);
+        if (r.rowCount) stats.logs++;
+      } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn(`\n[ETL] ${coll} error:`, e.message.slice(0, 140)); }
+      progress('gen-logs', stats.logs, 0);
+    }
+  };
+  await importLogs('gendiesels', 'DIESEL', { litres: (d) => num(d.diesel_litres) || null, hours: (d) => num(d.diesel_hours) || null, detail: (d) => clean(d.remarks) });
+  await importLogs('genmaints',  'MAINTENANCE', { litres: () => null, hours: (d) => num(d.maintenance_hour) || null, detail: (d) => clean(d.remarks) });
+  done('generators', stats);
+  return stats;
+}
+
 // ── Verify: reconcile Mongo (source) ↔ Postgres (imported rows) ─────────────────
 // Compares row counts per collection, and for orders the total ₦ per site, so you
 // get a clear pass/fail instead of eyeballing. Only counts IMPORTED rows in
@@ -570,7 +619,7 @@ async function main() {
   const defaultTenantId = defTenant ? defTenant.id : null;
   console.log(`[ETL] default tenant for site-less rows: ${defTenant ? defTenant.slug : '(none — site-less customers will be skipped)'}`);
 
-  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'vendors', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
+  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'vendors', 'generators', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
   const allStats = {};
   for (const col of run) {
     switch (col) {
@@ -578,6 +627,7 @@ async function main() {
       case 'customers':    allStats.customers    = await etlCustomers(mongoDB, maps, defaultTenantId); break;
       case 'products':     allStats.products     = await etlProducts(mongoDB, defaultTenantId); break;
       case 'vendors':      allStats.vendors      = await etlVendors(mongoDB, maps, defaultTenantId); break;
+      case 'generators':   allStats.generators   = await etlGenerators(mongoDB, maps); break;
       case 'expenses':     allStats.expenses     = await etlExpenses(mongoDB, maps);  break;
       case 'payroll':      allStats.payroll      = await etlPayroll(mongoDB, maps);   break;
       case 'orders':       allStats.orders       = await etlOrders(mongoDB, maps);    break;

@@ -65,18 +65,21 @@ export default function Nav() {
 
   const isGMup       = role && atLeast(role, 'GENERAL_MANAGER');
   const isSuperAdmin = user?.is_superadmin && !tenant;
+  const isGate       = role === 'GATE';
   const showSell = !!active;
 
   const brand = active?.brand_color || '#0ea5e9';
 
-  // Five primary destinations. Everything else lives under More or the profile menu.
-  const tabs = [
-    { id: 'dashboard', icon: '📊', label: 'Dashboard', show: true },
-    { id: 'sell',      icon: '💳', label: 'Sales',     show: showSell },
-    { id: 'expenses',  icon: '💸', label: 'Expenses',  show: true },
-    { id: 'reports',   icon: '🧾', label: 'Reports',   show: true },
-    { id: 'more',      icon: '⋯',  label: 'More',      show: true },
-  ].filter((t) => t.show);
+  // Gate/security users get a single, focused destination — nothing else.
+  const tabs = isGate
+    ? [{ id: 'gate', icon: '🚧', label: 'Gate', show: true }]
+    : [
+      { id: 'dashboard', icon: '📊', label: 'Dashboard', show: true },
+      { id: 'sell',      icon: '💳', label: 'Sales',     show: showSell },
+      { id: 'expenses',  icon: '💸', label: 'Expenses',  show: true },
+      { id: 'reports',   icon: '🧾', label: 'Reports',   show: true },
+      { id: 'more',      icon: '⋯',  label: 'More',      show: true },
+    ].filter((t) => t.show);
 
   // "More" is the active highlight for any destination that lives inside it.
   const MORE_TABS = ['more', 'gate', 'payroll', 'generators'];

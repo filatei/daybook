@@ -1094,7 +1094,8 @@ router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
   const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
-  if (!c || !atLeast(c.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'forbidden' });
+  if (!c) return res.status(403).json({ error: 'forbidden' });   // any member incl. GATE/security
+  if (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   if (sale.exited_at) return res.status(400).json({ error: 'Already exited', exited_at: sale.exited_at });
   const ts = nowS();
   await qrun('UPDATE pos_sales SET exited_at=? WHERE id=?', [ts, sale.id]);
@@ -1108,7 +1109,8 @@ router.post('/pos/sales/:id/loaded', requireAuth, async (req, res) => {
   const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
-  if (!c || !atLeast(c.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'forbidden' });
+  if (!c) return res.status(403).json({ error: 'forbidden' });   // any member incl. GATE/security
+  if (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   if (sale.loaded_at) return res.status(400).json({ error: 'Already marked as loaded', loaded_at: sale.loaded_at });
   const ts = nowS();
   await qrun('UPDATE pos_sales SET loaded_at=? WHERE id=?', [ts, sale.id]);

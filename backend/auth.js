@@ -111,7 +111,9 @@ function requestedTenant(req) {
   return req.query.tenant || req.headers['x-tenant'] || null;
 }
 
-const ROLE_RANK = { SITE_MANAGER: 1, GENERAL_MANAGER: 2, ADMIN: 3 };
+// GATE = limited security/gate role (lowest privilege); can only scan receipts
+// and mark goods loaded/exited.
+const ROLE_RANK = { GATE: 0, SITE_MANAGER: 1, GENERAL_MANAGER: 2, ADMIN: 3 };
 const atLeast = (role, min) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[min] || 0);
 
 module.exports = {

@@ -12,6 +12,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { api, scoped, ngn } from '../api.js';
 import { useRealtime } from '../hooks/useRealtime.js';
+import BarcodeScanner from '../components/BarcodeScanner.jsx';
 
 const evClock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 import { useStore } from '../store.jsx';
@@ -44,6 +45,7 @@ export default function Gate() {
   const [loading, setLoading] = useState(false);
   const [acting,  setActing]  = useState(false);
   const [feed,    setFeed]    = useState([]);   // live gate/loading activity
+  const [scanning, setScanning] = useState(false);
   const inputRef = useRef(null);
   const saleRef = useRef(null); saleRef.current = sale;
 
@@ -65,8 +67,8 @@ export default function Gate() {
   // Re-focus after a sale is cleared
   const reset = () => { setQuery(''); setSale(null); setTimeout(() => inputRef.current?.focus(), 50); };
 
-  const lookup = useCallback(async () => {
-    const rn = query.trim();
+  const lookupValue = useCallback(async (rawVal) => {
+    const rn = String(rawVal || '').trim();
     if (!rn) return;
     setLoading(true); setSale(null);
     try {
@@ -77,7 +79,16 @@ export default function Gate() {
       inputRef.current?.select();
     }
     setLoading(false);
-  }, [query, tenant]);
+  }, [tenant]);
+  const lookup = useCallback(() => lookupValue(query), [lookupValue, query]);
+
+  // Camera scan → fill the field and look it up immediately.
+  const onScan = useCallback((code) => {
+    setScanning(false);
+    const digits = (code.match(/\d+/g) || [code]).join('');
+    setQuery(digits);
+    lookupValue(digits);
+  }, [lookupValue]);
 
   const markLoaded = useCallback(async () => {
     if (!sale) return;
@@ -130,8 +141,11 @@ export default function Gate() {
             ? <span className="spin" style={{ width: 14, height: 14, borderTopColor: '#fff' }} />
             : '🔍'}
         </button>
+        <button className="btn btn-sm" style={{ width: 52, background: '#0369a1' }} onClick={() => setScanning(true)} title="Scan with camera">📷</button>
         {sale && <button className="btn btn-ghost btn-sm" onClick={reset}>✕</button>}
       </div>
+
+      {scanning && <BarcodeScanner onDetect={onScan} onClose={() => setScanning(false)} />}
 
       {/* Result card */}
       {sale && (

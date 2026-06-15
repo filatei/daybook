@@ -93,6 +93,35 @@ function MemberForm({ sites = [], onInvite, onClose }) {
   );
 }
 
+// ── Settings (face match strictness) ─────────────────────────────────────────
+function SettingsTab() {
+  const { toast, tenant } = useStore();
+  const [thr, setThr] = useState(0.55);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    api(scoped('/settings')).then((s) => setThr(s.face_match_threshold ?? 0.55)).catch(() => {}).finally(() => setLoading(false));
+  }, [tenant]);
+  const save = async () => {
+    setSaving(true);
+    try { const r = await api(scoped('/settings'), { method: 'PATCH', body: { face_match_threshold: thr } }); setThr(r.face_match_threshold); toast('Saved ✓', 'ok'); }
+    catch (e) { toast(e.message, 'err'); }
+    setSaving(false);
+  };
+  if (loading) return <div className="skel" />;
+  return (
+    <div className="card">
+      <div className="section-title" style={{ marginTop: 0 }}>Face-match strictness</div>
+      <p className="sub">How close a live face must be to the enrolled face to clock in. Lower = stricter (fewer wrong matches, more retries). Higher = more lenient. Default 0.55.</p>
+      <input type="range" min="0.30" max="0.80" step="0.01" value={thr} onChange={(e) => setThr(+e.target.value)} style={{ width: '100%' }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+        <span>Stricter 0.30</span><strong style={{ color: 'var(--ink)', fontSize: 16 }}>{thr.toFixed(2)}</strong><span>Lenient 0.80</span>
+      </div>
+      <button className="btn" style={{ marginTop: 14 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : null} Save</button>
+    </div>
+  );
+}
+
 // ── Product form ────────────────────────────────────────────────────────────
 function ProductForm({ product, onSave, onClose }) {
   const { toast } = useStore();
@@ -233,13 +262,14 @@ export default function Admin() {
 
   return (
     <div>
-      <div className="seg" style={{ marginBottom: 16 }}>
+      <div className="seg" style={{ marginBottom: 16, overflowX: 'auto', flexWrap: 'nowrap' }}>
         <button className={`seg-b${tab === 'sites'    ? ' on' : ''}`} onClick={() => setTab('sites')}>🏗️ Sites</button>
         <button className={`seg-b${tab === 'members'  ? ' on' : ''}`} onClick={() => setTab('members')}>👥 Members</button>
         <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>
+        {isAdmin && <button className={`seg-b${tab === 'settings' ? ' on' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>}
       </div>
 
-      {loading ? (
+      {tab === 'settings' ? <SettingsTab /> : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

@@ -704,7 +704,25 @@ router.get('/staff/:id/face', requireAuth, async (req, res) => {
   const st = await qone('SELECT id,tenant_id,site_id,face_descriptor FROM staff WHERE id=?', [req.params.id]);
   if (!st || st.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (s.ctx.role === 'SITE_MANAGER' && st.site_id !== s.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
-  res.json({ enrolled: !!st.face_descriptor, descriptor: st.face_descriptor ? J(st.face_descriptor, null) : null });
+  const t = await qone('SELECT face_match_threshold FROM tenants WHERE id=?', [s.ctx.tenant_id]);
+  res.json({ enrolled: !!st.face_descriptor, descriptor: st.face_descriptor ? J(st.face_descriptor, null) : null, threshold: t?.face_match_threshold ?? 0.55 });
+});
+
+// Tenant settings (face match threshold, …)
+router.get('/settings', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: 'select a workspace' });
+  const t = await qone('SELECT face_match_threshold FROM tenants WHERE id=?', [s.ctx.tenant_id]);
+  res.json({ face_match_threshold: t?.face_match_threshold ?? 0.55 });
+});
+router.patch('/settings', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const b = req.body || {};
+  if (b.face_match_threshold != null) {
+    const v = Number(b.face_match_threshold);
+    if (!(v >= 0.3 && v <= 0.8)) return res.status(400).json({ error: 'threshold must be between 0.30 and 0.80' });
+    await qrun('UPDATE tenants SET face_match_threshold=? WHERE id=?', [v, req.ctx.tenant_id]);
+  }
+  const t = await qone('SELECT face_match_threshold FROM tenants WHERE id=?', [req.ctx.tenant_id]);
+  res.json({ face_match_threshold: t?.face_match_threshold ?? 0.55 });
 });
 
 // Enrol / update a staff member's face descriptor (128 floats).
@@ -817,17 +835,23 @@ function saveDataUrl(dataUrl, tag) {
 }
 router.get('/attendance', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
-  const date = req.query.date || new Date().toISOString().slice(0, 10);
-  const where = ['a.tenant_id=?', 'a.work_date=?'], args = [s.ctx.tenant_id, date];
+  const where = ['a.tenant_id=?'], args = [s.ctx.tenant_id];
+  // Single ?date=, or a ?from=&to= range.
+  if (req.query.from || req.query.to) {
+    if (req.query.from) { where.push('a.work_date>=?'); args.push(req.query.from); }
+    if (req.query.to)   { where.push('a.work_date<=?'); args.push(req.query.to); }
+  } else {
+    where.push('a.work_date=?'); args.push(req.query.date || new Date().toISOString().slice(0, 10));
+  }
   if (s.ctx.role === 'SITE_MANAGER') { where.push('a.site_id=?'); args.push(s.ctx.site_id); }
   else if (req.query.site) { where.push('a.site_id=?'); args.push(req.query.site); }
   const rows = await qall(`SELECT a.*, st.full_name, si.name site_name FROM attendance a
     LEFT JOIN staff st ON st.id=a.staff_id LEFT JOIN sites si ON si.id=a.site_id
-    WHERE ${where.join(' AND ')} ORDER BY a.clock_in DESC, st.full_name`, args);
+    WHERE ${where.join(' AND ')} ORDER BY a.work_date DESC, a.clock_in DESC, st.full_name LIMIT 500`, args);
   res.json(rows.map((r) => ({
     id: r.id, staff_id: r.staff_id, staff: r.full_name, site_id: r.site_id, site: r.site_name, work_date: r.work_date,
     clock_in: r.clock_in, clock_out: r.clock_out, has_photo_in: !!r.photo_in, has_photo_out: !!r.photo_out, has_signature: !!r.signature,
-    in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
+    match_score: r.match_score, in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
   })));
 });
 router.post('/attendance/clock', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { api, scoped, today } from '../api.js';
+import { api, scoped, today, getToken } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/useFaceLiveness.js';
 
@@ -13,6 +13,7 @@ function ClockModal({ staff, todayRecord, onDone, onClose }) {
   const [clocking, setClocking] = useState(false);
   const [geoPos, setGeoPos] = useState(null);
   const [enrolled, setEnrolled] = useState(undefined); // undefined=loading, null=none, array=descriptor
+  const [threshold, setThreshold] = useState(FACE_MATCH_THRESHOLD);
   const [enrolling, setEnrolling] = useState(false);
   const [forceEnroll, setForceEnroll] = useState(false); // re-enrol an already-enrolled face
 
@@ -26,7 +27,7 @@ function ClockModal({ staff, todayRecord, onDone, onClose }) {
 
   // Load this staff member's enrolled face (if any)
   useEffect(() => {
-    api(scoped(`/staff/${staff.id}/face`)).then((r) => setEnrolled(r.descriptor || null)).catch(() => setEnrolled(null));
+    api(scoped(`/staff/${staff.id}/face`)).then((r) => { setEnrolled(r.descriptor || null); if (r.threshold != null) setThreshold(r.threshold); }).catch(() => setEnrolled(null));
   }, []);
 
   // Start camera + best-effort geolocation
@@ -63,7 +64,7 @@ function ClockModal({ staff, todayRecord, onDone, onClose }) {
     if (enrollMode || status !== 'done' || !capturedFrame) return;
     const run = async () => {
       const dist = faceDistance(capturedDescriptor, enrolled);
-      if (!capturedDescriptor || dist > FACE_MATCH_THRESHOLD) {
+      if (!capturedDescriptor || dist > threshold) {
         toast(!capturedDescriptor ? 'Could not read the face — retry' : `Face doesn't match ${staff.full_name}`, 'err');
         setTimeout(reset, 900);
         return;
@@ -149,6 +150,73 @@ function ClockModal({ staff, todayRecord, onDone, onClose }) {
   );
 }
 
+// ── Attendance report (date range) ───────────────────────────────────────────
+const clockTime = (s) => s ? new Date(s * 1000).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) : '—';
+
+function AttendanceReport({ siteFilter }) {
+  const { tenant, toast } = useStore();
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [from, setFrom] = useState(today());
+  const [to, setTo] = useState(today());
+  const [photo, setPhoto] = useState(null);   // object URL in viewer
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const p = new URLSearchParams({ from, to });
+      if (siteFilter) p.set('site', siteFilter);
+      setRows(await api(scoped(`/attendance?${p}`)));
+    } catch { setRows([]); }
+    setLoading(false);
+  }, [tenant, from, to, siteFilter]);
+  useEffect(() => { load(); }, [load]);
+
+  const viewPhoto = async (id, which) => {
+    try {
+      const res = await fetch(`/api/attendance/${id}/img/${which}`, { headers: { Authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) throw new Error('not found');
+      setPhoto(URL.createObjectURL(await res.blob()));
+    } catch { toast('Photo not available', 'err'); }
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <input type="date" className="input" value={from} max={today()} onChange={(e) => setFrom(e.target.value)} />
+        <input type="date" className="input" value={to} max={today()} onChange={(e) => setTo(e.target.value)} />
+      </div>
+      {loading ? (
+        <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
+      ) : rows.length === 0 ? (
+        <div className="empty"><div className="ic">🕑</div><p>No attendance in this range</p></div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {rows.map((r) => (
+            <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700 }}>{r.staff || 'Staff'}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  {r.work_date} · {r.site || '—'} · in {clockTime(r.clock_in)} · out {clockTime(r.clock_out)}
+                  {r.match_score != null ? ` · match ${Number(r.match_score).toFixed(2)}${r.match_score <= 0.55 ? ' ✓' : ' ⚠'}` : ''}
+                </div>
+              </div>
+              {r.has_photo_in && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 8px' }} onClick={() => viewPhoto(r.id, 'in')}>📷 In</button>}
+              {r.has_photo_out && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 8px' }} onClick={() => viewPhoto(r.id, 'out')}>📷 Out</button>}
+            </div>
+          ))}
+        </div>
+      )}
+      {photo && (
+        <div onClick={() => { URL.revokeObjectURL(photo); setPhoto(null); }}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.8)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+          <img src={photo} alt="attendance" style={{ maxWidth: '100%', maxHeight: '90vh', borderRadius: 12 }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Staff list ─────────────────────────────────────────────────────────────────
 export default function Staff() {
   const { openModal, closeModal, tenant, sites } = useStore();
@@ -156,6 +224,7 @@ export default function Staff() {
   const [attendance, setAttendance] = useState({});
   const [loading, setLoading] = useState(true);
   const [siteFilter, setSiteFilter] = useState('');
+  const [mode, setMode] = useState('clock');   // clock | report
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -198,9 +267,9 @@ export default function Staff() {
 
   return (
     <div>
-      <div className="stat-grid" style={{ marginBottom: 14 }}>
-        <div className="stat accent"><div className="k">Present Today</div><div className="v">{present}</div></div>
-        <div className="stat"><div className="k">Total Staff</div><div className="v">{staff.length}</div></div>
+      <div className="seg" style={{ marginBottom: 14 }}>
+        <button className={`seg-b${mode === 'clock' ? ' on' : ''}`} onClick={() => setMode('clock')}>🟢 Clock in/out</button>
+        <button className={`seg-b${mode === 'report' ? ' on' : ''}`} onClick={() => setMode('report')}>🕑 Attendance</button>
       </div>
 
       {sites.length > 1 && (
@@ -210,6 +279,13 @@ export default function Staff() {
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
       )}
+
+      {mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : (
+      <>
+      <div className="stat-grid" style={{ marginBottom: 14 }}>
+        <div className="stat accent"><div className="k">Present Today</div><div className="v">{present}</div></div>
+        <div className="stat"><div className="k">Total Staff</div><div className="v">{staff.length}</div></div>
+      </div>
 
       {loading ? (
         <>{[...Array(6)].map((_, i) => <div className="skel" key={i} />)}</>
@@ -235,6 +311,8 @@ export default function Staff() {
             );
           })}
         </div>
+      )}
+      </>
       )}
     </div>
   );

@@ -47,6 +47,7 @@ function ProfileMenu({ user, isGMup, go, logout, canInstall, install }) {
             <div style={{ fontWeight: 800 }}>{user?.name || 'Signed in'}</div>
             <div style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{user?.email}</div>
           </div>
+          {item('Activity & messages', '🔔', () => go('activity'))}
           {isGMup && item('Admin', '⚙️', () => go('admin'))}
           {canInstall && item('Install app', '⬇', install)}
           <div style={{ borderTop: '1px solid var(--line)', margin: '4px 0' }} />

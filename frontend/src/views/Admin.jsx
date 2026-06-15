@@ -38,15 +38,19 @@ function SiteForm({ site, onSave, onClose }) {
   );
 }
 
-function MemberForm({ members, onInvite, onClose }) {
+function MemberForm({ sites = [], onInvite, onClose }) {
   const { toast } = useStore();
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState('SITE_MANAGER');
+  const [role, setRole] = useState('SECRETARY');
+  const [siteId, setSiteId] = useState(sites[0]?.id || '');
   const [saving, setSaving] = useState(false);
+  const SITE_ROLES = ['SITE_MANAGER', 'GATEMAN', 'SUPERVISOR'];   // benefit from a site
+  const needsSite = role === 'SITE_MANAGER';
   const invite = async () => {
-    if (!email) return;
+    if (!email) return toast('Email required', 'err');
+    if (needsSite && !siteId) return toast('Pick a site for this Manager', 'err');
     setSaving(true);
-    try { await onInvite(email, role); onClose(); }
+    try { await onInvite(email, role, SITE_ROLES.includes(role) ? siteId : null); onClose(); }
     catch (e) { toast(e.message, 'err'); }
     setSaving(false);
   };
@@ -71,6 +75,15 @@ function MemberForm({ members, onInvite, onClose }) {
           <option value="ADMIN">{ROLE_LABELS.ADMIN} — full access</option>
         </optgroup>
       </select>
+      {SITE_ROLES.includes(role) && sites.length > 0 && (
+        <>
+          <label className="fl">Site{needsSite ? ' *' : ' (optional)'}</label>
+          <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+            <option value="">— none —</option>
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </>
+      )}
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn" onClick={invite} disabled={saving}>{saving ? <span className="spin" /> : null} Invite</button>
@@ -197,9 +210,9 @@ export default function Admin() {
     openModal(<ProductForm product={product} onSave={loadProducts} onClose={closeModal} />);
   };
 
-  const inviteMember = async (email, inviteRole) => {
-    await api(scoped('/members'), { method: 'POST', body: { email, role: inviteRole } });
-    toast(`Invited ${email}`, 'ok');
+  const inviteMember = async (email, inviteRole, site_id) => {
+    const r = await api(scoped('/members'), { method: 'POST', body: { email, role: inviteRole, site_id } });
+    toast(r.added ? `${email} added ✓` : `Invite saved — ${email} gets access when they sign in with Google`, 'ok');
     await loadMembers();
   };
 
@@ -255,7 +268,7 @@ export default function Admin() {
             </div>
           )}
           {isAdmin && (
-            <button className="fab" onClick={() => openModal(<MemberForm members={members} onInvite={inviteMember} onClose={closeModal} />)}>+</button>
+            <button className="fab" onClick={() => openModal(<MemberForm sites={sites} onInvite={inviteMember} onClose={closeModal} />)}>+</button>
           )}
         </>
       ) : (

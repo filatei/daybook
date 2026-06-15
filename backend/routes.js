@@ -215,8 +215,9 @@ router.get('/members', requireAuth, needTenant('GENERAL_MANAGER'), async (req, r
 router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const { email, role, site_id } = req.body || {};
   if (!email || !role) return res.status(400).json({ error: 'email and role required' });
-  if (!['ADMIN', 'GENERAL_MANAGER', 'SITE_MANAGER'].includes(role)) return res.status(400).json({ error: 'invalid role' });
-  if (role === 'SITE_MANAGER' && !site_id) return res.status(400).json({ error: 'site required for a Site Manager' });
+  const VALID_ROLES = ['ADMIN', 'GENERAL_MANAGER', 'SITE_MANAGER', 'SNR_ACCOUNTANT', 'ACCOUNTANT', 'SECRETARY', 'SUPERVISOR', 'GATEMAN', 'GATE'];
+  if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'invalid role' });
+  if (role === 'SITE_MANAGER' && !site_id) return res.status(400).json({ error: 'site required for a Manager' });
   const lower = email.toLowerCase();
   const existing = await qone('SELECT * FROM users WHERE lower(email)=lower(?)', [lower]);
   if (existing) {
@@ -233,6 +234,25 @@ router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
   } catch { return res.status(409).json({ error: 'already invited' }); }
   await audit(req.ctx.tenant_id, req.user.id, 'INVITE', 'invite', lower, { role });
   res.status(201).json({ invited: true, email: lower });
+});
+
+// My activity & sent messages — powers the avatar "Activity" panel.
+router.get('/me/activity', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req);
+  const args = [req.user.id];
+  let where = 'a.user_id=?';
+  if (tid) { where += ' AND a.tenant_id=?'; args.push(tid); }
+  const audits = await qall(
+    `SELECT a.action, a.entity, a.entity_id, a.meta, a.created_at, t.name tenant_name
+       FROM audit_log a LEFT JOIN tenants t ON t.id=a.tenant_id
+      WHERE ${where} ORDER BY a.created_at DESC LIMIT 60`, args);
+  let emails = [];
+  if (tid) emails = await qall(
+    'SELECT to_addrs, subject, status, error, created_at FROM email_log WHERE tenant_id=? ORDER BY created_at DESC LIMIT 25', [tid]);
+  res.json({
+    audits: audits.map((a) => ({ ...a, meta: J(a.meta, {}) })),
+    emails,
+  });
 });
 
 const activeAdminCount = async (tenant_id) => {

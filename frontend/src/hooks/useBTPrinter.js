@@ -31,6 +31,24 @@ const CMD_CUT        = new Uint8Array([GS,  0x56, 0x42, 0x00]); // Partial cut
 const DIVIDER        = ENC.encode('--------------------------------\n');
 const NEWLINES       = new Uint8Array([LF, LF, LF]);
 
+/**
+ * Build ESC/POS Code 128 barcode command for a receipt number string.
+ * Uses Code Set B (ASCII), GS k 0x49 n [data] (new-style length prefix).
+ * Barcode height: 64 dots; HRI (human-readable) below; module width: 2.
+ */
+function barcodeCode128(numStr) {
+  // Subset B prefix: 0x7B, 0x42 = "{B"
+  const payload = new Uint8Array([0x7B, 0x42, ...Array.from(numStr).map((c) => c.charCodeAt(0))]);
+  return new Uint8Array([
+    GS, 0x68, 64,        // GS h — barcode height 64 dots
+    GS, 0x48, 0x02,      // GS H — HRI below barcode
+    GS, 0x77, 0x02,      // GS w — module width 2
+    GS, 0x6B, 0x49,      // GS k 73 — Code 128 (new format)
+    payload.length,      // n bytes
+    ...payload,
+  ]);
+}
+
 const t = (s) => ENC.encode(s);
 
 // Pad/truncate to fixed column width
@@ -109,10 +127,13 @@ export function buildReceipt(opts) {
     push(t(twoCol('Change', N(change))));
   }
 
-  // Footer
+  // Footer: instruction + Code 128 barcode for scanner stations
   push(DIVIDER, CMD_CENTER, CMD_BOLD_ON);
   push(t('TAKE TO LOADING POINT\n'));
-  push(CMD_BOLD_OFF, t(`Receipt #${rno}\n`));
+  push(CMD_BOLD_OFF, CMD_SIZE_NORM);
+  push(t(`Receipt #${rno}\n`));
+  push(new Uint8Array([LF]));
+  push(barcodeCode128(String(receipt_no || '')));
   push(DIVIDER, NEWLINES, CMD_CUT);
 
   // Combine into a single Uint8Array

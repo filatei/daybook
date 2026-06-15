@@ -1,12 +1,17 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore } from '../store.jsx';
+import Typeahead from '../components/Typeahead.jsx';
 
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
 
 function ExpenseForm({ expense, sites, onSave, onClose }) {
-  const { toast } = useStore();
+  const { toast, tenant } = useStore();
   const [saving, setSaving] = useState(false);
+  const fetchVendors = useCallback(async (q) => {
+    const rows = await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`));
+    return rows.map((r) => ({ label: r.label }));
+  }, [tenant]);
   const [f, setF] = useState({
     category: expense?.category || CATS[0],
     amount: expense?.amount ?? '',
@@ -53,7 +58,13 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
       <label className="fl">Description</label>
       <input type="text" className="input" value={f.description} onChange={(e) => set('description', e.target.value)} />
       <label className="fl">Vendor</label>
-      <input type="text" className="input" value={f.vendor} onChange={(e) => set('vendor', e.target.value)} />
+      <Typeahead
+        value={f.vendor}
+        onChange={(v) => set('vendor', v)}
+        fetchFn={fetchVendors}
+        placeholder="Vendor name"
+        minChars={1}
+      />
       {sites.length > 1 && <>
         <label className="fl">Site</label>
         <select className="input" value={f.site_id} onChange={(e) => set('site_id', e.target.value)}>

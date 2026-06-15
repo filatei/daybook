@@ -12,6 +12,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
+import Typeahead from '../components/Typeahead.jsx';
 
 const PAY = ['CASH', 'TRANSFER', 'POS'];
 const PAY_LABELS = { CASH: '💵 Cash', TRANSFER: '🏦 Transfer', POS: '💳 POS' };
@@ -93,6 +94,13 @@ export default function Sell() {
   const [posting,   setPosting]   = useState(false);
   const [lastSale,  setLastSale]  = useState(null);
   const clientUid = useRef(genUid());
+
+  // Customer typeahead: search existing customers, auto-create on charge
+  const fetchCustomers = useCallback(async (q) => {
+    const rows = await api(scoped(`/suggest/customers?q=${encodeURIComponent(q)}`));
+    // backend may return { name, phone } (raw SQL) or { label, sub } (sales module)
+    return rows.map((r) => ({ label: r.label || r.name, sub: r.sub || r.phone || '' }));
+  }, [tenant]);
 
   // Load products
   const load = useCallback(async () => {
@@ -219,10 +227,12 @@ export default function Sell() {
         </div>
       )}
 
-      {/* Customer name */}
-      <input
-        className="input" placeholder="Customer name (optional)"
-        value={custName} onChange={(e) => setCustName(e.target.value)}
+      {/* Customer name — typeahead */}
+      <Typeahead
+        value={custName}
+        onChange={setCustName}
+        fetchFn={fetchCustomers}
+        placeholder="Customer name (optional)"
         style={{ marginBottom: 12 }}
       />
 

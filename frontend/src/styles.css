@@ -256,7 +256,7 @@ label.fl { display: block; font-size: 13px; font-weight: 600; color: var(--muted
 }
 .ta-item { display: block; width: 100%; text-align: left; padding: 10px 12px; border: none; border-bottom: 1px solid #f1f3f9; background: #fff; cursor: pointer; font-size: 14px; color: var(--ink); }
 .ta-item:last-child { border-bottom: none; }
-.ta-item:hover, .ta-item:active { background: var(--brand-l); }
+.ta-item:hover, .ta-item:active, .ta-item.on { background: var(--brand-l); }
 
 /* ── Sales line editor ─────────────────────────────────────────────────────── */
 .line { display: grid; grid-template-columns: 1.4fr .8fr 1fr auto; gap: 7px; align-items: center; margin-bottom: 7px; }

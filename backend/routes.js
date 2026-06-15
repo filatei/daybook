@@ -693,7 +693,18 @@ router.get('/suggest/customers', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.json([]);
   const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
   if (await posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchCustomers(q)); } catch {} }
-  res.json(await qall('SELECT DISTINCT name, phone FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 8', [s.ctx.tenant_id, `%${q}%`]));
+  res.json(await qall('SELECT DISTINCT name, phone FROM customers WHERE tenant_id=? AND name ILIKE ? ORDER BY name LIMIT 10', [s.ctx.tenant_id, `%${q}%`]));
+});
+
+router.get('/suggest/vendors', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.json([]);
+  const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
+  // Distinct vendor names from the expenses table for this tenant
+  const rows = await qall(
+    `SELECT DISTINCT vendor FROM expenses WHERE tenant_id=? AND vendor IS NOT NULL AND vendor <> '' AND vendor ILIKE ? ORDER BY vendor LIMIT 10`,
+    [s.ctx.tenant_id, `%${q}%`],
+  );
+  res.json(rows.map((r) => ({ label: r.vendor })));
 });
 
 // ── ATTENDANCE ────────────────────────────────────────────────────────────────
@@ -935,10 +946,21 @@ router.get('/customers', requireAuth, async (req, res) => {
 });
 router.post('/customers', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'name required' });
+  const name = b.name.trim();
+  // Upsert: if name already exists for this tenant return existing record (names are unique per tenant)
+  const existing = await qone('SELECT * FROM customers WHERE tenant_id=? AND lower(name)=lower(?)', [req.ctx.tenant_id, name]);
+  if (existing) return res.json(existing);
   const id = uuid();
-  await qrun('INSERT INTO customers (id,tenant_id,name,phone,email,note) VALUES (?,?,?,?,?,?)',
-    [id, req.ctx.tenant_id, b.name.trim(), b.phone || null, b.email || null, b.note || null]);
-  res.status(201).json(await qone('SELECT * FROM customers WHERE id=?', [id]));
+  try {
+    await qrun('INSERT INTO customers (id,tenant_id,name,phone,email,note) VALUES (?,?,?,?,?,?)',
+      [id, req.ctx.tenant_id, name, b.phone || null, b.email || null, b.note || null]);
+    res.status(201).json(await qone('SELECT * FROM customers WHERE id=?', [id]));
+  } catch (e) {
+    // Race condition: another request inserted between our check and insert
+    const race = await qone('SELECT * FROM customers WHERE tenant_id=? AND lower(name)=lower(?)', [req.ctx.tenant_id, name]);
+    if (race) return res.json(race);
+    res.status(409).json({ error: 'Customer already exists' });
+  }
 });
 
 router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
@@ -1025,6 +1047,19 @@ router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
   await qrun('UPDATE pos_sales SET exited_at=? WHERE id=?', [ts, sale.id]);
   await audit(sale.tenant_id, req.user.id, 'EXIT', 'pos_sale', sale.id, { receipt_no: sale.receipt_no });
   res.json({ ...sale, exited_at: ts, items: J(sale.items_json, []) });
+});
+
+// Loading point: mark order as loaded (goods handed to customer/truck)
+router.post('/pos/sales/:id/loaded', requireAuth, async (req, res) => {
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  if (!sale) return res.status(404).json({ error: 'not found' });
+  const c = await contextFor(req.user, sale.tenant_id);
+  if (!c || !atLeast(c.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'forbidden' });
+  if (sale.loaded_at) return res.status(400).json({ error: 'Already marked as loaded', loaded_at: sale.loaded_at });
+  const ts = nowS();
+  await qrun('UPDATE pos_sales SET loaded_at=? WHERE id=?', [ts, sale.id]);
+  await audit(sale.tenant_id, req.user.id, 'LOADED', 'pos_sale', sale.id, { receipt_no: sale.receipt_no });
+  res.json({ ...sale, loaded_at: ts, items: J(sale.items_json, []) });
 });
 
 router.get('/pos/summary', requireAuth, async (req, res) => {

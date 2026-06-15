@@ -678,9 +678,19 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_paylines_run    ON payroll_run_lines(run_id);
   `);
 
-  // ── Phase 4: Gate verification ─────────────────────────────────────────────
+  // ── Phase 4: Gate verification + unique customers ──────────────────────────
   await pool.query(`
     ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS exited_at BIGINT;
+  `);
+  // Unique customers per tenant (case-sensitive; ETL may have dupes so use IF NOT EXISTS)
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_name
+      ON customers(tenant_id, lower(name));
+  `);
+
+  // ── Phase 5: Loading point tracking ───────────────────────────────────────
+  await pool.query(`
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS loaded_at BIGINT;
   `);
 }
 

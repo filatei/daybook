@@ -862,11 +862,12 @@ router.post('/sync/run', requireAuth, async (req, res) => {
 // ── GENERATORS ────────────────────────────────────────────────────────────────
 router.get('/generators', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
-  if (s.all) return res.json(await qall('SELECT * FROM generators ORDER BY name'));
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall('SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name', [s.ctx.tenant_id, s.ctx.site_id]));
+  const SEL = 'SELECT g.*, st.name site_name FROM generators g LEFT JOIN sites st ON st.id=g.site_id';
+  if (s.all) return res.json(await qall(`${SEL} ORDER BY st.name, g.name`));
+  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall(`${SEL} WHERE g.tenant_id=? AND g.site_id=? ORDER BY g.name`, [s.ctx.tenant_id, s.ctx.site_id]));
   const site = req.query.site;
-  res.json(site ? await qall('SELECT * FROM generators WHERE tenant_id=? AND site_id=? ORDER BY name', [s.ctx.tenant_id, site])
-    : await qall('SELECT * FROM generators WHERE tenant_id=? ORDER BY name', [s.ctx.tenant_id]));
+  res.json(site ? await qall(`${SEL} WHERE g.tenant_id=? AND g.site_id=? ORDER BY g.name`, [s.ctx.tenant_id, site])
+    : await qall(`${SEL} WHERE g.tenant_id=? ORDER BY st.name, g.name`, [s.ctx.tenant_id]));
 });
 router.post('/generators', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {};

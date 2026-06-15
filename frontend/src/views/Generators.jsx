@@ -189,7 +189,7 @@ export default function Generators() {
             <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
               <button onClick={() => openLogs(g)} style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
                 <div style={{ fontWeight: 700 }}>{g.name} {g.status === 'RETIRED' ? <span className="badge">retired</span> : ''}</div>
-                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{g.fuel_type}{g.capacity_kva ? ` · ${g.capacity_kva} kVA` : ''}{g.make_model ? ` · ${g.make_model}` : ''}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>📍 {g.site_name || 'Unassigned'} · {g.fuel_type}{g.capacity_kva ? ` · ${g.capacity_kva} kVA` : ''}{g.make_model ? ` · ${g.make_model}` : ''}</div>
               </button>
               <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => openModal(<GeneratorForm gen={g} sites={sites} onSave={load} onClose={closeModal} />)}>Edit</button>
             </div>

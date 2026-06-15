@@ -114,15 +114,22 @@ function requestedTenant(req) {
 // Privilege ladder (low → high).  GATEMAN/SUPERVISOR/GATE are gate-only and the
 // lowest privilege.  Office writers start at SECRETARY (can use Sales/Expenses);
 // (Site) MANAGER adds operational ownership; GM is cross-site; ADMIN manages users.
+// Operations tier (Secretary = Manager, site-bound) sits BELOW the finance tier
+// (Accountant/Snr Accountant) so payroll can include Accountants but exclude
+// Managers/Secretaries, while operational actions start at Secretary.
 const ROLE_RANK = {
   GATEMAN: 1, GATE: 1, SUPERVISOR: 2,
-  SECRETARY: 3, ACCOUNTANT: 4, SNR_ACCOUNTANT: 5,
-  SITE_MANAGER: 6, GENERAL_MANAGER: 7, ADMIN: 8,
+  SECRETARY: 3, SITE_MANAGER: 4,
+  ACCOUNTANT: 5, SNR_ACCOUNTANT: 6,
+  GENERAL_MANAGER: 7, ADMIN: 8,
 };
 const atLeast = (role, min) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[min] || 0);
+// A membership is "site-bound" when it has a site and is below General Manager —
+// such users (Manager, Secretary, gate roles) only see/act on their own site.
+const siteBound = (ctx) => !!(ctx && ctx.site_id && !atLeast(ctx.role, 'GENERAL_MANAGER'));
 
 module.exports = {
   verifyGoogleToken, signSession, requireAuth,
-  membershipsFor, accessibleTenants, contextFor, requestedTenant, atLeast,
+  membershipsFor, accessibleTenants, contextFor, requestedTenant, atLeast, siteBound,
   JWT_SECRET, GOOGLE_CLIENT_ID,
 };

@@ -13,13 +13,13 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun, withTransaction } = require('./db');
-const { requireAuth, contextFor, requestedTenant, atLeast } = require('./auth');
+const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
 
 const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
 
 // ── helper ────────────────────────────────────────────────────────────────────
-async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
+async function needCtx(req, res, minRole = 'ACCOUNTANT') {
   const tid = requestedTenant(req) || req.body?.tenant_id;
   if (!tid) { res.status(400).json({ error: 'select a workspace' }); return null; }
   const c = await contextFor(req.user, tid);
@@ -176,7 +176,7 @@ router.post('/runs/compute', requireAuth, async (req, res) => {
   const b = req.body || {};
   const { period_start, period_end, site_id, save: doSave } = b;
   if (!period_start || !period_end) return res.status(400).json({ error: 'period_start and period_end required' });
-  const siteId = c.role === 'SITE_MANAGER' ? c.site_id : (site_id || null);
+  const siteId = siteBound(c) ? c.site_id : (site_id || null);
 
   // Check for existing run
   if (siteId) {
@@ -337,10 +337,10 @@ router.patch('/pay-config/:id', requireAuth, async (req, res) => {
 
 // ── Daily production entry (bags loaded / bagged) — Supervisor (Site Manager+) ──
 router.get('/production', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
   const date = (req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   const where = ['s.tenant_id=?', "s.status='ACTIVE'"], args = [date, c.tenant_id];
-  if (c.role === 'SITE_MANAGER') { where.push('s.site_id=?'); args.push(c.site_id); }
+  if (siteBound(c)) { where.push('s.site_id=?'); args.push(c.site_id); }
   else if (req.query.site) { where.push('s.site_id=?'); args.push(req.query.site); }
   res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.site_id,
     COALESCE(p.bags_loaded,0) bags_loaded, COALESCE(p.bags_bagged,0) bags_bagged
@@ -348,11 +348,11 @@ router.get('/production', requireAuth, async (req, res) => {
     WHERE ${where.join(' AND ')} ORDER BY s.full_name`, args));
 });
 router.post('/production', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
   const b = req.body || {};
   const st = await qone('SELECT * FROM staff WHERE id=?', [b.staff_id]);
   if (!st || st.tenant_id !== c.tenant_id) return res.status(400).json({ error: 'invalid staff' });
-  if (c.role === 'SITE_MANAGER' && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(c) && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   const date = (b.work_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   await qrun(`INSERT INTO production (id,tenant_id,site_id,staff_id,work_date,bags_loaded,bags_bagged,recorded_by,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?)
@@ -400,11 +400,11 @@ router.post('/compute2', requireAuth, async (req, res) => {
 
 // ── Advances / deductions — Supervisor (Site Manager+) records; settled at run ──
 router.post('/advances', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
   const b = req.body || {};
   const st = await qone('SELECT * FROM staff WHERE id=?', [b.staff_id]);
   if (!st || st.tenant_id !== c.tenant_id) return res.status(400).json({ error: 'invalid staff' });
-  if (c.role === 'SITE_MANAGER' && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(c) && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   const amount = +b.amount || 0; if (!amount) return res.status(400).json({ error: 'amount required' });
   const id = uuid();
   await qrun('INSERT INTO staff_advances (id,tenant_id,staff_id,adv_date,amount,reason,created_by) VALUES (?,?,?,?,?,?,?)',
@@ -412,7 +412,7 @@ router.post('/advances', requireAuth, async (req, res) => {
   res.status(201).json({ id });
 });
 router.get('/advances', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
   const where = ['sa.tenant_id=?'], args = [c.tenant_id];
   if (req.query.staff_id) { where.push('sa.staff_id=?'); args.push(req.query.staff_id); }
   if (req.query.outstanding === '1') where.push('sa.run_id IS NULL');

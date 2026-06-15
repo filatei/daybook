@@ -113,7 +113,7 @@ const LOG_ICON = { DIESEL: '⛽', MAINTENANCE: '🔧', NOTE: '📝' };
 export default function Generators() {
   const { openModal, closeModal, tenant, sites, go } = useStore();
   const role = useRole();
-  const canEdit = role && atLeast(role, 'SITE_MANAGER');
+  const canEdit = role && atLeast(role, 'SECRETARY');
   const [gens, setGens] = useState([]);
   const [sel, setSel] = useState(null);          // selected generator (logs view)
   const [logs, setLogs] = useState([]);

@@ -254,13 +254,13 @@ function SetupTab({ sites }) {
 export default function Payroll() {
   const { go, sites } = useStore();
   const role = useRole();
-  const allowed = role && atLeast(role, 'SNR_ACCOUNTANT');
+  const allowed = role && atLeast(role, 'ACCOUNTANT');
   const [tab, setTab] = useState('run');
   const [summary, setSummary] = useState(null);
 
   useEffect(() => { if (allowed && tab === 'history') api(scoped('/payroll/imported/summary')).then(setSummary).catch(() => {}); }, [allowed, tab]);
 
-  if (!allowed) return <div className="empty"><div className="ic">🔒</div><p>Payroll is restricted to Snr Accountants and above.</p></div>;
+  if (!allowed) return <div className="empty"><div className="ic">🔒</div><p>Payroll is restricted to Accountants and above.</p></div>;
 
   return (
     <div>

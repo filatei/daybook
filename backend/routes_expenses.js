@@ -12,7 +12,7 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
-const { requireAuth, contextFor, accessibleTenants, requestedTenant, atLeast } = require('./auth');
+const { requireAuth, contextFor, accessibleTenants, requestedTenant, atLeast, siteBound } = require('./auth');
 
 const router = express.Router();
 
@@ -38,7 +38,7 @@ async function expenseAccess(req, expenseId) {
   if (!e) return null;
   const c = await contextFor(req.user, e.tenant_id);
   if (!c) return null;
-  if (c.role === 'SITE_MANAGER' && e.site_id && e.site_id !== c.site_id) return null;
+  if (siteBound(c) && e.site_id && e.site_id !== c.site_id) return null;
   return { expense: e, ctx: c };
 }
 
@@ -52,7 +52,7 @@ router.get('/', requireAuth, async (req, res) => {
   const { site, from, to, category } = req.query;
   const where = ['e.tenant_id=?'], args = [tid];
 
-  if (c.role === 'SITE_MANAGER') { where.push('e.site_id=?'); args.push(c.site_id); }
+  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   else if (site) { where.push('e.site_id=?'); args.push(site); }
   if (from) { where.push('e.expense_date>=?'); args.push(from); }
   if (to)   { where.push('e.expense_date<=?'); args.push(to); }
@@ -76,7 +76,7 @@ router.get('/summary', requireAuth, async (req, res) => {
 
   const { from, to, site } = req.query;
   const where = ['e.tenant_id=?'], args = [tid];
-  if (c.role === 'SITE_MANAGER') { where.push('e.site_id=?'); args.push(c.site_id); }
+  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   else if (site) { where.push('e.site_id=?'); args.push(site); }
   if (from) { where.push('e.expense_date>=?'); args.push(from); }
   if (to)   { where.push('e.expense_date<=?'); args.push(to); }
@@ -109,7 +109,7 @@ router.post('/', requireAuth, async (req, res) => {
   if (!c || !atLeast(c.role, 'SECRETARY')) return res.status(403).json({ error: 'forbidden' });
 
   const b = req.body || {};
-  const site_id = c.role === 'SITE_MANAGER' ? c.site_id : (b.site_id || null);
+  const site_id = siteBound(c) ? c.site_id : (b.site_id || null);
   const expense_date = b.expense_date || new Date().toISOString().slice(0, 10);
   // Line items: each { name, qty, price } → amount = qty × price. Total = Σ amounts.
   const items = normItems(b.items);

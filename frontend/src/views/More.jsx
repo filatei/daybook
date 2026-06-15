@@ -15,12 +15,12 @@ export default function More() {
   const isSec = role && atLeast(role, 'SECRETARY');             // Secretary+
 
   const items = [
-    { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: isMgr && !!active },
+    { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: isSec && !!active },
     { id: 'documents',  icon: '📁', label: 'Documents',  desc: 'Incident reports & daily logs',           show: isSec },
     { id: 'reconcile',  icon: '🏦', label: 'Reconcile',  desc: 'Transfers, POS & cash deposits',          show: isAcct },
-    { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isSnrAcct },
-    { id: 'staff',      icon: '👷', label: 'Staff',      desc: 'Clock-in & attendance',                   show: isMgr },
-    { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',       show: isMgr },
+    { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isAcct },
+    { id: 'staff',      icon: '👷', label: 'Staff',      desc: 'Clock-in, face enrolment & attendance',    show: isSec },
+    { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',       show: isSec },
   ].filter((i) => i.show);
 
   return (

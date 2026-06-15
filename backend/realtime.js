@@ -13,7 +13,7 @@
 const { WebSocketServer } = require('ws');
 const jwt = require('jsonwebtoken');
 const { qone, qall } = require('./db');
-const { JWT_SECRET, contextFor } = require('./auth');
+const { JWT_SECRET, contextFor, siteBound } = require('./auth');
 
 const clients = new Set(); // { ws, tenant_id, site_id (null = all sites), alive }
 
@@ -52,7 +52,7 @@ function attach(server) {
       if (!user || user.status !== 'ACTIVE') return ws.close(4001, 'auth');
       const ctx = await contextFor(user, tenant);
       if (!ctx) return ws.close(4003, 'no access');
-      const site_id = ctx.role === 'SITE_MANAGER' ? ctx.site_id : null;
+      const site_id = siteBound(ctx) ? ctx.site_id : null;
 
       const client = { ws, tenant_id: tenant, site_id, alive: true };
       clients.add(client);

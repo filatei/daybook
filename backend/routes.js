@@ -12,7 +12,7 @@ const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
 const {
   verifyGoogleToken, signSession, requireAuth,
-  accessibleTenants, contextFor, requestedTenant, atLeast, GOOGLE_CLIENT_ID,
+  accessibleTenants, contextFor, requestedTenant, atLeast, siteBound, GOOGLE_CLIENT_ID,
 } = require('./auth');
 const { sendDailyReport, sendInvite, verifyConnection } = require('./mailer');
 
@@ -89,7 +89,7 @@ async function tenantUserIds(tenant_id, minRole) {
 }
 async function channelAllowed(ctx, channel) {
   if (!channel || channel === 'team') return true;
-  if (ctx.role === 'SITE_MANAGER') return channel === ctx.site_id;
+  if (siteBound(ctx)) return channel === ctx.site_id;
   return !!(await qone('SELECT 1 FROM sites WHERE id=? AND tenant_id=?', [channel, ctx.tenant_id]));
 }
 
@@ -206,7 +206,7 @@ router.patch('/tenants/:id', requireAuth, async (req, res) => {
 router.get('/sites', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   if (s.all) return res.json(await qall('SELECT * FROM sites ORDER BY tenant_id,name'));
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall('SELECT * FROM sites WHERE id=?', [s.ctx.site_id]));
+  if (siteBound(s.ctx)) return res.json(await qall('SELECT * FROM sites WHERE id=?', [s.ctx.site_id]));
   res.json(await qall('SELECT * FROM sites WHERE tenant_id=? ORDER BY name', [s.ctx.tenant_id]));
 });
 router.post('/sites', requireAuth, needTenant('ADMIN'), async (req, res) => {
@@ -245,13 +245,17 @@ router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!email || !role) return res.status(400).json({ error: 'email and role required' });
   const VALID_ROLES = ['ADMIN', 'GENERAL_MANAGER', 'SITE_MANAGER', 'SNR_ACCOUNTANT', 'ACCOUNTANT', 'SECRETARY', 'SUPERVISOR', 'GATEMAN', 'GATE'];
   if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'invalid role' });
-  if (role === 'SITE_MANAGER' && !site_id) return res.status(400).json({ error: 'site required for a Manager' });
+  // Site-bound roles keep a site; Manager & Secretary must have one.
+  const SITE_BOUND = ['SITE_MANAGER', 'SECRETARY', 'SUPERVISOR', 'GATEMAN', 'GATE'];
+  const SITE_REQUIRED = ['SITE_MANAGER', 'SECRETARY'];
+  if (SITE_REQUIRED.includes(role) && !site_id) return res.status(400).json({ error: 'site required for this role' });
+  const memberSite = SITE_BOUND.includes(role) ? (site_id || null) : null;
   const lower = email.toLowerCase();
   const existing = await qone('SELECT * FROM users WHERE lower(email)=lower(?)', [lower]);
   if (existing) {
     try {
       await qrun('INSERT INTO memberships (id,user_id,tenant_id,role,site_id) VALUES (?,?,?,?,?) ON CONFLICT (user_id,tenant_id) DO NOTHING',
-        [uuid(), existing.id, req.ctx.tenant_id, role, role === 'SITE_MANAGER' ? site_id : null]);
+        [uuid(), existing.id, req.ctx.tenant_id, role, memberSite]);
     } catch { return res.status(409).json({ error: 'this user is already a member' }); }
     await audit(req.ctx.tenant_id, req.user.id, 'ADD_MEMBER', 'membership', existing.id, { email, role });
     emailInvite(req.ctx.tenant_id, req.user.id, lower, role);   // notify (fire-and-forget)
@@ -259,7 +263,7 @@ router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
   }
   try {
     await qrun('INSERT INTO invites (id,tenant_id,email,role,site_id,invited_by) VALUES (?,?,?,?,?,?) ON CONFLICT (tenant_id,email) DO NOTHING',
-      [uuid(), req.ctx.tenant_id, lower, role, role === 'SITE_MANAGER' ? site_id : null, req.user.id]);
+      [uuid(), req.ctx.tenant_id, lower, role, memberSite, req.user.id]);
   } catch { return res.status(409).json({ error: 'already invited' }); }
   await audit(req.ctx.tenant_id, req.user.id, 'INVITE', 'invite', lower, { role });
   emailInvite(req.ctx.tenant_id, req.user.id, lower, role);   // notify (fire-and-forget)
@@ -382,7 +386,7 @@ router.get('/reports', requireAuth, async (req, res) => {
   const { site, from, to } = req.query; const where = [], args = [];
   if (s.ctx) {
     where.push('r.tenant_id=?'); args.push(s.ctx.tenant_id);
-    if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
+    if (siteBound(s.ctx)) { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
     else if (site) { where.push('r.site_id=?'); args.push(site); }
   }
   if (from) { where.push('r.report_date>=?'); args.push(from); }
@@ -397,14 +401,14 @@ router.get('/reports/:id', requireAuth, async (req, res) => {
   const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, r.tenant_id);
-  if (!c || (c.role === 'SITE_MANAGER' && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
+  if (!c || (siteBound(c) && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
   res.json(reportView(r));
 });
 router.delete('/reports/:id', requireAuth, async (req, res) => {
   const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, r.tenant_id);
-  if (!c || (c.role === 'SITE_MANAGER' && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
+  if (!c || (siteBound(c) && c.site_id !== r.site_id)) return res.status(404).json({ error: 'not found' });
   const allowed = r.created_by === req.user.id || req.user.is_superadmin || atLeast(c.role, 'GENERAL_MANAGER');
   if (!allowed) return res.status(403).json({ error: "only the report's creator or a manager can delete it" });
   await qrun('DELETE FROM daily_reports WHERE id=?', [r.id]);
@@ -412,9 +416,9 @@ router.delete('/reports/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/reports', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/reports', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {};
-  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site_id;
   if (!site_id || !b.report_date) return res.status(400).json({ error: 'site_id and report_date required' });
   const site = await siteById(site_id);
   if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
@@ -480,7 +484,7 @@ router.get('/dashboard', requireAuth, async (req, res) => {
   const { from, to } = req.query; const where = [], args = [];
   if (s.ctx) {
     where.push('r.tenant_id=?'); args.push(s.ctx.tenant_id);
-    if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
+    if (siteBound(s.ctx)) { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
   }
   if (from) { where.push('r.report_date>=?'); args.push(from); }
   if (to) { where.push('r.report_date<=?'); args.push(to); }
@@ -498,7 +502,7 @@ router.get('/documents', requireAuth, async (req, res) => {
   const { category, site } = req.query; const where = [], args = [];
   if (s.ctx) {
     where.push('d.tenant_id=?'); args.push(s.ctx.tenant_id);
-    if (s.ctx.role === 'SITE_MANAGER') { where.push('(d.site_id=? OR d.site_id IS NULL)'); args.push(s.ctx.site_id); }
+    if (siteBound(s.ctx)) { where.push('(d.site_id=? OR d.site_id IS NULL)'); args.push(s.ctx.site_id); }
   }
   if (category) { where.push('d.category=?'); args.push(category); }
   if (site) { where.push('d.site_id=?'); args.push(site); }
@@ -508,10 +512,10 @@ router.get('/documents', requireAuth, async (req, res) => {
   res.json(await qall(sql, args));
 });
 
-router.post('/documents', requireAuth, needTenant('SITE_MANAGER'), upload.array('files', 10), async (req, res) => {
+router.post('/documents', requireAuth, needTenant('SECRETARY'), upload.array('files', 10), async (req, res) => {
   const files = req.files || []; if (!files.length) return res.status(400).json({ error: 'no files uploaded' });
   const b = req.body || {};
-  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : (b.site_id || null);
   const out = [];
   for (const f of files) {
     const id = uuid();
@@ -529,7 +533,7 @@ router.get('/documents/:id/download', requireAuth, async (req, res) => {
   const d = await qone('SELECT * FROM documents WHERE id=?', [req.params.id]);
   if (!d) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, d.tenant_id);
-  if (!c || (c.role === 'SITE_MANAGER' && d.site_id && d.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
+  if (!c || (siteBound(c) && d.site_id && d.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
   const p = path.join(UPLOAD_DIR, d.stored_name);
   if (!fs.existsSync(p)) return res.status(410).json({ error: 'file missing on disk' });
   res.download(p, d.file_name);
@@ -571,7 +575,7 @@ async function aiContext(req) {
   if (s.error || s.all) return { scope: 'all companies', note: 'pick a workspace for company-specific figures' };
   const t = await tenantById(s.ctx.tenant_id);
   const where = ['r.tenant_id=?']; const args = [s.ctx.tenant_id];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
+  if (siteBound(s.ctx)) { where.push('r.site_id=?'); args.push(s.ctx.site_id); }
   const W = 'WHERE ' + where.join(' AND ');
   const totals = await qone(`SELECT COALESCE(SUM(total_sales),0) sales, COALESCE(SUM(total_cash),0) cash,
     COALESCE(SUM(total_deposit),0) deposit, COALESCE(SUM(diesel+expenses),0) costs, COUNT(*) reports FROM daily_reports r ${W}`, args);
@@ -583,7 +587,7 @@ async function aiContext(req) {
 
 async function daybookMetric(tenant_id, ctx, input) {
   const args = [tenant_id]; let siteF = '';
-  if (ctx.role === 'SITE_MANAGER') { siteF = ' AND site_id=$2'; args.push(ctx.site_id); }
+  if (siteBound(ctx)) { siteF = ' AND site_id=$2'; args.push(ctx.site_id); }
   const n = args.length;
   const dateW = (col) => {
     let w = ''; let i = args.length;
@@ -629,7 +633,7 @@ ${JSON.stringify(ctx)}`;
     if (sc.ctx) {
       const tenant_id = sc.ctx.tenant_id;
       let allowed = (await qall('SELECT code FROM sites WHERE tenant_id=?', [tenant_id])).map((s) => s.code);
-      if (sc.ctx.role === 'SITE_MANAGER') { const me = await siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
+      if (sc.siteBound(ctx)) { const me = await siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
       const pos = await posEnabled(tenant_id);
       const resolveSites = (input) => {
         if (!input.site) return allowed;
@@ -676,7 +680,7 @@ ${JSON.stringify(ctx)}`;
 async function siteAccess(req, siteId) {
   const site = await siteById(siteId); if (!site) return null;
   const c = await contextFor(req.user, site.tenant_id); if (!c) return null;
-  if (c.role === 'SITE_MANAGER' && c.site_id !== site.id) return null;
+  if (siteBound(c) && c.site_id !== site.id) return null;
   return { site, ctx: c };
 }
 
@@ -701,7 +705,7 @@ router.get('/sales/by-date', requireAuth, async (req, res) => {
   if (!await posEnabled(s.ctx.tenant_id)) return res.status(503).json({ error: 'POS not connected for this company', code: 'no_pos' });
   const date = req.query.date; if (!date) return res.status(400).json({ error: 'date required' });
   let codes = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((x) => x.code);
-  if (s.ctx.role === 'SITE_MANAGER') { const me = await siteById(s.ctx.site_id); codes = me ? [me.code] : []; }
+  if (siteBound(s.ctx)) { const me = await siteById(s.ctx.site_id); codes = me ? [me.code] : []; }
   if (!codes.length) return res.json({ date, rows: [], total: 0 });
   try {
     const rows = await sales.query({ from: date, to: date, sites: codes, groupBy: 'site' });
@@ -739,7 +743,7 @@ const STAFF_COLS = `id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext
 router.get('/staff', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   if (s.all) return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff ORDER BY full_name`));
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name`, [s.ctx.tenant_id, s.ctx.site_id]));
+  if (siteBound(s.ctx)) return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name`, [s.ctx.tenant_id, s.ctx.site_id]));
   const site = req.query.site;
   res.json(site ? await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name`, [s.ctx.tenant_id, site])
     : await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? ORDER BY full_name`, [s.ctx.tenant_id]));
@@ -750,7 +754,7 @@ router.get('/staff/:id/face', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: 'select a workspace' });
   const st = await qone('SELECT id,tenant_id,site_id,face_descriptor FROM staff WHERE id=?', [req.params.id]);
   if (!st || st.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
-  if (s.ctx.role === 'SITE_MANAGER' && st.site_id !== s.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(s.ctx) && st.site_id !== s.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const t = await qone('SELECT face_match_threshold FROM tenants WHERE id=?', [s.ctx.tenant_id]);
   res.json({ enrolled: !!st.face_descriptor, descriptor: st.face_descriptor ? J(st.face_descriptor, null) : null, threshold: t?.face_match_threshold ?? 0.55 });
 });
@@ -773,10 +777,10 @@ router.patch('/settings', requireAuth, needTenant('ADMIN'), async (req, res) => 
 });
 
 // Enrol / update a staff member's face descriptor (128 floats).
-router.post('/staff/:id/face', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/staff/:id/face', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const st = await qone('SELECT id,tenant_id,site_id FROM staff WHERE id=?', [req.params.id]);
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
-  if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(req.ctx) && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const d = (req.body || {}).descriptor;
   if (!Array.isArray(d) || d.length !== 128 || !d.every((x) => typeof x === 'number' && isFinite(x))) {
     return res.status(400).json({ error: 'descriptor must be 128 numbers' });
@@ -785,15 +789,15 @@ router.post('/staff/:id/face', requireAuth, needTenant('SITE_MANAGER'), async (r
   await audit(req.ctx.tenant_id, req.user.id, 'FACE_ENROLL', 'staff', st.id, {});
   res.json({ ok: true });
 });
-router.delete('/staff/:id/face', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.delete('/staff/:id/face', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const st = await qone('SELECT id,tenant_id,site_id FROM staff WHERE id=?', [req.params.id]);
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   await qrun('UPDATE staff SET face_descriptor=NULL, face_enrolled_at=NULL WHERE id=?', [st.id]);
   res.json({ ok: true });
 });
-router.post('/staff', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/staff', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {};
-  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site_id;
   if (!b.full_name || !site_id) return res.status(400).json({ error: 'full_name and site_id required' });
   const site = await siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
   const id = uuid();
@@ -802,13 +806,13 @@ router.post('/staff', requireAuth, needTenant('SITE_MANAGER'), async (req, res) 
   catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
   res.status(201).json(await qone('SELECT * FROM staff WHERE id=?', [id]));
 });
-router.patch('/staff/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.patch('/staff/:id', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const st = await qone('SELECT * FROM staff WHERE id=?', [req.params.id]);
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
-  if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(req.ctx) && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const f = req.body || {};
   await qrun('UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,status=?,site_id=? WHERE id=?',
-    [f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, f.pay_type ?? st.pay_type, f.status ?? st.status, req.ctx.role === 'SITE_MANAGER' ? st.site_id : (f.site_id ?? st.site_id), st.id]);
+    [f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, f.pay_type ?? st.pay_type, f.status ?? st.status, siteBound(req.ctx) ? st.site_id : (f.site_id ?? st.site_id), st.id]);
   res.json(await qone('SELECT * FROM staff WHERE id=?', [st.id]));
 });
 router.post('/staff/import', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
@@ -890,7 +894,7 @@ router.get('/attendance', requireAuth, async (req, res) => {
   } else {
     where.push('a.work_date=?'); args.push(req.query.date || new Date().toISOString().slice(0, 10));
   }
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('a.site_id=?'); args.push(s.ctx.site_id); }
+  if (siteBound(s.ctx)) { where.push('a.site_id=?'); args.push(s.ctx.site_id); }
   else if (req.query.site) { where.push('a.site_id=?'); args.push(req.query.site); }
   const rows = await qall(`SELECT a.*, st.full_name, si.name site_name FROM attendance a
     LEFT JOIN staff st ON st.id=a.staff_id LEFT JOIN sites si ON si.id=a.site_id
@@ -901,12 +905,12 @@ router.get('/attendance', requireAuth, async (req, res) => {
     match_score: r.match_score, in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
   })));
 });
-router.post('/attendance/clock', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/attendance/clock', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {};
   const kind = b.kind === 'out' ? 'out' : 'in';
   const st = await qone('SELECT * FROM staff WHERE id=?', [b.staff_id]);
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid staff' });
-  if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(req.ctx) && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const date = (b.work_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   let photo = null, sig = null;
   try { photo = saveDataUrl(b.photo, kind === 'out' ? 'out' : 'in'); sig = saveDataUrl(b.signature, 'sig'); }
@@ -937,7 +941,7 @@ router.get('/attendance/:id/img/:which', requireAuth, async (req, res) => {
   const a = await qone('SELECT * FROM attendance WHERE id=?', [req.params.id]);
   if (!a) return res.status(404).end();
   const c = await contextFor(req.user, a.tenant_id);
-  if (!c || (c.role === 'SITE_MANAGER' && a.site_id !== c.site_id)) return res.status(404).end();
+  if (!c || (siteBound(c) && a.site_id !== c.site_id)) return res.status(404).end();
   const name = req.params.which === 'out' ? a.photo_out : req.params.which === 'sig' ? a.signature : a.photo_in;
   if (!name) return res.status(404).end();
   const p = path.join(ATT_DIR, name);
@@ -951,7 +955,7 @@ router.get('/timesheets', requireAuth, async (req, res) => {
   const { site, from, to, date } = req.query; const where = [], args = [];
   if (s.ctx) {
     where.push('t.tenant_id=?'); args.push(s.ctx.tenant_id);
-    if (s.ctx.role === 'SITE_MANAGER') { where.push('t.site_id=?'); args.push(s.ctx.site_id); }
+    if (siteBound(s.ctx)) { where.push('t.site_id=?'); args.push(s.ctx.site_id); }
     else if (site) { where.push('t.site_id=?'); args.push(site); }
   }
   if (date) { where.push('t.work_date=?'); args.push(date); }
@@ -960,9 +964,9 @@ router.get('/timesheets', requireAuth, async (req, res) => {
   const sql = `SELECT t.*, st.full_name FROM timesheets t JOIN staff st ON st.id=t.staff_id ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY t.work_date DESC, st.full_name LIMIT 2000`;
   res.json(await qall(sql, args));
 });
-router.post('/timesheets', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/timesheets', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {}; const work_date = b.work_date; const entries = Array.isArray(b.entries) ? b.entries : [];
-  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : b.site_id;
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site_id;
   if (!work_date || !site_id) return res.status(400).json({ error: 'work_date and site_id required' });
   let n = 0;
   for (const e of entries) {
@@ -992,12 +996,12 @@ async function tsSummary(tenant_id, site, from, to) {
 }
 router.get('/timesheets/summary', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
-  const site = s.ctx.role === 'SITE_MANAGER' ? s.ctx.site_id : req.query.site;
+  const site = siteBound(s.ctx) ? s.ctx.site_id : req.query.site;
   res.json(await tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to));
 });
 router.get('/timesheets/summary.csv', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(400).send(s.error || 'select a workspace');
-  const site = s.ctx.role === 'SITE_MANAGER' ? s.ctx.site_id : req.query.site;
+  const site = siteBound(s.ctx) ? s.ctx.site_id : req.query.site;
   const rows = await tsSummary(s.ctx.tenant_id, site, req.query.from, req.query.to);
   const csv = ['Staff,Site,Days,Hours,Bags Bagged,Bags Loaded',
     ...rows.map((r) => [r.staff, r.site, r.days, r.hours, r.bags_bagged, r.bags_loaded].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))].join('\n');
@@ -1019,14 +1023,14 @@ router.get('/generators', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   const SEL = 'SELECT g.*, st.name site_name FROM generators g LEFT JOIN sites st ON st.id=g.site_id';
   if (s.all) return res.json(await qall(`${SEL} ORDER BY st.name, g.name`));
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall(`${SEL} WHERE g.tenant_id=? AND g.site_id=? ORDER BY g.name`, [s.ctx.tenant_id, s.ctx.site_id]));
+  if (siteBound(s.ctx)) return res.json(await qall(`${SEL} WHERE g.tenant_id=? AND g.site_id=? ORDER BY g.name`, [s.ctx.tenant_id, s.ctx.site_id]));
   const site = req.query.site;
   res.json(site ? await qall(`${SEL} WHERE g.tenant_id=? AND g.site_id=? ORDER BY g.name`, [s.ctx.tenant_id, site])
     : await qall(`${SEL} WHERE g.tenant_id=? ORDER BY st.name, g.name`, [s.ctx.tenant_id]));
 });
-router.post('/generators', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/generators', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {};
-  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : (b.site_id || null);
   if (!b.name) return res.status(400).json({ error: 'name required' });
   if (site_id) { const site = await siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' }); }
   const id = uuid();
@@ -1036,10 +1040,10 @@ router.post('/generators', requireAuth, needTenant('SITE_MANAGER'), async (req, 
   await audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'generator', id, { name: b.name });
   res.status(201).json(await qone('SELECT * FROM generators WHERE id=?', [id]));
 });
-router.patch('/generators/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.patch('/generators/:id', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
   if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
-  if (req.ctx.role === 'SITE_MANAGER' && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(req.ctx) && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const f = req.body || {};
   await qrun(`UPDATE generators SET name=?,fuel_type=?,make_model=?,capacity_kva=?,serial_no=?,purchase_date=?,purchase_cost=?,status=?,notes=? WHERE id=?`,
     [f.name ?? g.name, f.fuel_type ?? g.fuel_type, f.make_model ?? g.make_model, f.capacity_kva ?? g.capacity_kva, f.serial_no ?? g.serial_no, f.purchase_date ?? g.purchase_date, f.purchase_cost ?? g.purchase_cost, f.status ?? g.status, f.notes ?? g.notes, g.id]);
@@ -1049,7 +1053,7 @@ router.get('/generators/:id/logs', requireAuth, async (req, res) => {
   const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
   if (!g) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, g.tenant_id);
-  if (!c || (c.role === 'SITE_MANAGER' && g.site_id && g.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
+  if (!c || (siteBound(c) && g.site_id && g.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
   const { from, to } = req.query; const where = ['generator_id=?'], args = [g.id];
   if (from) { where.push('log_date>=?'); args.push(from); }
   if (to) { where.push('log_date<=?'); args.push(to); }
@@ -1057,10 +1061,10 @@ router.get('/generators/:id/logs', requireAuth, async (req, res) => {
   const tot = await qone(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE ${where.join(' AND ')} AND type='DIESEL'`, args);
   res.json({ logs, diesel_total: tot });
 });
-router.post('/generators/:id/logs', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/generators/:id/logs', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
   if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
-  if (req.ctx.role === 'SITE_MANAGER' && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(req.ctx) && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const b = req.body || {}; const type = (b.type || 'DIESEL').toUpperCase();
   if (!['DIESEL', 'MAINTENANCE', 'NOTE'].includes(type)) return res.status(400).json({ error: 'invalid type' });
   const id = uuid();
@@ -1100,13 +1104,13 @@ router.patch('/products/:id', requireAuth, needTenant('GENERAL_MANAGER'), async 
     [f.name ?? p.name, f.category ?? p.category, f.price ?? p.price, f.cost ?? p.cost, f.sku ?? p.sku, f.unit ?? p.unit, f.track_stock != null ? (f.track_stock ? 1 : 0) : p.track_stock, f.status ?? p.status, p.id]);
   res.json(await qone('SELECT * FROM products WHERE id=?', [p.id]));
 });
-router.post('/products/:id/stock', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/products/:id/stock', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const p = await qone('SELECT * FROM products WHERE id=?', [req.params.id]);
   if (!p || p.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   const b = req.body || {}; const qty = +b.qty || 0; const type = (b.type || 'ADJUST').toUpperCase();
   if (!qty) return res.status(400).json({ error: 'qty required' });
   await qrun('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,unit_cost,note,created_by) VALUES (?,?,?,?,?,?,?,?,?)',
-    [uuid(), p.tenant_id, p.id, req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null), ['PURCHASE', 'ADJUST'].includes(type) ? type : 'ADJUST', qty, +b.unit_cost || null, b.note || null, req.user.id]);
+    [uuid(), p.tenant_id, p.id, siteBound(req.ctx) ? req.ctx.site_id : (b.site_id || null), ['PURCHASE', 'ADJUST'].includes(type) ? type : 'ADJUST', qty, +b.unit_cost || null, b.note || null, req.user.id]);
   await qrun('UPDATE products SET stock_qty=stock_qty+? WHERE id=?', [qty, p.id]);
   res.json(await qone('SELECT * FROM products WHERE id=?', [p.id]));
 });
@@ -1117,7 +1121,7 @@ router.get('/customers', requireAuth, async (req, res) => {
   res.json(q ? await qall("SELECT * FROM customers WHERE tenant_id=? AND name LIKE ? ORDER BY name LIMIT 50", [s.ctx.tenant_id, '%' + q + '%'])
     : await qall('SELECT * FROM customers WHERE tenant_id=? ORDER BY name LIMIT 200', [s.ctx.tenant_id]));
 });
-router.post('/customers', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+router.post('/customers', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'name required' });
   const name = b.name.trim();
   // Upsert: if name already exists for this tenant return existing record (names are unique per tenant)
@@ -1144,7 +1148,7 @@ router.post('/pos/sales', requireAuth, needTenant('SECRETARY'), async (req, res)
   }
   const items = Array.isArray(b.items) ? b.items.filter((i) => i.product_id && (+i.qty > 0)) : [];
   if (!items.length) return res.status(400).json({ error: 'no items' });
-  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : (b.site_id || null);
   const lines = [];
   for (const it of items) {
     const p = await qone('SELECT * FROM products WHERE id=? AND tenant_id=?', [it.product_id, req.ctx.tenant_id]);
@@ -1192,7 +1196,7 @@ router.post('/pos/sales', requireAuth, needTenant('SECRETARY'), async (req, res)
 router.get('/pos/sales', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const { from, to, site, source } = req.query; const where = ['p.tenant_id=?'], args = [s.ctx.tenant_id];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
+  if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
   if (from) { where.push('p.sale_date>=?'); args.push(from); }
   if (to) { where.push('p.sale_date<=?'); args.push(to); }
   if (source === 'app') where.push('p.ext_id IS NULL');   // in-app sales only (exclude migrated history)
@@ -1204,7 +1208,7 @@ router.get('/pos/sales/:id', requireAuth, async (req, res) => {
   const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
-  if (!c || (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
+  if (!c || (siteBound(c) && sale.site_id && sale.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
   res.json({ ...sale, items: J(sale.items_json, []), tenant: await tenantById(sale.tenant_id), site: sale.site_id ? await siteById(sale.site_id) : null });
 });
 
@@ -1252,9 +1256,9 @@ router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
   // Gateman / Security release goods; Managers+ may also.  Supervisors only load.
-  const canExit = c && (c.role === 'GATEMAN' || c.role === 'GATE' || atLeast(c.role, 'SITE_MANAGER'));
+  const canExit = c && (c.role === 'GATEMAN' || c.role === 'GATE' || atLeast(c.role, 'SECRETARY'));
   if (!canExit) return res.status(403).json({ error: 'Not permitted to release/exit' });
-  if (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(c) && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   if (sale.exited_at) return res.status(400).json({ error: 'Already exited', exited_at: sale.exited_at });
   const ts = nowS();
   await qrun('UPDATE pos_sales SET exited_at=? WHERE id=?', [ts, sale.id]);
@@ -1269,9 +1273,9 @@ router.post('/pos/sales/:id/loaded', requireAuth, async (req, res) => {
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
   // Supervisors mark goods loaded; Managers+ may also.  Gatemen only release.
-  const canLoad = c && (c.role === 'SUPERVISOR' || atLeast(c.role, 'SITE_MANAGER'));
+  const canLoad = c && (c.role === 'SUPERVISOR' || atLeast(c.role, 'SECRETARY'));
   if (!canLoad) return res.status(403).json({ error: 'Not permitted to mark loaded' });
-  if (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (siteBound(c) && sale.site_id && sale.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   if (sale.loaded_at) return res.status(400).json({ error: 'Already marked as loaded', loaded_at: sale.loaded_at });
   const ts = nowS();
   await qrun('UPDATE pos_sales SET loaded_at=? WHERE id=?', [ts, sale.id]);
@@ -1284,7 +1288,7 @@ router.get('/pos/summary', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const date = req.query.date; if (!date) return res.status(400).json({ error: 'date required' });
   const where = ['tenant_id=?', 'sale_date=?'], args = [s.ctx.tenant_id, date];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
+  if (siteBound(s.ctx)) { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
   const rows = await qall(`SELECT * FROM pos_sales WHERE ${where.join(' AND ')}`, args);
   const total = rows.reduce((a, r) => a + (r.total || 0), 0);
   const pay = {}; const prod = {};
@@ -1309,7 +1313,7 @@ router.get('/pos/range', requireAuth, async (req, res) => {
   if (from && to && await posEnabled(s.ctx.tenant_id)) {
     try {
       let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
-      if (s.ctx.role === 'SITE_MANAGER') {
+      if (siteBound(s.ctx)) {
         const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]);
         sites = sc ? [sc.code] : sites;
       } else if (site) {
@@ -1336,7 +1340,7 @@ router.get('/pos/range', requireAuth, async (req, res) => {
   }
 
   const where = ['tenant_id=?'], args = [s.ctx.tenant_id];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
+  if (siteBound(s.ctx)) { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
   if (from) { where.push('sale_date>=?'); args.push(from); }
   if (to) { where.push('sale_date<=?'); args.push(to); }
   const W = 'WHERE ' + where.join(' AND ');
@@ -1365,12 +1369,12 @@ router.get('/pos/recent', requireAuth, async (req, res) => {
   if (await posEnabled(s.ctx.tenant_id)) {
     try {
       let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
-      if (s.ctx.role === 'SITE_MANAGER') { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
+      if (siteBound(s.ctx)) { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
       return res.json(await sales.recentOrders({ sites, date, limit }));
     } catch (e) { /* fall through to pos_sales */ }
   }
   const where = ['p.tenant_id=?', 'p.sale_date=?'], args = [s.ctx.tenant_id, date];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('p.site_id=?'); args.push(s.ctx.site_id); }
+  if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); }
   const rows = await qall(`SELECT p.id, p.receipt_no, p.total amount, p.payment_method, p.customer_name customer, s.name site, p.created_at
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT ${limit}`, args);
   res.json(rows.map((r) => ({ id: String(r.id), receipt_no: r.receipt_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, at: r.created_at })));
@@ -1386,13 +1390,13 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
   if (await posEnabled(s.ctx.tenant_id)) {
     try {
       let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
-      if (s.ctx.role === 'SITE_MANAGER') { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
+      if (siteBound(s.ctx)) { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
       else if (site) { const sc = await qone('SELECT code FROM sites WHERE id=?', [site]); if (sc) sites = [sc.code]; }
       return res.json(await sales.listOrders({ from, to, sites, limit: 800 }));
     } catch (e) { /* fall through */ }
   }
   const where = ['p.tenant_id=?', 'p.sale_date>=?', 'p.sale_date<=?'], args = [s.ctx.tenant_id, from, to];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
+  if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
   const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, s.name site, p.created_at
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
   res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, items: J(r.items_json, []), at: r.created_at })));
@@ -1403,7 +1407,7 @@ router.get('/reconciliations', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const { from, to, site, kind, status } = req.query;
   const where = ['r.tenant_id=?'], args = [s.ctx.tenant_id];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('(r.site_id=? OR r.site_id IS NULL)'); args.push(s.ctx.site_id); } else if (site) { where.push('r.site_id=?'); args.push(site); }
+  if (siteBound(s.ctx)) { where.push('(r.site_id=? OR r.site_id IS NULL)'); args.push(s.ctx.site_id); } else if (site) { where.push('r.site_id=?'); args.push(site); }
   if (from) { where.push('r.txn_date>=?'); args.push(from); }
   if (to) { where.push('r.txn_date<=?'); args.push(to); }
   if (kind) { where.push('r.kind=?'); args.push(kind); }
@@ -1416,7 +1420,7 @@ router.get('/reconciliations/summary', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const { from, to, site } = req.query;
   const where = ['tenant_id=?'], args = [s.ctx.tenant_id];
-  if (s.ctx.role === 'SITE_MANAGER') { where.push('(site_id=? OR site_id IS NULL)'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
+  if (siteBound(s.ctx)) { where.push('(site_id=? OR site_id IS NULL)'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
   if (from) { where.push('txn_date>=?'); args.push(from); }
   if (to) { where.push('txn_date<=?'); args.push(to); }
   const byKind = await qall(`SELECT kind, COALESCE(SUM(amount),0) amount, COUNT(*) n,
@@ -1424,10 +1428,10 @@ router.get('/reconciliations/summary', requireAuth, async (req, res) => {
     FROM reconciliations WHERE ${where.join(' AND ')} GROUP BY kind ORDER BY amount DESC`, args);
   res.json({ byKind: byKind.map((r) => ({ kind: r.kind, amount: Number(r.amount), n: Number(r.n), pending: Number(r.pending), confirmed: Number(r.confirmed) })) });
 });
-router.post('/reconciliations', requireAuth, needTenant('SITE_MANAGER'), upload.single('image'), async (req, res) => {
+router.post('/reconciliations', requireAuth, needTenant('SECRETARY'), upload.single('image'), async (req, res) => {
   const b = req.body || {};
   const kind = (b.kind || 'CASH_DEPOSIT').toUpperCase();
-  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : (b.site_id || null);
   const id = uuid();
   await qrun(`INSERT INTO reconciliations (id,tenant_id,site_id,kind,txn_date,amount,amount_confirmed,bank,account_name,ref,status,remarks,image,recorded_by)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -1453,7 +1457,7 @@ router.get('/reconciliations/:id/image', requireAuth, async (req, res) => {
   const r = await qone('SELECT * FROM reconciliations WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).end();
   const c = await contextFor(req.user, r.tenant_id);
-  if (!c || (c.role === 'SITE_MANAGER' && r.site_id && r.site_id !== c.site_id)) return res.status(404).end();
+  if (!c || (siteBound(c) && r.site_id && r.site_id !== c.site_id)) return res.status(404).end();
   if (!r.image) return res.status(404).end();
   if (/^https?:\/\//.test(r.image)) return res.redirect(r.image);   // imported proof lives on the old fido server
   const p = path.join(UPLOAD_DIR, r.image);
@@ -1466,7 +1470,7 @@ router.get('/chat/channels', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const out = [{ id: 'team', name: 'Team', kind: 'team' }];
   let sites = await qall('SELECT id, name, code FROM sites WHERE tenant_id=? ORDER BY name', [s.ctx.tenant_id]);
-  if (s.ctx.role === 'SITE_MANAGER') sites = sites.filter((x) => x.id === s.ctx.site_id);
+  if (siteBound(s.ctx)) sites = sites.filter((x) => x.id === s.ctx.site_id);
   for (const x of sites) out.push({ id: x.id, name: x.name, code: x.code, kind: 'site' });
   res.json(out);
 });

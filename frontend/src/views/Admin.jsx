@@ -44,8 +44,8 @@ function MemberForm({ sites = [], onInvite, onClose }) {
   const [role, setRole] = useState('SECRETARY');
   const [siteId, setSiteId] = useState(sites[0]?.id || '');
   const [saving, setSaving] = useState(false);
-  const SITE_ROLES = ['SITE_MANAGER', 'GATEMAN', 'SUPERVISOR'];   // benefit from a site
-  const needsSite = role === 'SITE_MANAGER';
+  const SITE_ROLES = ['SITE_MANAGER', 'SECRETARY', 'GATEMAN', 'SUPERVISOR'];   // site-bound
+  const needsSite = role === 'SITE_MANAGER' || role === 'SECRETARY';
   const invite = async () => {
     if (!email) return toast('Email required', 'err');
     if (needsSite && !siteId) return toast('Pick a site for this Manager', 'err');
@@ -68,7 +68,7 @@ function MemberForm({ sites = [], onInvite, onClose }) {
           <option value="SUPERVISOR">{ROLE_LABELS.SUPERVISOR} — scan &amp; mark loaded</option>
         </optgroup>
         <optgroup label="Office (privilege ladder)">
-          <option value="SECRETARY">{ROLE_LABELS.SECRETARY} — sales, expenses, docs</option>
+          <option value="SECRETARY">{ROLE_LABELS.SECRETARY} — one site: sales, expenses, attendance, generators</option>
           <option value="ACCOUNTANT">{ROLE_LABELS.ACCOUNTANT} — + reconcile</option>
           <option value="SNR_ACCOUNTANT">{ROLE_LABELS.SNR_ACCOUNTANT} — + payroll</option>
           <option value="SITE_MANAGER">{ROLE_LABELS.SITE_MANAGER} — site operations</option>

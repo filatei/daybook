@@ -12,11 +12,8 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     const rows = await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`));
     return rows.map((r) => ({ label: r.vendor || r.label, sub: r.sub || '' }));
   }, [tenant]);
-  let items = [];
-  try { items = expense?.items_json ? JSON.parse(expense.items_json) : []; } catch { items = []; }
   const [f, setF] = useState({
     category: expense?.category || categories[0] || 'OTHER',
-    amount: expense?.amount ?? '',
     description: expense?.description || '',
     expense_date: expense?.expense_date || today(),
     site_id: expense?.site_id || sites[0]?.id || '',
@@ -24,15 +21,30 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
   });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
 
+  // Line items: item name, qty, rate → amount = qty × rate.
+  const [rows, setRows] = useState(() => {
+    let init = [];
+    try { init = expense?.items_json ? JSON.parse(expense.items_json) : []; } catch { init = []; }
+    if (init.length) return init.map((it) => ({ name: it.name || '', qty: it.qty ?? '', price: it.price ?? '' }));
+    // legacy single-amount expense → one item from its amount
+    if (expense && expense.amount) return [{ name: expense.description || expense.category || 'Item', qty: '1', price: String(expense.amount) }];
+    return [{ name: '', qty: '1', price: '' }];
+  });
+  const setRow = (i, k, v) => setRows((p) => p.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
+  const addRow = () => setRows((p) => [...p, { name: '', qty: '1', price: '' }]);
+  const delRow = (i) => setRows((p) => (p.length > 1 ? p.filter((_, j) => j !== i) : p));
+  const lineAmt = (r) => (parseFloat(r.qty) || 0) * (parseFloat(r.price) || 0);
+  const total = rows.reduce((s, r) => s + lineAmt(r), 0);
+
   const save = async () => {
-    if (!f.amount || !f.expense_date) return toast('Amount and date required', 'err');
+    const items = rows.filter((r) => r.name.trim() && lineAmt(r) > 0).map((r) => ({ name: r.name.trim(), qty: +r.qty || 0, price: +r.price || 0 }));
+    if (!items.length) return toast('Add at least one item with a name, quantity and rate', 'err');
+    if (!f.expense_date) return toast('Date required', 'err');
     setSaving(true);
     try {
-      if (expense?.id) {
-        await api(scoped(`/expenses/${expense.id}`), { method: 'PATCH', body: f });
-      } else {
-        await api(scoped('/expenses'), { method: 'POST', body: f });
-      }
+      const body = { ...f, items, amount: total };
+      if (expense?.id) await api(scoped(`/expenses/${expense.id}`), { method: 'PATCH', body });
+      else await api(scoped('/expenses'), { method: 'POST', body });
       toast('Saved ✓', 'ok'); onSave(); onClose();
     } catch (e) { toast(e.message, 'err'); }
     setSaving(false);
@@ -55,21 +67,26 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
           <datalist id="exp-cats">{categories.map((c) => <option key={c} value={c} />)}</datalist>
         </div>
       </div>
-      <label className="fl">Amount (₦)</label>
-      <input type="number" className="input" value={f.amount} onChange={(e) => set('amount', e.target.value)} />
-      <label className="fl">Description</label>
-      <input type="text" className="input" value={f.description} onChange={(e) => set('description', e.target.value)} />
-      {items.length > 0 && (
-        <div style={{ marginTop: 10, background: 'var(--bg-soft, #f8fafc)', border: '1px solid var(--line)', borderRadius: 10, padding: '8px 12px' }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.5px', marginBottom: 4 }}>Line items</div>
-          {items.map((it, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
-              <span>{it.name}{it.qty ? ` ×${it.qty}` : ''}{it.category ? ` · ${it.category}` : ''}</span>
-              <span style={{ fontWeight: 600 }}>{it.amount != null ? ngn(it.amount) : ''}</span>
-            </div>
-          ))}
+      <label className="fl">Items</label>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 56px 88px 70px 26px', gap: 6, fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.4px', padding: '0 2px 4px' }}>
+        <span>Item</span><span style={{ textAlign: 'center' }}>Qty</span><span style={{ textAlign: 'right' }}>Rate</span><span style={{ textAlign: 'right' }}>Amount</span><span />
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 56px 88px 70px 26px', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+          <input className="input" style={{ padding: '8px 10px' }} placeholder="Item name" value={r.name} onChange={(e) => setRow(i, 'name', e.target.value)} />
+          <input className="input" style={{ padding: '8px 6px', textAlign: 'center' }} type="number" inputMode="numeric" value={r.qty} onChange={(e) => setRow(i, 'qty', e.target.value)} />
+          <input className="input" style={{ padding: '8px 8px', textAlign: 'right' }} type="number" inputMode="decimal" placeholder="0" value={r.price} onChange={(e) => setRow(i, 'price', e.target.value)} />
+          <div style={{ textAlign: 'right', fontWeight: 700, fontSize: 13 }}>{ngn(lineAmt(r))}</div>
+          <button onClick={() => delRow(i)} style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 6, width: 26, height: 26, cursor: 'pointer', fontSize: 14 }}>×</button>
         </div>
-      )}
+      ))}
+      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px', marginBottom: 8 }} onClick={addRow}>+ Add item</button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontWeight: 800, fontSize: 18, padding: '6px 2px 4px' }}>
+        <span>Total</span><span style={{ color: 'var(--brand-d)' }}>{ngn(total)}</span>
+      </div>
+
+      <label className="fl">Description / note</label>
+      <input type="text" className="input" value={f.description} onChange={(e) => set('description', e.target.value)} placeholder="optional" />
       <label className="fl">Vendor</label>
       <Typeahead
         value={f.vendor}

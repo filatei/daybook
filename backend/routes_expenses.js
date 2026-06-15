@@ -18,6 +18,20 @@ const router = express.Router();
 
 const EXPENSE_CATS = ['DIESEL', 'SALARY', 'MAINTENANCE', 'TRANSPORT', 'UTILITIES', 'SUPPLIES', 'OTHER'];
 
+// Normalise expense line items: keep ones with a name, compute amount = qty × price.
+function normItems(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((it) => {
+      const name = (it && it.name != null ? String(it.name) : '').trim();
+      const qty = Number(it && it.qty) || 0;
+      const price = Number(it && it.price) || 0;
+      const amount = it && it.amount != null ? Number(it.amount) : qty * price;
+      return { name, qty: qty || null, price: price || null, amount: Math.round((amount || 0) * 100) / 100 };
+    })
+    .filter((it) => it.name && it.amount);
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 async function expenseAccess(req, expenseId) {
   const e = await qone('SELECT * FROM expenses WHERE id=?', [expenseId]);
@@ -97,7 +111,9 @@ router.post('/', requireAuth, async (req, res) => {
   const b = req.body || {};
   const site_id = c.role === 'SITE_MANAGER' ? c.site_id : (b.site_id || null);
   const expense_date = b.expense_date || new Date().toISOString().slice(0, 10);
-  const amount = parseFloat(b.amount) || 0;
+  // Line items: each { name, qty, price } → amount = qty × price. Total = Σ amounts.
+  const items = normItems(b.items);
+  const amount = items.length ? items.reduce((s, it) => s + it.amount, 0) : (parseFloat(b.amount) || 0);
   if (!amount) return res.status(400).json({ error: 'amount required' });
   // Accept any category (so migrated Fido categories work), normalised to UPPER.
   const category = ((b.category || '').toString().trim().toUpperCase().slice(0, 40)) || 'OTHER';
@@ -110,9 +126,10 @@ router.post('/', requireAuth, async (req, res) => {
       [uuid(), tid, vendor]).catch(() => {});
   }
   await qrun(
-    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,vendor,amount,recorded_by)
-     VALUES (?,?,?,?,?,?,?,?,?)`,
-    [id, tid, site_id, expense_date, category, b.description || null, vendor, amount, req.user.id]);
+    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,vendor,items_json,amount,recorded_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    [id, tid, site_id, expense_date, category, b.description || null, vendor,
+      items.length ? JSON.stringify(items) : null, amount, req.user.id]);
 
   // Keep daily_report.expenses in sync (update if report exists for same day/site)
   if (site_id) {
@@ -133,7 +150,9 @@ router.patch('/:id', requireAuth, async (req, res) => {
 
   const b = req.body || {};
   const oldAmount = parseFloat(a.expense.amount) || 0;
-  const newAmount = b.amount != null ? parseFloat(b.amount) || 0 : oldAmount;
+  const items = b.items !== undefined ? normItems(b.items) : null;  // null = unchanged
+  const newAmount = items && items.length ? items.reduce((s, it) => s + it.amount, 0)
+    : (b.amount != null ? parseFloat(b.amount) || 0 : oldAmount);
   const diff = newAmount - oldAmount;
 
   const vendor = b.vendor !== undefined ? ((b.vendor || '').toString().trim() || null) : a.expense.vendor;
@@ -141,10 +160,11 @@ router.patch('/:id', requireAuth, async (req, res) => {
     await qrun(`INSERT INTO vendors (id,tenant_id,name) VALUES (?,?,?) ON CONFLICT (tenant_id, lower(name)) DO NOTHING`,
       [uuid(), a.expense.tenant_id, vendor]).catch(() => {});
   }
+  const itemsJson = items === null ? a.expense.items_json : (items.length ? JSON.stringify(items) : null);
   await qrun(
-    `UPDATE expenses SET category=?,description=?,vendor=?,amount=?,expense_date=? WHERE id=?`,
+    `UPDATE expenses SET category=?,description=?,vendor=?,items_json=?,amount=?,expense_date=? WHERE id=?`,
     [(b.category || a.expense.category).toUpperCase(), b.description ?? a.expense.description,
-      vendor, newAmount, b.expense_date ?? a.expense.expense_date, a.expense.id]);
+      vendor, itemsJson, newAmount, b.expense_date ?? a.expense.expense_date, a.expense.id]);
 
   // Sync report if amount changed
   if (diff !== 0 && a.expense.site_id) {

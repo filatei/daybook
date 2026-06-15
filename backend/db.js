@@ -525,6 +525,44 @@ async function migrate() {
       UNIQUE(tenant_id, staff_id, work_date)
     );
     CREATE INDEX IF NOT EXISTS idx_production_td ON production(tenant_id, work_date);
+
+    -- Advances / deductions given to a worker; settled (run_id set) at payroll time.
+    CREATE TABLE IF NOT EXISTS staff_advances (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      staff_id    TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      adv_date    TEXT NOT NULL,
+      amount      DOUBLE PRECISION NOT NULL DEFAULT 0,
+      reason      TEXT,
+      run_id      TEXT,
+      created_by  TEXT,
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS idx_adv_staff ON staff_advances(tenant_id, staff_id, run_id);
+
+    -- Saved payroll runs + their per-staff payslip lines.
+    CREATE TABLE IF NOT EXISTS pay_runs (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      site_id     TEXT,
+      period_from TEXT NOT NULL,
+      period_to   TEXT NOT NULL,
+      status      TEXT DEFAULT 'DRAFT',
+      total_gross DOUBLE PRECISION DEFAULT 0,
+      total_deductions DOUBLE PRECISION DEFAULT 0,
+      total_net   DOUBLE PRECISION DEFAULT 0,
+      created_by  TEXT, approved_by TEXT, approved_at BIGINT, paid_at BIGINT,
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+    CREATE TABLE IF NOT EXISTS pay_run_lines (
+      id          TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL REFERENCES pay_runs(id) ON DELETE CASCADE,
+      tenant_id   TEXT NOT NULL,
+      staff_id    TEXT, staff_name TEXT, pay_type TEXT,
+      days_present DOUBLE PRECISION, bags_loaded DOUBLE PRECISION, bags_bagged DOUBLE PRECISION,
+      gross DOUBLE PRECISION, deductions DOUBLE PRECISION, net DOUBLE PRECISION
+    );
+    CREATE INDEX IF NOT EXISTS idx_payruns_td ON pay_runs(tenant_id, period_from);
   `);
 
   // ETL EXPENSES — from fido `expenses` collection

@@ -362,31 +362,132 @@ router.post('/production', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── Compute a payroll for a period — Snr Accountant+ ───────────────────────────
-router.post('/compute2', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
-  const b = req.body || {};
-  const from = b.from, to = b.to;
-  if (!from || !to) return res.status(400).json({ error: 'from and to required' });
-  const sWhere = ['tenant_id=?', "status='ACTIVE'"], sArgs = [c.tenant_id];
-  if (b.site) { sWhere.push('site_id=?'); sArgs.push(b.site); }
+// Shared: compute gross-pay lines for a period (+ outstanding advance per staff).
+async function computeLines(tenant_id, from, to, site) {
+  const sWhere = ['tenant_id=?', "status='ACTIVE'"], sArgs = [tenant_id];
+  if (site) { sWhere.push('site_id=?'); sArgs.push(site); }
   const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
     FROM staff WHERE ${sWhere.join(' AND ')} ORDER BY full_name`, sArgs);
   const att = await qall(`SELECT staff_id, COUNT(DISTINCT work_date) d FROM attendance
-    WHERE tenant_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [c.tenant_id, from, to]);
+    WHERE tenant_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
   const daysBy = {}; for (const a of att) daysBy[a.staff_id] = Number(a.d);
   const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g FROM production
-    WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [c.tenant_id, from, to]);
+    WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
   const prodBy = {}; for (const p of prod) prodBy[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
-  const lines = staff.map((s) => {
+  // Outstanding (unsettled) advances up to the period end.
+  const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
+    WHERE tenant_id=? AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [tenant_id, to]);
+  const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
+  return staff.map((s) => {
     const days = daysBy[s.id] || 0;
     const pb = prodBy[s.id] || { l: 0, g: 0 };
     const piece = (s.pay_type || '').toUpperCase() === 'PIECE';
     const gross = piece ? (pb.l * (s.rate_loaded || 0) + pb.g * (s.rate_bagged || 0)) : (days * (s.daily_rate || 0));
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
-      days_present: days, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100 };
-  }).filter((l) => l.gross > 0 || l.days_present > 0 || l.bags_loaded > 0 || l.bags_bagged > 0);
+      days_present: days, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
+      advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
+  }).filter((l) => l.gross > 0 || l.days_present > 0 || l.bags_loaded > 0 || l.bags_bagged > 0 || l.advance > 0);
+}
+
+// ── Compute a payroll for a period (preview, not saved) — Snr Accountant+ ───────
+router.post('/compute2', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const { from, to, site } = req.body || {};
+  if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+  const lines = await computeLines(c.tenant_id, from, to, site || null);
   res.json({ from, to, lines, total: Math.round(lines.reduce((a, l) => a + l.gross, 0) * 100) / 100 });
+});
+
+// ── Advances / deductions — Supervisor (Site Manager+) records; settled at run ──
+router.post('/advances', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const b = req.body || {};
+  const st = await qone('SELECT * FROM staff WHERE id=?', [b.staff_id]);
+  if (!st || st.tenant_id !== c.tenant_id) return res.status(400).json({ error: 'invalid staff' });
+  if (c.role === 'SITE_MANAGER' && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
+  const amount = +b.amount || 0; if (!amount) return res.status(400).json({ error: 'amount required' });
+  const id = uuid();
+  await qrun('INSERT INTO staff_advances (id,tenant_id,staff_id,adv_date,amount,reason,created_by) VALUES (?,?,?,?,?,?,?)',
+    [id, c.tenant_id, st.id, (b.date || new Date().toISOString().slice(0, 10)).slice(0, 10), amount, b.reason || null, req.user.id]);
+  res.status(201).json({ id });
+});
+router.get('/advances', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'SITE_MANAGER'); if (!c) return;
+  const where = ['sa.tenant_id=?'], args = [c.tenant_id];
+  if (req.query.staff_id) { where.push('sa.staff_id=?'); args.push(req.query.staff_id); }
+  if (req.query.outstanding === '1') where.push('sa.run_id IS NULL');
+  res.json(await qall(`SELECT sa.*, s.full_name FROM staff_advances sa LEFT JOIN staff s ON s.id=sa.staff_id
+    WHERE ${where.join(' AND ')} ORDER BY sa.adv_date DESC LIMIT 300`, args));
+});
+
+// ── Save a payroll run (DRAFT) with per-line deductions — Snr Accountant+ ───────
+router.post('/runs2', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const b = req.body || {};
+  const { from, to } = b; const site = b.site || null;
+  if (!from || !to) return res.status(400).json({ error: 'from and to required' });
+  const ded = b.deductions || {};   // { staff_id: amount }
+  const lines = await computeLines(c.tenant_id, from, to, site);
+  const runId = uuid();
+  let tg = 0, td = 0, tn = 0;
+  await withTransaction(async () => {
+    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?)`,
+      [runId, c.tenant_id, site, from, to, req.user.id]);
+    for (const l of lines) {
+      const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
+      const net = Math.round((l.gross - d) * 100) / 100;
+      tg += l.gross; td += d; tn += net;
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net]);
+      // Settle outstanding advances for this worker up to the period end.
+      if (d > 0) await qrun('UPDATE staff_advances SET run_id=? WHERE tenant_id=? AND staff_id=? AND run_id IS NULL AND adv_date<=?', [runId, c.tenant_id, l.staff_id, to]);
+    }
+    await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?',
+      [Math.round(tg * 100) / 100, Math.round(td * 100) / 100, Math.round(tn * 100) / 100, runId]);
+  });
+  res.status(201).json({ id: runId });
+});
+
+router.get('/runs2', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  res.json(await qall(`SELECT r.*, s.name site_name FROM pay_runs r LEFT JOIN sites s ON s.id=r.site_id
+    WHERE r.tenant_id=? ORDER BY r.created_at DESC LIMIT 100`, [c.tenant_id]));
+});
+router.get('/runs2/:id', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  run.lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
+  res.json(run);
+});
+// Approve (Snr Accountant+) → Paid (General Manager+).
+router.post('/runs2/:id/status', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  const next = (req.body && req.body.status || '').toUpperCase();
+  if (next === 'APPROVED') {
+    if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be approved' });
+    await qrun('UPDATE pay_runs SET status=?, approved_by=?, approved_at=? WHERE id=?', ['APPROVED', req.user.id, nowS(), run.id]);
+  } else if (next === 'PAID') {
+    if (!atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'only a General Manager can mark paid' });
+    if (run.status !== 'APPROVED') return res.status(400).json({ error: 'approve before marking paid' });
+    await qrun('UPDATE pay_runs SET status=?, paid_at=? WHERE id=?', ['PAID', nowS(), run.id]);
+  } else return res.status(400).json({ error: 'invalid status' });
+  res.json(await qone('SELECT * FROM pay_runs WHERE id=?', [run.id]));
+});
+router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  if (!run) return res.status(404).end();
+  const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const out = [['Staff', 'Pay type', 'Days', 'Bags loaded', 'Bags bagged', 'Gross', 'Deductions', 'Net'].join(','),
+    ...lines.map((l) => [l.staff_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, l.deductions, l.net].map(q).join(','))];
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="payroll-${run.period_from}_${run.period_to}.csv"`);
+  res.send(out.join('\r\n'));
 });
 
 module.exports = router;

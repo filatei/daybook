@@ -9,7 +9,7 @@
  *   node backend/etl.js [options]
  *
  * Options:
- *   --collection  orders|expenses|staff|customers|payroll|all  (default: all)
+ *   --collection  orders|expenses|staff|customers|products|payroll|all  (default: all)
  *   --from        YYYY-MM-DD   (default: 2020-01-01)
  *   --to          YYYY-MM-DD   (default: today)
  *   --dry-run                  count + validate, no writes
@@ -423,6 +423,48 @@ async function etlCashDeposits(mongoDB, { nameMap, norm }, defaultTenantId) {
   return stats;
 }
 
+// ── products / fiaproducts → products ───────────────────────────────────────────
+// Fido keeps a GLOBAL product catalogue (no site).  Daybook mirrors the same
+// catalogue per tenant.  Upsert on (tenant_id, name) and keep price/category in
+// sync — fido stays the source of truth until cutover.  track_stock=0 so a
+// missing stock figure never blocks a sale.
+async function etlProductsFrom(mongoDB, collName, tenantId, label) {
+  const stats = { scanned: 0, inserted: 0, skipped: 0, errors: 0 };
+  if (!tenantId) { console.log(`[ETL] ${label}: no tenant — skipped`); return stats; }
+  const total = await mongoDB.collection(collName).countDocuments();
+  if (DRY_RUN) { stats.scanned = total; done(`${label} (dry-run)`, stats); return stats; }
+  const cursor = mongoDB.collection(collName).find({}).batchSize(BATCH_SIZE);
+  for await (const p of cursor) {
+    stats.scanned++;
+    const name = clean(p.name); if (!name) { stats.skipped++; continue; }
+    try {
+      const r = await qrun(
+        `INSERT INTO products (id,tenant_id,name,category,price,cost,sku,unit,track_stock,status)
+         VALUES (?,?,?,?,?,?,?,?,0,'ACTIVE')
+         ON CONFLICT (tenant_id, name) DO UPDATE SET
+           price=EXCLUDED.price, cost=EXCLUDED.cost,
+           category=COALESCE(EXCLUDED.category, products.category),
+           sku=COALESCE(EXCLUDED.sku, products.sku),
+           status='ACTIVE'`,
+        [uuid(), tenantId, name, clean(p.category) || clean(p.group), num(p.price), num(p.costprice), clean(p.barcode), 'unit']);
+      if (r.rowCount) stats.inserted++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn(`\n[ETL] ${label} error:`, e.message.slice(0, 140)); }
+    progress(label, stats.scanned, total);
+  }
+  done(label, stats);
+  return stats;
+}
+async function etlProducts(mongoDB, defaultTenantId) {
+  const fido = await etlProductsFrom(mongoDB, 'products', defaultTenantId, 'products(fido)');
+  let fiafia = { scanned: 0, inserted: 0, skipped: 0, errors: 0 };
+  const fiaT = await qone("SELECT id FROM tenants WHERE slug='fiafia'");
+  if (fiaT && fiaT.id) {
+    try { fiafia = await etlProductsFrom(mongoDB, 'fiaproducts', fiaT.id, 'products(fiafia)'); }
+    catch (e) { console.warn('[ETL] fiaproducts skipped:', e.message.slice(0, 100)); }
+  }
+  return { fido, fiafia };
+}
+
 // ── Verify: reconcile Mongo (source) ↔ Postgres (imported rows) ─────────────────
 // Compares row counts per collection, and for orders the total ₦ per site, so you
 // get a clear pass/fail instead of eyeballing. Only counts IMPORTED rows in
@@ -483,12 +525,13 @@ async function main() {
   const defaultTenantId = defTenant ? defTenant.id : null;
   console.log(`[ETL] default tenant for site-less rows: ${defTenant ? defTenant.slug : '(none — site-less customers will be skipped)'}`);
 
-  const run = COLLECTION === 'all' ? ['staff', 'customers', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
+  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
   const allStats = {};
   for (const col of run) {
     switch (col) {
       case 'staff':        allStats.staff        = await etlStaff(mongoDB, maps);     break;
       case 'customers':    allStats.customers    = await etlCustomers(mongoDB, maps, defaultTenantId); break;
+      case 'products':     allStats.products     = await etlProducts(mongoDB, defaultTenantId); break;
       case 'expenses':     allStats.expenses     = await etlExpenses(mongoDB, maps);  break;
       case 'payroll':      allStats.payroll      = await etlPayroll(mongoDB, maps);   break;
       case 'orders':       allStats.orders       = await etlOrders(mongoDB, maps);    break;

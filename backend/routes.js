@@ -908,6 +908,12 @@ router.post('/generators/:id/logs', requireAuth, needTenant('SITE_MANAGER'), asy
 router.get('/products', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   if (s.all) return res.json(await qall('SELECT * FROM products ORDER BY name'));
+  const q = (req.query.q || '').toString().trim();
+  if (q) {
+    return res.json(await qall(
+      "SELECT * FROM products WHERE tenant_id=? AND status='ACTIVE' AND (name ILIKE ? OR sku ILIKE ?) ORDER BY name LIMIT 20",
+      [s.ctx.tenant_id, `%${q}%`, `%${q}%`]));
+  }
   res.json(await qall("SELECT * FROM products WHERE tenant_id=? ORDER BY status, name", [s.ctx.tenant_id]));
 });
 router.post('/products', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {

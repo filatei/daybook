@@ -141,6 +141,14 @@ export default function Sell() {
     return rows.map((r) => ({ label: r.label || r.name, sub: r.sub || r.phone || '' }));
   }, [tenant]);
 
+  // Product typeahead: search the catalogue server-side, add to cart on pick.
+  const fetchProductOpts = useCallback(async (q) => {
+    try {
+      const rows = await api(scoped(`/products?q=${encodeURIComponent(q)}`));
+      return rows.map((p) => ({ label: p.name, sub: `${ngn(p.price)}${p.category ? ' · ' + p.category : ''}`, product: p }));
+    } catch { return []; }
+  }, [tenant]);
+
   // Load products
   const load = useCallback(async () => {
     setLoading(true);
@@ -336,10 +344,14 @@ export default function Sell() {
         style={{ marginBottom: 12 }}
       />
 
-      {/* Product search */}
-      <input
-        className="input" placeholder="Search products…"
-        value={search} onChange={(e) => setSearch(e.target.value)}
+      {/* Product search — typeahead: pick to add straight to the cart */}
+      <Typeahead
+        value={search}
+        onChange={setSearch}
+        onPick={(item) => { addProduct(item.product); setSearch(''); }}
+        fetchFn={fetchProductOpts}
+        placeholder="Search products…"
+        minChars={1}
         style={{ marginBottom: 10 }}
       />
 

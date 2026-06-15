@@ -18,6 +18,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 export default function Typeahead({
   value = '',
   onChange,
+  onPick,            // optional: fires with the full picked item (carries extra fields)
   fetchFn,
   placeholder = '',
   minChars = 2,
@@ -55,7 +56,8 @@ export default function Typeahead({
   };
 
   const pick = (item) => {
-    onChange(item.label);
+    if (onPick) onPick(item);          // caller handles the selection (e.g. add to cart)
+    else onChange(item.label);
     setItems([]); setOpen(false); setActive(-1);
   };
 

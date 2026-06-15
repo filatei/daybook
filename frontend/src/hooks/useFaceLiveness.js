@@ -6,8 +6,8 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-// face-api.js models served from jsDelivr CDN
-const MODEL_URL = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
+// face-api.js model weights — served reliably from the GitHub repo via jsDelivr.
+const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
 
 // Eye landmark indices in the 68-point model
 const LEFT_EYE  = [36, 37, 38, 39, 40, 41];
@@ -39,6 +39,7 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
   const [status, setStatus]     = useState('loading'); // loading | ready | detecting | done | error
   const [instruction, setInst]  = useState('Loading face detector…');
   const [capturedFrame, setCaptured] = useState(null); // base64 data URL on success
+  const [capturedDescriptor, setDescriptor] = useState(null); // 128-number array on success
 
   const fapi     = useRef(null);
   const rafId    = useRef(null);
@@ -70,7 +71,8 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
         const fa = fapi.current;
 
         await fa.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-        await fa.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL);
+        await fa.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+        await fa.nets.faceRecognitionNet.loadFromUri(MODEL_URL);   // 128-D descriptors for identity match
 
         if (cancelled) return;
         setStatus('ready');
@@ -98,7 +100,7 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
       if (!video || !canvas || stepRef.current >= CHALLENGES.length) return;
 
       const opts = new fa.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: MIN_FACE_CONF });
-      const result = await fa.detectSingleFace(video, opts).withFaceLandmarks(true);
+      const result = await fa.detectSingleFace(video, opts).withFaceLandmarks();
 
       if (result) {
         const dims = fa.matchDimensions(canvas, video, true);
@@ -161,7 +163,16 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
     }
   }, []);
 
-  const finishLiveness = useCallback(() => {
+  // Grab a 128-D face descriptor from the current video frame (null if no face).
+  const grabDescriptor = useCallback(async () => {
+    const fa = fapi.current, video = videoRef.current;
+    if (!fa || !video) return null;
+    const opts = new fa.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: MIN_FACE_CONF });
+    const det = await fa.detectSingleFace(video, opts).withFaceLandmarks().withFaceDescriptor();
+    return det && det.descriptor ? Array.from(det.descriptor) : null;
+  }, [videoRef]);
+
+  const finishLiveness = useCallback(async () => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
 
     const video = videoRef.current;
@@ -170,11 +181,34 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
     cap.height = video.videoHeight || 480;
     cap.getContext('2d').drawImage(video, 0, 0);
     const dataUrl = cap.toDataURL('image/jpeg', 0.85);
-
     setCaptured(dataUrl);
+    setStatus('matching');
+    setInst('Verifying identity…');
+    try { setDescriptor(await grabDescriptor()); } catch { setDescriptor(null); }
     setStatus('done');
     setInst(CHALLENGE_TEXT.DONE);
-  }, []);
+  }, [grabDescriptor]);
+
+  /**
+   * Enrollment helper — average a few descriptors from the live video for a
+   * stable face template. Returns { descriptor:number[], frame:dataURL } or null.
+   */
+  const captureForEnroll = useCallback(async (samples = 4) => {
+    const fa = fapi.current, video = videoRef.current;
+    if (!fa || !video) return null;
+    const got = [];
+    for (let i = 0; i < samples; i++) {
+      const d = await grabDescriptor();
+      if (d) got.push(d);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!got.length) return null;
+    const avg = got[0].map((_, i) => got.reduce((s, d) => s + d[i], 0) / got.length);
+    const cap = document.createElement('canvas');
+    cap.width = video.videoWidth || 640; cap.height = video.videoHeight || 480;
+    cap.getContext('2d').drawImage(video, 0, 0);
+    return { descriptor: avg, frame: cap.toDataURL('image/jpeg', 0.85), samples: got.length };
+  }, [grabDescriptor]);
 
   // Stop loop on unmount
   useEffect(() => () => { if (rafId.current) cancelAnimationFrame(rafId.current); }, []);
@@ -182,20 +216,31 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
   const reset = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
     setStep(0); stepRef.current = 0;
-    setCaptured(null);
+    setCaptured(null); setDescriptor(null);
     blinkState.current = { wasOpen: true, closed: false };
     setStatus('ready');
     setInst('Position your face in the oval');
   }, []);
 
   return {
-    status,        // loading | ready | detecting | done | error
+    status,        // loading | ready | detecting | matching | done | error
     instruction,
     step,          // 0-3
     totalSteps: CHALLENGES.length,
-    capturedFrame, // data URL when done
+    capturedFrame,      // data URL when done
+    capturedDescriptor, // 128-number array when done (for identity match)
     startDetection,
+    captureForEnroll,   // enrollment: average descriptor from live video
     reset,
     challengeLabels: CHALLENGES.map((c) => CHALLENGE_TEXT[c]),
   };
 }
+
+// Euclidean distance between two 128-D descriptors; < ~0.55 ≈ same person.
+export function faceDistance(a, b) {
+  if (!a || !b || a.length !== b.length) return Infinity;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; sum += d * d; }
+  return Math.sqrt(sum);
+}
+export const FACE_MATCH_THRESHOLD = 0.55;

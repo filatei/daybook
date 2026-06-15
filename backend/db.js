@@ -497,6 +497,13 @@ async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_genlogs_extid    ON generator_logs(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
   `);
 
+  // Face recognition: a 128-D descriptor enrolled per staff; match score on clock.
+  await pool.query(`
+    ALTER TABLE staff      ADD COLUMN IF NOT EXISTS face_descriptor TEXT;
+    ALTER TABLE staff      ADD COLUMN IF NOT EXISTS face_enrolled_at BIGINT;
+    ALTER TABLE attendance ADD COLUMN IF NOT EXISTS match_score DOUBLE PRECISION;
+  `);
+
   // ETL EXPENSES — from fido `expenses` collection
   await pool.query(`
     CREATE TABLE IF NOT EXISTS expenses (

@@ -686,13 +686,45 @@ router.post('/ai/analyse', requireAuth, async (req, res) => {
 });
 
 // ── STAFF & TIMESHEETS ────────────────────────────────────────────────────────
+// Staff list columns — exclude the bulky face_descriptor; expose face_enrolled flag.
+const STAFF_COLS = `id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext_people_id,status,created_at,
+  (face_descriptor IS NOT NULL) AS face_enrolled, face_enrolled_at`;
 router.get('/staff', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
-  if (s.all) return res.json(await qall('SELECT * FROM staff ORDER BY full_name'));
-  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall("SELECT * FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name", [s.ctx.tenant_id, s.ctx.site_id]));
+  if (s.all) return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff ORDER BY full_name`));
+  if (s.ctx.role === 'SITE_MANAGER') return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name`, [s.ctx.tenant_id, s.ctx.site_id]));
   const site = req.query.site;
-  res.json(site ? await qall('SELECT * FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name', [s.ctx.tenant_id, site])
-    : await qall('SELECT * FROM staff WHERE tenant_id=? ORDER BY full_name', [s.ctx.tenant_id]));
+  res.json(site ? await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name`, [s.ctx.tenant_id, site])
+    : await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? ORDER BY full_name`, [s.ctx.tenant_id]));
+});
+
+// Get a staff member's enrolled face descriptor (for client-side matching at clock-in).
+router.get('/staff/:id/face', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: 'select a workspace' });
+  const st = await qone('SELECT id,tenant_id,site_id,face_descriptor FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (s.ctx.role === 'SITE_MANAGER' && st.site_id !== s.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  res.json({ enrolled: !!st.face_descriptor, descriptor: st.face_descriptor ? J(st.face_descriptor, null) : null });
+});
+
+// Enrol / update a staff member's face descriptor (128 floats).
+router.post('/staff/:id/face', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const st = await qone('SELECT id,tenant_id,site_id FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (req.ctx.role === 'SITE_MANAGER' && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const d = (req.body || {}).descriptor;
+  if (!Array.isArray(d) || d.length !== 128 || !d.every((x) => typeof x === 'number' && isFinite(x))) {
+    return res.status(400).json({ error: 'descriptor must be 128 numbers' });
+  }
+  await qrun('UPDATE staff SET face_descriptor=?, face_enrolled_at=? WHERE id=?', [JSON.stringify(d), nowS(), st.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'FACE_ENROLL', 'staff', st.id, {});
+  res.json({ ok: true });
+});
+router.delete('/staff/:id/face', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const st = await qone('SELECT id,tenant_id,site_id FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  await qrun('UPDATE staff SET face_descriptor=NULL, face_enrolled_at=NULL WHERE id=?', [st.id]);
+  res.json({ ok: true });
 });
 router.post('/staff', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {};
@@ -812,19 +844,20 @@ router.post('/attendance/clock', requireAuth, needTenant('SITE_MANAGER'), async 
   const existing = await qone('SELECT * FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=?', [req.ctx.tenant_id, st.id, date]);
   const id = existing ? existing.id : uuid();
   const lat = b.lat != null ? Number(b.lat) : null, lng = b.lng != null ? Number(b.lng) : null, acc = b.accuracy != null ? Number(b.accuracy) : null;
+  const match = b.match_score != null ? Number(b.match_score) : null;
   if (!existing) {
-    await qrun(`INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,photo_in,signature,in_lat,in_lng,in_acc,captured_by)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    await qrun(`INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,photo_in,signature,in_lat,in_lng,in_acc,match_score,captured_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, req.ctx.tenant_id, st.site_id, st.id, date,
         kind === 'in' ? now : null, kind === 'in' ? photo : null, sig,
-        kind === 'in' ? lat : null, kind === 'in' ? lng : null, kind === 'in' ? acc : null, req.user.id]);
-    if (kind === 'out') await qrun('UPDATE attendance SET clock_out=?, photo_out=?, out_lat=?, out_lng=?, out_acc=? WHERE id=?', [now, photo, lat, lng, acc, id]);
+        kind === 'in' ? lat : null, kind === 'in' ? lng : null, kind === 'in' ? acc : null, match, req.user.id]);
+    if (kind === 'out') await qrun('UPDATE attendance SET clock_out=?, photo_out=?, out_lat=?, out_lng=?, out_acc=?, match_score=? WHERE id=?', [now, photo, lat, lng, acc, match, id]);
   } else if (kind === 'in') {
-    await qrun('UPDATE attendance SET clock_in=?, photo_in=COALESCE(?,photo_in), signature=COALESCE(?,signature), in_lat=?, in_lng=?, in_acc=?, updated_at=? WHERE id=?',
-      [now, photo, sig, lat, lng, acc, now, id]);
+    await qrun('UPDATE attendance SET clock_in=?, photo_in=COALESCE(?,photo_in), signature=COALESCE(?,signature), in_lat=?, in_lng=?, in_acc=?, match_score=?, updated_at=? WHERE id=?',
+      [now, photo, sig, lat, lng, acc, match, now, id]);
   } else {
-    await qrun('UPDATE attendance SET clock_out=?, photo_out=COALESCE(?,photo_out), signature=COALESCE(?,signature), out_lat=?, out_lng=?, out_acc=?, updated_at=? WHERE id=?',
-      [now, photo, sig, lat, lng, acc, now, id]);
+    await qrun('UPDATE attendance SET clock_out=?, photo_out=COALESCE(?,photo_out), signature=COALESCE(?,signature), out_lat=?, out_lng=?, out_acc=?, match_score=?, updated_at=? WHERE id=?',
+      [now, photo, sig, lat, lng, acc, match, now, id]);
   }
   await audit(req.ctx.tenant_id, req.user.id, kind === 'in' ? 'CLOCK_IN' : 'CLOCK_OUT', 'attendance', id, { staff: st.full_name, date });
   res.status(existing ? 200 : 201).json({ id, kind, clock: now });

@@ -14,6 +14,7 @@ import { useStore } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import { useRealtime } from '../hooks/useRealtime.js';
 import Typeahead from '../components/Typeahead.jsx';
+import ReceiptPreview from '../components/ReceiptPreview.jsx';
 import { queueSale, syncOutbox, outboxCount } from '../offline.js';
 
 const saleTime = (at) => { try { return new Date(typeof at === 'number' ? at * 1000 : at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
@@ -86,7 +87,8 @@ function CartLine({ line, onChange, onRemove }) {
 export default function Sell() {
   const { tenant, toast, tenants, user, sites } = useStore();
   const activeTenant = (tenants || []).find((t) => String(t.id) === String(tenant));
-  const servedBy = user?.name || user?.email || null;
+  // Cashier label: first name, else the part of the email before '@'.
+  const servedBy = (user?.name && user.name.trim().split(/\s+/)[0]) || (user?.email ? user.email.split('@')[0] : null);
   const siteName = (sid) => (sites || []).find((s) => String(s.id) === String(sid))?.name || null;
   const bt = useBTPrinter();
 
@@ -507,16 +509,10 @@ export default function Sell() {
       {receipt && (
         <div onClick={() => setReceipt(null)}
           style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
-          <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 360, margin: 0, textAlign: 'center' }}>
-            <div style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Sale recorded ✓</div>
-            <div style={{ fontWeight: 900, fontSize: 26, letterSpacing: '-1px', margin: '4px 0' }}>
-              {receipt.receipt_no === 'OFFLINE' ? 'Offline sale' : `#${String(receipt.receipt_no).padStart(4, '0')}`}
-            </div>
-            <div style={{ fontWeight: 800, fontSize: 20, color: 'var(--brand-d)' }}>{ngn(receipt.total)}</div>
-            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 16 }}>
-              {receipt.payment_method}{receipt.customer_name ? ` · ${receipt.customer_name}` : ''}
-            </div>
-            <button className="btn" onClick={doPrint} disabled={printingReceipt} style={{ marginBottom: 8 }}>
+          <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 340, margin: 0, textAlign: 'center', maxHeight: '88vh', overflowY: 'auto' }}>
+            <div style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600, marginBottom: 10 }}>Sale recorded ✓</div>
+            <ReceiptPreview receipt={receipt} />
+            <button className="btn" onClick={doPrint} disabled={printingReceipt} style={{ margin: '14px 0 8px' }}>
               {printingReceipt ? <span className="spin" /> : '🖨 '}
               {bt.status === 'ready' ? 'Print receipt' : 'Connect printer & print'}
             </button>

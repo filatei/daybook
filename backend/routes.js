@@ -1216,6 +1216,28 @@ router.get('/pos/recent', requireAuth, async (req, res) => {
   res.json(rows.map((r) => ({ id: String(r.id), receipt_no: r.receipt_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, at: r.created_at })));
 });
 
+// Individual orders for a date range + site (drill-down from the Reports POS
+// summary).  Returns line items so each order has a printable receipt.
+router.get('/pos/orders', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const from = req.query.from || new Date().toISOString().slice(0, 10);
+  const to = req.query.to || from;
+  const { site } = req.query;
+  if (await posEnabled(s.ctx.tenant_id)) {
+    try {
+      let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
+      if (s.ctx.role === 'SITE_MANAGER') { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
+      else if (site) { const sc = await qone('SELECT code FROM sites WHERE id=?', [site]); if (sc) sites = [sc.code]; }
+      return res.json(await sales.listOrders({ from, to, sites, limit: 800 }));
+    } catch (e) { /* fall through */ }
+  }
+  const where = ['p.tenant_id=?', 'p.sale_date>=?', 'p.sale_date<=?'], args = [s.ctx.tenant_id, from, to];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
+  const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, s.name site, p.created_at
+    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
+  res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, items: J(r.items_json, []), at: r.created_at })));
+});
+
 // ── RECONCILIATIONS (transfer/POS confirmations + cash deposits) ──────────────
 router.get('/reconciliations', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });

@@ -128,8 +128,11 @@ export default function Reports() {
   const [orders, setOrders] = useState([]);
   const [orderQ, setOrderQ] = useState('');
   const [viewOrder, setViewOrder] = useState(null);   // order open in the receipt modal
+  const [readOnly, setReadOnly] = useState(false);    // fido drill-down orders can't be deleted
   const [askDelete, setAskDelete] = useState(false);  // animated delete confirm step
   const [busy, setBusy] = useState(false);
+  const [drill, setDrill] = useState(null);           // orders drill-down list (or null = closed)
+  const [drillLoading, setDrillLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ site: '', from: '', to: '' });
 
@@ -150,27 +153,43 @@ export default function Reports() {
     setLoading(false);
   }, [tenant, filters]);
 
-  // Build the print/preview payload for an order row.
+  // Build the print/preview payload for an order row (tolerates both the in-app
+  // pos_sales shape and the live-fido /pos/orders shape).
   const receiptOf = (o) => {
-    const when = o.created_at ? new Date(o.created_at * 1000) : new Date(`${o.sale_date}T00:00:00`);
+    const when = o.created_at ? new Date(o.created_at * 1000) : (o.at ? new Date(o.at) : new Date(`${o.sale_date}T00:00:00`));
+    const items = Array.isArray(o.items) ? o.items : JSON.parse(o.items_json || '[]');
+    const total = o.total ?? o.amount ?? 0;
     return {
       company: activeTenant?.name || 'FIDO WATER',
-      site_name: o.site_name || null,
-      receipt_no: o.receipt_no,
+      site_name: o.site_name || o.site || null,
+      receipt_no: o.receipt_no ?? o.order_no,
       date_str: when.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
       time_str: when.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
-      items: JSON.parse(o.items_json || '[]'),
-      total: o.total,
+      items,
+      total,
       payment_method: o.payment_method,
-      amount_paid: o.amount_paid ?? o.total,
-      change: Math.max(0, (o.amount_paid || 0) - o.total),
-      customer_name: o.customer_name || null,
+      amount_paid: o.amount_paid ?? total,
+      change: Math.max(0, (o.amount_paid || 0) - total),
+      customer_name: o.customer_name || o.customer || null,
       served_by: o.sold_by_name || null,
     };
   };
 
-  const openOrder = (o, deleteFirst = false) => { setViewOrder(o); setAskDelete(deleteFirst); };
-  const closeOrder = () => { setViewOrder(null); setAskDelete(false); setBusy(false); };
+  const openOrder = (o, deleteFirst = false, ro = false) => { setViewOrder(o); setAskDelete(deleteFirst); setReadOnly(ro); };
+  const closeOrder = () => { setViewOrder(null); setAskDelete(false); setBusy(false); setReadOnly(false); };
+
+  // Drill-down: list all individual orders for the current range + site.
+  const openOrdersList = async () => {
+    setDrill([]); setDrillLoading(true);
+    try {
+      const p = new URLSearchParams();
+      if (filters.site) p.set('site', filters.site);
+      p.set('from', filters.from || today());
+      p.set('to', filters.to || today());
+      setDrill(await api(scoped(`/pos/orders?${p}`)));
+    } catch { setDrill([]); }
+    setDrillLoading(false);
+  };
 
   const printViewed = async () => {
     if (!viewOrder) return;
@@ -239,7 +258,9 @@ export default function Reports() {
             <span style={{ fontWeight: 800 }}>{ngn(pos.totals.sales)}</span>
           </div>
           <div className="stat-grid" style={{ marginBottom: pos.bySite.length > 1 ? 8 : 0 }}>
-            <div className="stat"><div className="k">Orders</div><div className="v" style={{ fontSize: 18 }}>{pos.totals.orders.toLocaleString()}</div></div>
+            <button className="stat" onClick={openOrdersList} style={{ cursor: 'pointer', textAlign: 'left', border: '1px solid var(--brand-l)' }} title="Tap to list orders">
+              <div className="k">Orders ›</div><div className="v" style={{ fontSize: 18 }}>{pos.totals.orders.toLocaleString()}</div>
+            </button>
             <div className="stat"><div className="k">Cash</div><div className="v" style={{ fontSize: 18 }}>{ngn(pos.totals.cash)}</div></div>
             <div className="stat"><div className="k">Transfer/POS</div><div className="v" style={{ fontSize: 18 }}>{ngn(pos.totals.transfer)}</div></div>
           </div>
@@ -307,6 +328,34 @@ export default function Reports() {
 
       <button className="fab" onClick={() => openForm()}>+</button>
 
+      {/* Orders drill-down — list every order for the range + site */}
+      {drill !== null && (
+        <div onClick={() => setDrill(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 110, padding: 16 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 420, margin: 0, maxHeight: '86vh', overflowY: 'auto', padding: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', borderBottom: '1px solid var(--line)', position: 'sticky', top: 0, background: '#fff' }}>
+              <strong>Orders {filters.site ? `· ${sites.find((s) => s.id === filters.site)?.name || ''}` : ''}</strong>
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => setDrill(null)}>✕</button>
+            </div>
+            {drillLoading ? (
+              <div style={{ padding: 16 }}>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</div>
+            ) : drill.length === 0 ? (
+              <div className="empty" style={{ padding: 24 }}><div className="ic">🧾</div><p>No orders in this range</p></div>
+            ) : drill.map((o) => (
+              <button key={o.id} onClick={() => { setDrill(null); openOrder(o, false, true); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700 }}>{o.order_no ? `#${o.order_no}` : '—'} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer || 'Walk-in'}</span></div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o.items?.length ? ` · ${o.items.length} item${o.items.length > 1 ? 's' : ''}` : ''} · {o.at ? new Date(o.at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) : ''}</div>
+                </div>
+                <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.amount)}</div>
+                <span style={{ color: 'var(--muted)' }}>›</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Order receipt modal — preview, print (with confirm), animated delete */}
       {viewOrder && (
         <div onClick={closeOrder}
@@ -321,7 +370,7 @@ export default function Reports() {
                 </button>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button className="btn btn-ghost" style={{ flex: 1 }} onClick={closeOrder} disabled={busy}>Close</button>
-                  {isGM && (
+                  {isGM && !readOnly && (
                     <button className="btn" style={{ flex: 1, background: '#fee2e2', color: 'var(--err)' }} onClick={() => setAskDelete(true)} disabled={busy}>🗑 Delete</button>
                   )}
                 </div>

@@ -84,8 +84,10 @@ function CartLine({ line, onChange, onRemove }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function Sell() {
-  const { tenant, toast, tenants } = useStore();
+  const { tenant, toast, tenants, user, sites } = useStore();
   const activeTenant = (tenants || []).find((t) => String(t.id) === String(tenant));
+  const servedBy = user?.name || user?.email || null;
+  const siteName = (sid) => (sites || []).find((s) => String(s.id) === String(sid))?.name || null;
   const bt = useBTPrinter();
 
   const [products,  setProducts]  = useState([]);
@@ -95,6 +97,7 @@ export default function Sell() {
   const [custName,  setCustName]  = useState('');
   const [payMethod, setPayMethod] = useState('CASH');
   const [tendered,  setTendered]  = useState('');
+  const [tenderedEdited, setTenderedEdited] = useState(false);  // tracks manual override
   const [posting,   setPosting]   = useState(false);
   const [lastSale,  setLastSale]  = useState(null);
   const [pending,   setPending]   = useState(outboxCount());
@@ -184,6 +187,10 @@ export default function Sell() {
   // Derived
   const cartLines   = cart.filter((c) => parseFloat(c.qty) > 0);
   const subtotal    = cartLines.reduce((s, c) => s + (c.product.price || 0) * (parseFloat(c.qty) || 0), 0);
+  // Tendered defaults to the order total; the cashier can still type a different amount.
+  useEffect(() => {
+    if (payMethod === 'CASH' && !tenderedEdited) setTendered(subtotal ? String(subtotal) : '');
+  }, [subtotal, payMethod, tenderedEdited]);
   const tenderedAmt = payMethod === 'CASH' ? (parseFloat(tendered) || 0) : subtotal;
   const change      = payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0;
   const canCharge   = cartLines.length > 0 && !posting && (payMethod !== 'CASH' || tenderedAmt >= subtotal);
@@ -218,7 +225,7 @@ export default function Sell() {
   };
 
   const newSale = () => {
-    setCart([]); setCustName(''); setTendered('');
+    setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false);
     setLastSale(null); setPayMethod('CASH');
     clientUid.current = genUid();
   };
@@ -247,6 +254,7 @@ export default function Sell() {
       const now = new Date();
       const rdata = {
         company:        activeTenant?.name || 'FIDO WATER',
+        site_name:      siteName(sale.site_id),
         receipt_no:     sale.receipt_no,
         date_str:       now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
         time_str:       now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
@@ -256,6 +264,7 @@ export default function Sell() {
         amount_paid:    payMethod === 'CASH' ? tenderedAmt : sale.total,
         change:         payMethod === 'CASH' ? change : 0,
         customer_name:  custName.trim() || null,
+        served_by:      servedBy,
       };
 
       if (withPrint && bt.status === 'ready') {
@@ -268,7 +277,7 @@ export default function Sell() {
       }
 
       // Reset cart, new uid for next transaction
-      setCart([]); setCustName(''); setTendered('');
+      setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false);
       clientUid.current = genUid();
       seedFeed();   // refresh ticker so the new sale shows (and is deletable while testing)
     } catch (e) {
@@ -281,7 +290,7 @@ export default function Sell() {
         setLastSale({ pending: true, receipt_no: null, total: subtotal, items_json });
         const now = new Date();
         const rdata = {
-          company: activeTenant?.name || 'FIDO WATER', receipt_no: 'OFFLINE',
+          company: activeTenant?.name || 'FIDO WATER', site_name: siteName(activeTenant?.site_id), receipt_no: 'OFFLINE',
           date_str: now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
           time_str: now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
           items: cartLines.map((c) => ({ name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })),
@@ -289,6 +298,7 @@ export default function Sell() {
           amount_paid: payMethod === 'CASH' ? tenderedAmt : subtotal,
           change: payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0,
           customer_name: custName.trim() || null,
+          served_by: servedBy,
         };
         if (withPrint && bt.status === 'ready') {
           try { await bt.print(rdata); } catch { /* printer optional */ }
@@ -296,7 +306,7 @@ export default function Sell() {
           setReceipt(rdata);
         }
         toast('Offline — sale queued, will sync when back online ⚡', 'info');
-        setCart([]); setCustName(''); setTendered('');
+        setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false);
         clientUid.current = genUid();
       } else {
         toast(e.message || 'Charge failed', 'err');
@@ -458,7 +468,7 @@ export default function Sell() {
               <input
                 type="number" inputMode="decimal" className="input"
                 placeholder="0" value={tendered}
-                onChange={(e) => setTendered(e.target.value)}
+                onChange={(e) => { setTendered(e.target.value); setTenderedEdited(true); }}
                 onFocus={(e) => e.target.select()}
               />
               {parseFloat(tendered) > 0 && (

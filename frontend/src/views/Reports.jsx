@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import { useBTPrinter } from '../hooks/useBTPrinter.js';
 
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
 
@@ -115,13 +116,16 @@ function ReportForm({ report, sites, onSave, onClose }) {
 }
 
 export default function Reports() {
-  const { openModal, closeModal, sites, tenant, toast } = useStore();
+  const { openModal, closeModal, sites, tenant, tenants, toast } = useStore();
   const role = useRole();
   const isSM = role && !atLeast(role, 'GENERAL_MANAGER');
   const isGM = atLeast(role, 'GENERAL_MANAGER');
+  const bt = useBTPrinter();
+  const activeTenant = (tenants || []).find((t) => String(t.id) === String(tenant));
   const [reports, setReports] = useState([]);
   const [pos, setPos] = useState(null);
   const [orders, setOrders] = useState([]);
+  const [orderQ, setOrderQ] = useState('');
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ site: '', from: '', to: '' });
 
@@ -150,6 +154,35 @@ export default function Reports() {
       toast('Order deleted', 'ok');
     } catch (e) { toast(e.message || 'Delete failed', 'err'); }
   };
+
+  const printOrder = async (o) => {
+    try {
+      if (bt.status !== 'ready') await bt.connect();   // user gesture → connect printer
+      const when = o.created_at ? new Date(o.created_at * 1000) : new Date(`${o.sale_date}T00:00:00`);
+      await bt.print({
+        company: activeTenant?.name || 'FIDO WATER',
+        site_name: o.site_name || null,
+        receipt_no: o.receipt_no,
+        date_str: when.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+        time_str: when.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+        items: JSON.parse(o.items_json || '[]'),
+        total: o.total,
+        payment_method: o.payment_method,
+        amount_paid: o.amount_paid ?? o.total,
+        change: Math.max(0, (o.amount_paid || 0) - o.total),
+        customer_name: o.customer_name || null,
+        served_by: o.sold_by_name || null,
+      });
+      toast(`Receipt #${o.receipt_no} printed ✓`, 'ok');
+    } catch (e) { toast(e.message || 'Print failed', 'err'); }
+  };
+
+  const shownOrders = orders.filter((o) => {
+    const q = orderQ.trim().toLowerCase(); if (!q) return true;
+    return String(o.receipt_no).includes(q)
+      || (o.customer_name || '').toLowerCase().includes(q)
+      || (o.sold_by_name || '').toLowerCase().includes(q);
+  });
 
   useEffect(() => { load(); }, [load]);
 
@@ -202,20 +235,30 @@ export default function Reports() {
         </div>
       )}
 
-      {/* In-app orders (deletable while testing) */}
+      {/* In-app orders — search, reprint, delete */}
       {!loading && orders.length > 0 && (
         <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 14 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
             <strong style={{ fontSize: 14 }}>In-app orders</strong>
-            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{orders.length}</span>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{shownOrders.length}/{orders.length}</span>
           </div>
-          {orders.map((o) => (
-            <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+          <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--line)' }}>
+            <input className="input" placeholder="Search receipt #, customer or cashier…"
+              value={orderQ} onChange={(e) => setOrderQ(e.target.value)} />
+          </div>
+          {shownOrders.length === 0 ? (
+            <div style={{ padding: '14px 16px', fontSize: 13, color: 'var(--muted)' }}>No matching orders</div>
+          ) : shownOrders.map((o) => (
+            <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700 }}>#{String(o.receipt_no).padStart(4, '0')} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer_name || 'Walk-in'}</span></div>
-                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.sale_date} · {o.site_name || '—'} · {o.payment_method}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  {o.sale_date} · {o.site_name || '—'} · {o.payment_method}{o.sold_by_name ? ` · ${o.sold_by_name}` : ''}
+                </div>
               </div>
-              <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.total)}</div>
+              <div style={{ fontWeight: 800, whiteSpace: 'nowrap', marginRight: 4 }}>{ngn(o.total)}</div>
+              <button title="Print receipt" onClick={() => printOrder(o)}
+                style={{ border: 'none', background: '#e0f2fe', color: '#0369a1', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🖨</button>
               {isGM && (
                 <button title="Delete order" onClick={() => deleteOrder(o)}
                   style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🗑</button>

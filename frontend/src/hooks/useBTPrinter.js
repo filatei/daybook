@@ -94,6 +94,7 @@ export function buildReceipt(opts) {
     amount_paid = 0,
     change = 0,
     customer_name,
+    served_by,
   } = opts;
 
   const chunks = [];
@@ -110,6 +111,7 @@ export function buildReceipt(opts) {
   push(t(`Date:    ${date_str}\n`));
   push(t(`Time:    ${time_str}\n`));
   if (customer_name) push(t(`Customer: ${customer_name}\n`));
+  if (served_by) push(t(`Served by: ${served_by}\n`));
   push(DIVIDER);
 
   // Items

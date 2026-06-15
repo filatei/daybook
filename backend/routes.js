@@ -1039,7 +1039,9 @@ router.get('/pos/sales', requireAuth, async (req, res) => {
   if (from) { where.push('p.sale_date>=?'); args.push(from); }
   if (to) { where.push('p.sale_date<=?'); args.push(to); }
   if (source === 'app') where.push('p.ext_id IS NULL');   // in-app sales only (exclude migrated history)
-  res.json(await qall(`SELECT p.*, s.name site_name FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 300`, args));
+  res.json(await qall(`SELECT p.*, s.name site_name, u.name sold_by_name FROM pos_sales p
+    LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by
+    WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 300`, args));
 });
 router.get('/pos/sales/:id', requireAuth, async (req, res) => {
   const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);

@@ -59,6 +59,14 @@ const num = (v) => {
   return isNaN(n) ? 0 : n;
 };
 const dateStr = (d) => d instanceof Date ? d.toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' }) : null;
+// Postgres TEXT rejects NUL () bytes — strip them and coerce to a trimmed string|null.
+const clean = (v) => { if (v == null) return null; const s = (typeof v === 'string' ? v : String(v)).replace(/\u0000/g, '').trim(); return s.length ? s : null; };
+// First usable string from a scalar or array of strings/objects (Fido phones[]/emails[]).
+const firstStr = (v) => {
+  if (typeof v === 'string') return clean(v);
+  if (Array.isArray(v)) { for (const x of v) { const s = clean(x && typeof x === 'object' ? (x.number || x.phone || x.value || '') : x); if (s) return s; } }
+  return null;
+};
 
 // ── Site resolution ────────────────────────────────────────────────────────────
 /**
@@ -158,14 +166,13 @@ async function etlCustomers(mongoDB, { nameMap, oidMap, norm }, defaultTenantId)
     done('customers (dry-run)', stats);
     return stats;
   }
-  const firstOf = (v) => Array.isArray(v) ? (v[0] || null) : (v || null);
   const cursor = mongoDB.collection('customers').find({}).batchSize(BATCH_SIZE);
   for await (const c of cursor) {
     stats.scanned++;
     const ext_id = String(c._id);
     const site = resolveSiteByOid(oidMap, c.site) || resolveSiteByName(nameMap, norm, c.siteName || c.site);
     const tenantId = (site && site.tenant_id) || defaultTenantId;
-    const name = (c.name || '').trim(); if (!name) { stats.skipped++; continue; }
+    const name = clean(c.name); if (!name) { stats.skipped++; continue; }
     if (!tenantId) { stats.skipped++; continue; }              // no site AND no default tenant
     try {
       const r = await qrun(
@@ -174,9 +181,9 @@ async function etlCustomers(mongoDB, { nameMap, oidMap, norm }, defaultTenantId)
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
            name=EXCLUDED.name,
            phone=COALESCE(EXCLUDED.phone, customers.phone)`,
-        [uuid(), tenantId, name, c.phone || firstOf(c.phones) || null, c.email || firstOf(c.emails) || null, ext_id]);
+        [uuid(), tenantId, name, clean(c.phone) || firstStr(c.phones), clean(c.email) || firstStr(c.emails), ext_id]);
       if (r.rowCount) stats.inserted++;
-    } catch { stats.errors++; }
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] customers error:', e.message.slice(0, 140)); }
     progress('customers', stats.scanned, 0);
   }
   done('customers', stats);
@@ -206,11 +213,11 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
          VALUES (?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
         [uuid(), site.tenant_id, site.id, ext_id, expDate,
-          (e.category || 'OTHER').toUpperCase().slice(0, 40),
-          e.description || e.remarks || e.note || (Array.isArray(e.products) && e.products[0] && e.products[0].name) || null, amount,
+          clean((e.category || 'OTHER').toUpperCase().slice(0, 40)) || 'OTHER',
+          clean(e.description || e.remarks || e.note || (Array.isArray(e.products) && e.products[0] && e.products[0].name)), amount,
           Math.floor((e.createdAt instanceof Date ? e.createdAt : new Date()).getTime() / 1000)]);
       if (r.rowCount) stats.inserted++;
-    } catch { stats.errors++; }
+    } catch (e2) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] expenses error:', e2.message.slice(0, 140)); }
     progress('expenses', stats.scanned, total);
   }
   done('expenses', stats);
@@ -251,14 +258,14 @@ async function etlPayroll(mongoDB, { nameMap, oidMap, norm }) {
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
         [uuid(), site.tenant_id, site.id,
           staffRow ? staffRow.id : null,
-          ext_id, extStaffId, row.staffName || null,
-          String(row.month), String(row.year),
+          ext_id, extStaffId, clean(row.staffName),
+          clean(String(row.month)), String(row.year),
           num(row.grossPay), num(row.netPay), num(row.deductions),
           num(row.daysWorked), num(row.bagsBagged),
           row.status || 'FINAL',
           Math.floor(Date.now() / 1000)]);
       if (r.rowCount) stats.inserted++;
-    } catch { stats.errors++; }
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] payroll error:', e.message.slice(0, 140)); }
     progress('payroll', stats.scanned, total);
   }
   done('payroll', stats);
@@ -306,16 +313,16 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
 
     const saleDate = dateStr(order.createdAt); if (!saleDate) { stats.skipped++; continue; }
     const total_amount = num(order.txn_amount);
-    const pm = (order.paymentMethod || 'CASH').toUpperCase();
+    const pm = clean((order.paymentMethod || 'CASH').toUpperCase()) || 'CASH';
     const isCash = CASH_METHODS.includes(pm);
     const custExtId = order.customer ? String(order.customer) : null;
     const custId = custExtId ? (custByExt[`${site.tenant_id}:${custExtId}`] || null) : null;
-    const custName = order.customerName || order.customer_name || null;
+    const custName = clean(order.customerName || order.customer_name);
 
     // Map fido products[] to items_json
     const rawItems = Array.isArray(order.products) ? order.products : [];
     const items = rawItems.map((p) => ({
-      name: p.name || 'Unknown',
+      name: clean(p.name) || 'Unknown',
       qty: num(p.qty),
       price: num(p.price || (p.amount && p.qty ? num(p.amount) / num(p.qty) : 0)),
       amount: num(p.amount),

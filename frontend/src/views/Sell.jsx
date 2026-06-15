@@ -100,9 +100,6 @@ export default function Sell() {
   const [pending,   setPending]   = useState(outboxCount());
   const [online,    setOnline]    = useState(navigator.onLine);
   const clientUid = useRef(genUid());
-  const orderRef = useRef(null);
-  const goCheckout = () => orderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
   // Post-sale receipt prompt: holds the built receipt until the cashier okays the print.
   const [receipt, setReceipt] = useState(null);
   const [printingReceipt, setPrintingReceipt] = useState(false);
@@ -377,7 +374,7 @@ export default function Sell() {
         value={custName}
         onChange={setCustName}
         fetchFn={fetchCustomers}
-        placeholder="Customer name (optional)"
+        placeholder="Customer — type to search or add (blank = walk-in)"
         style={{ marginBottom: 12 }}
       />
 
@@ -422,7 +419,7 @@ export default function Sell() {
 
       {/* Order card */}
       {cart.length > 0 && (
-        <div className="card" style={{ marginTop: 0 }} ref={orderRef}>
+        <div className="card" style={{ marginTop: 0 }}>
           {/* Cart header */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
             <div style={{ fontWeight: 700 }}>Order</div>
@@ -520,15 +517,6 @@ export default function Sell() {
         </div>
       )}
 
-      {/* Sticky checkout bar — appears once items are in the cart */}
-      {cartLines.length > 0 && (
-        <div className="checkout-bar" role="button" onClick={goCheckout}>
-          <span style={{ fontWeight: 700, fontSize: 14 }}>
-            🛒 {cartLines.length} item{cartLines.length > 1 ? 's' : ''} · <span style={{ fontWeight: 900 }}>{ngn(subtotal)}</span>
-          </span>
-          <button className="cb-btn" onClick={(e) => { e.stopPropagation(); goCheckout(); }}>Checkout →</button>
-        </div>
-      )}
     </div>
   );
 }

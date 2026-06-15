@@ -1006,10 +1006,21 @@ router.post('/pos/sales', requireAuth, needTenant('SITE_MANAGER'), async (req, r
   const nextNoRow = await qone('SELECT COALESCE(MAX(receipt_no),0)+1 n FROM pos_sales WHERE tenant_id=?', [req.ctx.tenant_id]);
   const nextNo = parseInt(nextNoRow.n, 10);
   const sale_date = b.sale_date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  // Customer is optional (walk-in = blank). A newly-typed name is registered
+  // into the customer directory so it becomes a typeahead match next time.
+  let customer_id = b.customer_id || null;
+  const cname = (b.customer_name || '').trim();
+  if (!customer_id && cname) {
+    const cu = await qone(
+      `INSERT INTO customers (id,tenant_id,name) VALUES (?,?,?)
+       ON CONFLICT (tenant_id, lower(name)) DO UPDATE SET name=customers.name
+       RETURNING id`, [uuid(), req.ctx.tenant_id, cname]).catch(() => null);
+    customer_id = cu ? cu.id : null;
+  }
   await qrun(
     `INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,client_uid,sold_by)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [id, req.ctx.tenant_id, site_id, nextNo, b.customer_id || null, b.customer_name || null,
+    [id, req.ctx.tenant_id, site_id, nextNo, customer_id, cname || null,
       JSON.stringify(lines.map((l) => ({ product_id: l.product_id, name: l.name, qty: l.qty, price: l.price, amount: l.amount }))),
       subtotal, discount, total, (b.payment_method || 'CASH').toUpperCase(), amount_paid, balance, status, sale_date, b.client_uid || null, req.user.id]);
   for (const l of lines) {

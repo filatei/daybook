@@ -1105,6 +1105,69 @@ router.get('/pos/range', requireAuth, async (req, res) => {
   });
 });
 
+// ── RECONCILIATIONS (transfer/POS confirmations + cash deposits) ──────────────
+router.get('/reconciliations', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const { from, to, site, kind, status } = req.query;
+  const where = ['r.tenant_id=?'], args = [s.ctx.tenant_id];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('(r.site_id=? OR r.site_id IS NULL)'); args.push(s.ctx.site_id); } else if (site) { where.push('r.site_id=?'); args.push(site); }
+  if (from) { where.push('r.txn_date>=?'); args.push(from); }
+  if (to) { where.push('r.txn_date<=?'); args.push(to); }
+  if (kind) { where.push('r.kind=?'); args.push(kind); }
+  if (status) { where.push('r.status=?'); args.push(status); }
+  res.json(await qall(`SELECT r.*, s.name site_name, c.name customer_name FROM reconciliations r
+    LEFT JOIN sites s ON s.id=r.site_id LEFT JOIN customers c ON c.id=r.customer_id
+    WHERE ${where.join(' AND ')} ORDER BY r.txn_date DESC NULLS LAST, r.created_at DESC LIMIT 300`, args));
+});
+router.get('/reconciliations/summary', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const { from, to, site } = req.query;
+  const where = ['tenant_id=?'], args = [s.ctx.tenant_id];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('(site_id=? OR site_id IS NULL)'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
+  if (from) { where.push('txn_date>=?'); args.push(from); }
+  if (to) { where.push('txn_date<=?'); args.push(to); }
+  const byKind = await qall(`SELECT kind, COALESCE(SUM(amount),0) amount, COUNT(*) n,
+    COUNT(*) FILTER (WHERE status='PENDING') pending, COUNT(*) FILTER (WHERE status='CONFIRMED') confirmed
+    FROM reconciliations WHERE ${where.join(' AND ')} GROUP BY kind ORDER BY amount DESC`, args);
+  res.json({ byKind: byKind.map((r) => ({ kind: r.kind, amount: Number(r.amount), n: Number(r.n), pending: Number(r.pending), confirmed: Number(r.confirmed) })) });
+});
+router.post('/reconciliations', requireAuth, needTenant('SITE_MANAGER'), upload.single('image'), async (req, res) => {
+  const b = req.body || {};
+  const kind = (b.kind || 'CASH_DEPOSIT').toUpperCase();
+  const site_id = req.ctx.role === 'SITE_MANAGER' ? req.ctx.site_id : (b.site_id || null);
+  const id = uuid();
+  await qrun(`INSERT INTO reconciliations (id,tenant_id,site_id,kind,txn_date,amount,amount_confirmed,bank,account_name,ref,status,remarks,image,recorded_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, req.ctx.tenant_id, site_id, kind, b.txn_date || new Date().toISOString().slice(0, 10),
+      +b.amount || 0, b.amount_confirmed ? +b.amount_confirmed : null, b.bank || null, b.account_name || null, b.ref || null,
+      b.status || 'PENDING', b.remarks || null, req.file ? req.file.filename : null, req.user.id]);
+  audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'reconciliation', id, { kind });
+  res.status(201).json(await qone('SELECT * FROM reconciliations WHERE id=?', [id]));
+});
+router.patch('/reconciliations/:id', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+  const r = await qone('SELECT * FROM reconciliations WHERE id=?', [req.params.id]);
+  if (!r || r.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {}; const ok = ['PENDING', 'CONFIRMED', 'FLAGGED'];
+  await qrun('UPDATE reconciliations SET status=?, amount_confirmed=?, action_taken=?, remarks=? WHERE id=?',
+    [ok.includes(b.status) ? b.status : r.status,
+      b.amount_confirmed !== undefined ? (b.amount_confirmed === null ? null : +b.amount_confirmed) : r.amount_confirmed,
+      b.action_taken !== undefined ? b.action_taken : r.action_taken,
+      b.remarks !== undefined ? b.remarks : r.remarks, r.id]);
+  audit(r.tenant_id, req.user.id, 'RECONCILE', 'reconciliation', r.id, { status: b.status });
+  res.json(await qone('SELECT * FROM reconciliations WHERE id=?', [r.id]));
+});
+router.get('/reconciliations/:id/image', requireAuth, async (req, res) => {
+  const r = await qone('SELECT * FROM reconciliations WHERE id=?', [req.params.id]);
+  if (!r) return res.status(404).end();
+  const c = await contextFor(req.user, r.tenant_id);
+  if (!c || (c.role === 'SITE_MANAGER' && r.site_id && r.site_id !== c.site_id)) return res.status(404).end();
+  if (!r.image) return res.status(404).end();
+  if (/^https?:\/\//.test(r.image)) return res.redirect(r.image);   // imported proof lives on the old fido server
+  const p = path.join(UPLOAD_DIR, r.image);
+  if (!fs.existsSync(p)) return res.status(404).end();
+  res.sendFile(p);
+});
+
 // ── CHAT ──────────────────────────────────────────────────────────────────────
 router.get('/chat/channels', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });

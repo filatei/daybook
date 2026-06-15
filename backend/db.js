@@ -517,6 +517,31 @@ async function migrate() {
     )
   `);
 
+  // RECONCILIATIONS — non-cash payment confirmations (fido `recuploads`) + cash
+  // bankings (fido `cashdeposits`). One ledger: confirm money reached the bank.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reconciliations (
+      id               TEXT PRIMARY KEY,
+      tenant_id        TEXT NOT NULL REFERENCES tenants(id),
+      site_id          TEXT REFERENCES sites(id),
+      customer_id      TEXT REFERENCES customers(id),
+      ext_id           TEXT,
+      kind             TEXT NOT NULL,                       -- TRANSFER | POS | CARD | CASH_DEPOSIT
+      txn_date         TEXT,                                -- YYYY-MM-DD
+      amount           DOUBLE PRECISION DEFAULT 0,          -- sale / deposit amount
+      amount_confirmed DOUBLE PRECISION,                    -- bank-confirmed (amt_teller)
+      bank             TEXT,                                -- transfer_from_bank / payeeAcct
+      account_name     TEXT,                                -- account name / depositor
+      ref              TEXT,                                -- rrn / stan / tx_ref
+      status           TEXT DEFAULT 'PENDING',              -- PENDING | CONFIRMED | FLAGGED
+      action_taken     TEXT,
+      remarks          TEXT,
+      image            TEXT,                                -- proof: external URL (imported) or stored filename
+      recorded_by      TEXT REFERENCES users(id),
+      created_at       BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    )
+  `);
+
   // Unique indexes for ETL idempotency (separate statements for WHERE clause)
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_possales_extid
@@ -531,6 +556,10 @@ async function migrate() {
       ON expenses(tenant_id, expense_date);
     CREATE INDEX IF NOT EXISTS idx_payroll_t
       ON payroll(tenant_id, year, month);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_recon_extid
+      ON reconciliations(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_recon_td
+      ON reconciliations(tenant_id, txn_date, kind, status);
   `);
 
   // ── Phase 3: Fido feature parity ──────────────────────────────────────────

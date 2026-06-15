@@ -359,6 +359,70 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
   return stats;
 }
 
+// ── recuploads → reconciliations (transfer/POS payment confirmations) ──────────
+// recuploads have no site; they belong to the primary (Fido) tenant. The proof
+// `image` is an external URL on the old fido server (migrated at cutover).
+async function etlRecuploads(mongoDB, maps, defaultTenantId) {
+  const stats = { scanned: 0, inserted: 0, skipped: 0, errors: 0 };
+  const total = await mongoDB.collection('recuploads').countDocuments();
+  if (DRY_RUN) { stats.scanned = total; done('recuploads (dry-run)', stats); return stats; }
+  if (!defaultTenantId) { console.warn('[ETL] recuploads: no default tenant — skipping'); return stats; }
+  const custRows = await qall('SELECT id, ext_id FROM customers WHERE tenant_id=? AND ext_id IS NOT NULL', [defaultTenantId]);
+  const custByExt = {}; for (const c of custRows) custByExt[c.ext_id] = c.id;
+  const cursor = mongoDB.collection('recuploads').find({}).batchSize(BATCH_SIZE);
+  for await (const r of cursor) {
+    stats.scanned++;
+    const ext_id = String(r._id);
+    const kind = clean((r.pay_type || 'POS').toUpperCase()) || 'POS';
+    const custId = r.customer ? (custByExt[String(r.customer)] || null) : null;
+    const txnDate = dateStr(r.trans_date) || dateStr(r.createdAt);
+    try {
+      const res = await qrun(
+        `INSERT INTO reconciliations (id,tenant_id,site_id,customer_id,ext_id,kind,txn_date,amount,amount_confirmed,bank,account_name,ref,status,action_taken,remarks,image)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+        [uuid(), defaultTenantId, null, custId, ext_id, kind, txnDate,
+          num(r.txn_amount), r.amt_teller != null ? num(r.amt_teller) : null,
+          clean(r.transfer_from_bank), clean(r.transfer_from_account_name) || clean(r.name_teller),
+          clean(r.rrn) || clean(r.stan) || clean(r.tx_ref) || clean(r.trans_id),
+          r.amt_teller != null ? 'CONFIRMED' : 'PENDING',
+          clean(r.action_taken), clean(r.remarks), clean(r.image)]);
+      if (res.rowCount) stats.inserted++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] recuploads error:', e.message.slice(0, 140)); }
+    progress('recuploads', stats.scanned, total);
+  }
+  done('recuploads', stats);
+  return stats;
+}
+
+// ── cashdeposits → reconciliations (cash bankings with deposit-slip image) ─────
+async function etlCashDeposits(mongoDB, { nameMap, norm }, defaultTenantId) {
+  const stats = { scanned: 0, inserted: 0, skipped: 0, errors: 0 };
+  const total = await mongoDB.collection('cashdeposits').countDocuments();
+  if (DRY_RUN) { stats.scanned = total; done('cashdeposits (dry-run)', stats); return stats; }
+  const cursor = mongoDB.collection('cashdeposits').find({}).batchSize(BATCH_SIZE);
+  for await (const d of cursor) {
+    stats.scanned++;
+    const ext_id = String(d._id);
+    const site = resolveSiteByName(nameMap, norm, d.site);
+    const tenantId = (site && site.tenant_id) || defaultTenantId;
+    if (!tenantId) { stats.skipped++; continue; }
+    try {
+      const res = await qrun(
+        `INSERT INTO reconciliations (id,tenant_id,site_id,ext_id,kind,txn_date,amount,bank,account_name,status,image)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+        [uuid(), tenantId, site ? site.id : null, ext_id, 'CASH_DEPOSIT', dateStr(d.createdAt),
+          num(d.amount), clean(d.payeeAcct), clean(d.depositor),
+          d.status === 'SEEN' ? 'CONFIRMED' : 'PENDING', clean(d.image)]);
+      if (res.rowCount) stats.inserted++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] cashdeposits error:', e.message.slice(0, 140)); }
+    progress('cashdeposits', stats.scanned, total);
+  }
+  done('cashdeposits', stats);
+  return stats;
+}
+
 // ── Verify: reconcile Mongo (source) ↔ Postgres (imported rows) ─────────────────
 // Compares row counts per collection, and for orders the total ₦ per site, so you
 // get a clear pass/fail instead of eyeballing. Only counts IMPORTED rows in
@@ -419,15 +483,17 @@ async function main() {
   const defaultTenantId = defTenant ? defTenant.id : null;
   console.log(`[ETL] default tenant for site-less rows: ${defTenant ? defTenant.slug : '(none — site-less customers will be skipped)'}`);
 
-  const run = COLLECTION === 'all' ? ['staff', 'customers', 'expenses', 'payroll', 'orders'] : [COLLECTION];
+  const run = COLLECTION === 'all' ? ['staff', 'customers', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
   const allStats = {};
   for (const col of run) {
     switch (col) {
-      case 'staff':     allStats.staff     = await etlStaff(mongoDB, maps);     break;
-      case 'customers': allStats.customers = await etlCustomers(mongoDB, maps, defaultTenantId); break;
-      case 'expenses':  allStats.expenses  = await etlExpenses(mongoDB, maps);  break;
-      case 'payroll':   allStats.payroll   = await etlPayroll(mongoDB, maps);   break;
-      case 'orders':    allStats.orders    = await etlOrders(mongoDB, maps);    break;
+      case 'staff':        allStats.staff        = await etlStaff(mongoDB, maps);     break;
+      case 'customers':    allStats.customers    = await etlCustomers(mongoDB, maps, defaultTenantId); break;
+      case 'expenses':     allStats.expenses     = await etlExpenses(mongoDB, maps);  break;
+      case 'payroll':      allStats.payroll      = await etlPayroll(mongoDB, maps);   break;
+      case 'orders':       allStats.orders       = await etlOrders(mongoDB, maps);    break;
+      case 'recuploads':   allStats.recuploads   = await etlRecuploads(mongoDB, maps, defaultTenantId); break;
+      case 'cashdeposits': allStats.cashdeposits = await etlCashDeposits(mongoDB, maps, defaultTenantId); break;
       default: console.warn('[ETL] unknown collection:', col);
     }
   }

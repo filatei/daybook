@@ -42,6 +42,7 @@ export default function Nav() {
     { id: 'staff',     icon: '👷', label: 'Staff',     show: true },
     { id: 'gate',      icon: '🚧', label: 'Gate',      show: showGate },
     { id: 'expenses',  icon: '💸', label: 'Expenses',  show: true },
+    { id: 'reconcile', icon: '🏦', label: 'Reconcile', show: true },
     { id: 'documents', icon: '📁', label: 'Docs',      show: true },
     { id: 'admin',     icon: '⚙️', label: 'Admin',     show: isGMup },
   ].filter((t) => t.show);

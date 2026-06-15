@@ -1142,6 +1142,26 @@ router.get('/pos/range', requireAuth, async (req, res) => {
   });
 });
 
+// Today's individual sales (newest first) for the live Sell ticker.  For
+// POS-connected tenants this reads live fido orders; otherwise in-app pos_sales.
+router.get('/pos/recent', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const date = req.query.date || new Date().toISOString().slice(0, 10);
+  const limit = Math.min(parseInt(req.query.limit, 10) || 40, 100);
+  if (await posEnabled(s.ctx.tenant_id)) {
+    try {
+      let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
+      if (s.ctx.role === 'SITE_MANAGER') { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
+      return res.json(await sales.recentOrders({ sites, date, limit }));
+    } catch (e) { /* fall through to pos_sales */ }
+  }
+  const where = ['p.tenant_id=?', 'p.sale_date=?'], args = [s.ctx.tenant_id, date];
+  if (s.ctx.role === 'SITE_MANAGER') { where.push('p.site_id=?'); args.push(s.ctx.site_id); }
+  const rows = await qall(`SELECT p.id, p.receipt_no, p.total amount, p.payment_method, p.customer_name customer, s.name site, p.created_at
+    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT ${limit}`, args);
+  res.json(rows.map((r) => ({ id: String(r.id), receipt_no: r.receipt_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, at: r.created_at })));
+});
+
 // ── RECONCILIATIONS (transfer/POS confirmations + cash deposits) ──────────────
 router.get('/reconciliations', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });

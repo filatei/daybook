@@ -75,6 +75,30 @@ async function getSales(siteCode, dateStr) {
   return { site: siteCode, date: dateStr, total, orders, total_cash, total_deposit, payments: byPayment, lines, incentive: (res?.byType || []).find((t) => t._id === 'INCENTIVE')?.amount || 0 };
 }
 
+/**
+ * Individual recent orders for a day (newest first) — powers the live "today's
+ * sales" ticker.  Returns lightweight rows: site, customer, amount, method, time.
+ */
+async function recentOrders({ sites, date, limit = 40 }) {
+  const db = await getDb();
+  const { start, end } = dayRange(date || new Date().toISOString().slice(0, 10));
+  const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
+  if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
+  const rows = await db.collection('fidoorders')
+    .find(match, { projection: { site: 1, txn_amount: 1, paymentMethod: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1 } })
+    .sort({ createdAt: -1 }).limit(Math.min(+limit || 40, 100)).toArray();
+  const n = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
+  return rows.map((o) => ({
+    id: String(o._id),
+    site: o.site || '',
+    customer: String(o.customerName || o.customer_name || '').trim() || null,
+    amount: Math.round(n(o.txn_amount)),
+    payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
+    items: Array.isArray(o.products) ? o.products.length : 0,
+    at: o.createdAt,
+  }));
+}
+
 /** Sum a site's expenses for one day from `expenses`. */
 async function getExpensesTotal(siteCode, dateStr) {
   const db = await getDb();
@@ -206,4 +230,4 @@ async function ping() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getDb, getSales, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping };
+module.exports = { salesEnabled, getDb, getSales, recentOrders, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping };

@@ -37,6 +37,7 @@ async function poll() {
     if (!site) continue;
     broadcastLive(site.tenant_id, site.id, 'fido.sale', {
       site: o.site, amount: num(o.txn_amount),
+      customer: String(o.customerName || o.customer_name || '').trim() || null,
       payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
       products: Array.isArray(o.products) ? o.products.length : 0,
       at: o.createdAt, source: 'fido',

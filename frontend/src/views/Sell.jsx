@@ -12,8 +12,11 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today, isNetErr } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
+import { useRealtime } from '../hooks/useRealtime.js';
 import Typeahead from '../components/Typeahead.jsx';
 import { queueSale, syncOutbox, outboxCount } from '../offline.js';
+
+const saleTime = (at) => { try { return new Date(typeof at === 'number' ? at * 1000 : at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
 
 const PAY = ['CASH', 'TRANSFER', 'POS'];
 const PAY_LABELS = { CASH: '💵 Cash', TRANSFER: '🏦 Transfer', POS: '💳 POS' };
@@ -97,6 +100,26 @@ export default function Sell() {
   const [pending,   setPending]   = useState(outboxCount());
   const [online,    setOnline]    = useState(navigator.onLine);
   const clientUid = useRef(genUid());
+
+  // ── Live "today's sales" ticker ────────────────────────────────────────────
+  // Seeds with today's sales already on record, then prepends each new sale as
+  // it happens (in-app sale.created + live fido.sale from the running POS).
+  const [feed, setFeed] = useState([]);
+  const seedFeed = useCallback(async () => {
+    try { setFeed(await api(scoped('/pos/recent?limit=40'))); } catch { /* not selected / offline */ }
+  }, [tenant]);
+  useEffect(() => { seedFeed(); }, [seedFeed]);
+  const { connected: liveConnected } = useRealtime((evt) => {
+    if (evt.type !== 'fido.sale' && evt.type !== 'sale.created') return;
+    const p = evt.payload || {};
+    setFeed((f) => [{
+      id: `${evt.seq}-${Date.now()}`, receipt_no: p.receipt_no ?? null,
+      site: p.site || '', customer: p.customer || null,
+      amount: Number(p.amount ?? p.total ?? 0), payment_method: p.payment_method || '',
+      at: p.at || Date.now(), _new: true,
+    }, ...f].slice(0, 50));
+  });
+  const todayTotal = feed.reduce((a, s) => a + (Number(s.amount) || 0), 0);
 
   // Keep the offline queue badge in sync; flush on reconnect / mount.
   useEffect(() => {
@@ -258,6 +281,32 @@ export default function Sell() {
           {online && pending > 0 && <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={doSync}>Sync now</button>}
         </div>
       )}
+
+      {/* Today's live sales ticker */}
+      <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid #16a34a', paddingBottom: feed.length ? 6 : 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: liveConnected ? '#16a34a' : '#94a3b8', boxShadow: liveConnected ? '0 0 0 4px rgba(22,163,74,.18)' : 'none' }} />
+            TODAY&apos;S SALES{liveConnected ? '' : ' (reconnecting…)'}
+          </span>
+          <span style={{ fontWeight: 800 }}>{ngn(todayTotal)} <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>· {feed.length}</span></span>
+        </div>
+        {feed.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>No sales yet today — waiting…</div>
+        ) : (
+          <div style={{ marginTop: 8, maxHeight: 220, overflowY: 'auto' }}>
+            {feed.map((s) => (
+              <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 13, padding: '4px 0', borderBottom: '1px solid var(--line)', background: s._new ? 'rgba(22,163,74,.06)' : 'transparent' }}>
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8 }}>
+                  <strong style={{ fontWeight: 700 }}>{s.customer || 'Walk-in'}</strong>
+                  <span style={{ color: 'var(--muted)' }}>{s.site ? ` · ${s.site}` : ''}{s.payment_method ? ` · ${s.payment_method}` : ''} · {saleTime(s.at)}</span>
+                </span>
+                <span style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>{ngn(s.amount)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Top bar: title + BT status */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>

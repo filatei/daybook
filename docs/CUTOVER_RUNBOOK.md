@@ -61,8 +61,15 @@ ETL_BACKFILL_DAYS=2
    Fido server into Daybook's `UPLOAD_DIR` if not already synced.
 4. **Flip Daybook reads to Postgres** for the Fido/Fiafia tenants (remove the live-Fido
    branch in `/pos/range`, `/pos/orders`, dashboards) — ship the "post-cutover" build.
-5. **Point users to Daybook** (DNS / bookmark) and have staff sign in.
-6. Keep the Fido box **read-only** for a grace period (rollback safety).
+5. **Point users to Daybook** (`daybook.torama.money`) and have all staff sign in.
+6. **Take Fido (`fido.torama.ng`) OFFLINE but keep it fully intact** — do not delete or
+   wipe it. It stays a dormant, complete backup until Daybook has been used
+   successfully for a sustained period. This is the rollback insurance.
+
+> **Scope note — payroll is excluded from this migration.** Payroll data has NOT been
+> moved yet, pending a review and a likely **new payroll system built in Daybook**
+> (attendance-driven). Do not treat payroll as migrated at cutover; it is a separate
+> workstream. Fido's payroll history remains in the offline Fido backup until then.
 
 ---
 

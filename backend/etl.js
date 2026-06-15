@@ -146,22 +146,25 @@ async function etlStaff(mongoDB, { nameMap, oidMap, norm }) {
 }
 
 // ── customers → customers ──────────────────────────────────────────────────────
-async function etlCustomers(mongoDB, { nameMap, oidMap, norm }) {
+// Fido customers are a single global pool with NO site field, so they can't be
+// tenant-resolved by site. They belong to the primary (Fido) tenant — pass its id
+// as the default. (phone/email live in `phones`/`emails` arrays in Fido.)
+async function etlCustomers(mongoDB, { nameMap, oidMap, norm }, defaultTenantId) {
   const stats = { scanned: 0, inserted: 0, skipped: 0, errors: 0 };
   if (DRY_RUN) {
     stats.scanned = await mongoDB.collection('customers').countDocuments();
     done('customers (dry-run)', stats);
     return stats;
   }
+  const firstOf = (v) => Array.isArray(v) ? (v[0] || null) : (v || null);
   const cursor = mongoDB.collection('customers').find({}).batchSize(BATCH_SIZE);
   for await (const c of cursor) {
     stats.scanned++;
     const ext_id = String(c._id);
-    // customers are tenant-scoped; resolve tenant via their site if present
     const site = resolveSiteByOid(oidMap, c.site) || resolveSiteByName(nameMap, norm, c.siteName || c.site);
+    const tenantId = (site && site.tenant_id) || defaultTenantId;
     const name = (c.name || '').trim(); if (!name) { stats.skipped++; continue; }
-    // We need a tenant_id — if site resolved, use it; otherwise skip (can't insert without tenant)
-    if (!site) { stats.skipped++; continue; }
+    if (!tenantId) { stats.skipped++; continue; }              // no site AND no default tenant
     try {
       const r = await qrun(
         `INSERT INTO customers (id,tenant_id,name,phone,email,ext_id)
@@ -170,7 +173,7 @@ async function etlCustomers(mongoDB, { nameMap, oidMap, norm }) {
            name=EXCLUDED.name,
            phone=COALESCE(EXCLUDED.phone, customers.phone)
          WHERE customers.ext_id IS NOT NULL`,
-        [uuid(), site.tenant_id, name, c.phone || null, c.email || null, ext_id]);
+        [uuid(), tenantId, name, c.phone || firstOf(c.phones) || null, c.email || firstOf(c.emails) || null, ext_id]);
       if (r.rowCount) stats.inserted++;
     } catch { stats.errors++; }
     progress('customers', stats.scanned, 0);
@@ -203,7 +206,7 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
          ON CONFLICT (tenant_id,ext_id) DO NOTHING`,
         [uuid(), site.tenant_id, site.id, ext_id, expDate,
           (e.category || 'OTHER').toUpperCase().slice(0, 40),
-          e.description || e.note || null, amount,
+          e.description || e.remarks || e.note || (Array.isArray(e.products) && e.products[0] && e.products[0].name) || null, amount,
           Math.floor((e.createdAt instanceof Date ? e.createdAt : new Date()).getTime() / 1000)]);
       if (r.rowCount) stats.inserted++;
     } catch { stats.errors++; }
@@ -352,12 +355,18 @@ async function main() {
   const maps = await buildSiteMaps(mongoDB);
   console.log(`[ETL] site map: ${Object.keys(maps.nameMap).length} name keys, ${Object.keys(maps.oidMap).length} OID keys`);
 
+  // Default tenant for site-less records (e.g. the global customer pool):
+  // --tenant-slug if given, else the primary POS tenant 'fido'.
+  const defTenant = await qone('SELECT id, slug FROM tenants WHERE slug=? ', [TARGET_SLUG || 'fido']);
+  const defaultTenantId = defTenant ? defTenant.id : null;
+  console.log(`[ETL] default tenant for site-less rows: ${defTenant ? defTenant.slug : '(none — site-less customers will be skipped)'}`);
+
   const run = COLLECTION === 'all' ? ['staff', 'customers', 'expenses', 'payroll', 'orders'] : [COLLECTION];
   const allStats = {};
   for (const col of run) {
     switch (col) {
       case 'staff':     allStats.staff     = await etlStaff(mongoDB, maps);     break;
-      case 'customers': allStats.customers = await etlCustomers(mongoDB, maps); break;
+      case 'customers': allStats.customers = await etlCustomers(mongoDB, maps, defaultTenantId); break;
       case 'expenses':  allStats.expenses  = await etlExpenses(mongoDB, maps);  break;
       case 'payroll':   allStats.payroll   = await etlPayroll(mongoDB, maps);   break;
       case 'orders':    allStats.orders    = await etlOrders(mongoDB, maps);    break;

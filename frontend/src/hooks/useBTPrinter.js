@@ -4,7 +4,7 @@
  * Supports Xprinter XP-58/XP-80 and Epson TM series via BLE.
  * Tries multiple known BLE GATT profiles (different printer chipsets).
  */
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 
 // BLE service → write-characteristic pairs, ordered by market share
 const PROFILES = [
@@ -157,75 +157,142 @@ async function writeInChunks(char, data, chunkSize = 200) {
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
+const LAST_DEVICE_KEY = 'bt_last_device';
+
 export function useBTPrinter() {
   const [status, setStatus] = useState('idle'); // idle | connecting | ready | printing | error
   const [error, setError] = useState(null);
-  const charRef   = useRef(null);
-  const deviceRef = useRef(null);
+  const charRef     = useRef(null);
+  const deviceRef   = useRef(null);
+  const intentional = useRef(false);  // true when the user disconnected on purpose
+  const reconnTimer = useRef(null);
+
+  // Bind the write characteristic from a connected GATT server.
+  const bindChar = useCallback(async (server) => {
+    let writeChar = null;
+    for (const prof of PROFILES) {
+      try {
+        const svc = await server.getPrimaryService(prof.service);
+        writeChar = await svc.getCharacteristic(prof.write);
+        break;
+      } catch { /* try next profile */ }
+    }
+    if (!writeChar) throw new Error('No compatible print service found on this device. Check that the printer is in BLE mode.');
+    charRef.current = writeChar;
+    setStatus('ready');
+    setError(null);
+  }, []);
+
+  // Reconnect to the already-chosen device (no user gesture needed) with backoff.
+  const reconnect = useCallback(async (attempts = 6, { silent = false } = {}) => {
+    const device = deviceRef.current;
+    if (!device || !device.gatt) return false;
+    for (let i = 0; i < attempts; i++) {
+      if (charRef.current && device.gatt.connected) return true;
+      try {
+        setStatus('connecting');
+        const server = await device.gatt.connect();
+        await bindChar(server);
+        return true;
+      } catch {
+        await new Promise((r) => setTimeout(r, Math.min(400 * 2 ** i, 4000)));
+      }
+    }
+    if (silent) { setStatus('idle'); } else { setStatus('error'); setError('Lost connection to the printer — tap to retry.'); }
+    return false;
+  }, [bindChar]);
+
+  // Attach the device + a one-time auto-reconnect-on-drop handler.
+  const trackDevice = useCallback((device) => {
+    deviceRef.current = device;
+    try { if (device.id) localStorage.setItem(LAST_DEVICE_KEY, device.id); } catch { /* ignore */ }
+    if (device.__daybookTracked) return;
+    device.__daybookTracked = true;
+    device.addEventListener('gattserverdisconnected', () => {
+      charRef.current = null;
+      if (intentional.current) { setStatus('idle'); return; }
+      // Auto-reconnect (e.g. printer slept, went briefly out of range).
+      clearTimeout(reconnTimer.current);
+      reconnTimer.current = setTimeout(() => { reconnect(8).catch(() => {}); }, 600);
+    });
+  }, [reconnect]);
 
   const connect = useCallback(async () => {
     if (!navigator.bluetooth) throw new Error('Web Bluetooth is not supported in this browser. Use Chrome on Android or desktop.');
     setStatus('connecting');
     setError(null);
-
+    intentional.current = false;
     try {
-      // List ALL nearby Bluetooth devices so any printer can be picked — name
-      // filters hid printers whose name didn't match a known prefix, making the
-      // chooser "Scan…" forever when the real printer was named something else.
       const device = await navigator.bluetooth.requestDevice({
         acceptAllDevices: true,
         optionalServices: PROFILES.map((p) => p.service),
       });
-
-      deviceRef.current = device;
+      trackDevice(device);
       const server = await device.gatt.connect();
-
-      let writeChar = null;
-      for (const prof of PROFILES) {
-        try {
-          const svc = await server.getPrimaryService(prof.service);
-          writeChar = await svc.getCharacteristic(prof.write);
-          break;
-        } catch { /* try next profile */ }
-      }
-
-      if (!writeChar) throw new Error('No compatible print service found on this device. Check that the printer is in BLE mode.');
-      charRef.current = writeChar;
-      setStatus('ready');
-
-      device.addEventListener('gattserverdisconnected', () => {
-        charRef.current = null;
-        setStatus('idle');
-      });
-    } catch (e) {
-      const msg = e.message || String(e);
-      setError(msg);
-      setStatus('error');
-      throw e;
-    }
-  }, []);
-
-  const print = useCallback(async (receiptData) => {
-    if (!charRef.current) throw new Error('Printer not connected');
-    setStatus('printing');
-    try {
-      const bytes = buildReceipt(receiptData);
-      await writeInChunks(charRef.current, bytes);
-      setStatus('ready');
+      await bindChar(server);
     } catch (e) {
       setError(e.message || String(e));
       setStatus('error');
       throw e;
     }
-  }, []);
+  }, [bindChar, trackDevice]);
+
+  const print = useCallback(async (receiptData) => {
+    // Not connected? Try to bring a known printer back before giving up.
+    if (!charRef.current || !deviceRef.current?.gatt?.connected) {
+      const ok = await reconnect(4);
+      if (!ok || !charRef.current) throw new Error('Printer not connected');
+    }
+    setStatus('printing');
+    const bytes = buildReceipt(receiptData);
+    try {
+      await writeInChunks(charRef.current, bytes);
+      setStatus('ready');
+    } catch (e) {
+      // Mid-print drop: reconnect once and resend so the sale never loses its receipt.
+      charRef.current = null;
+      const ok = await reconnect(4);
+      if (ok && charRef.current) {
+        setStatus('printing');
+        await writeInChunks(charRef.current, bytes);
+        setStatus('ready');
+      } else {
+        setError(e.message || String(e));
+        setStatus('error');
+        throw e;
+      }
+    }
+  }, [reconnect]);
 
   const disconnect = useCallback(() => {
+    intentional.current = true;
+    clearTimeout(reconnTimer.current);
     try { deviceRef.current?.gatt?.disconnect(); } catch { /* ignore */ }
     charRef.current = null;
     deviceRef.current = null;
+    try { localStorage.removeItem(LAST_DEVICE_KEY); } catch { /* ignore */ }
     setStatus('idle');
     setError(null);
   }, []);
+
+  // On mount: silently restore a previously-granted printer (persists the pairing
+  // across reloads) and reconnect in the background, so it's ready without re-pairing.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!navigator.bluetooth?.getDevices) return;
+      try {
+        const devs = await navigator.bluetooth.getDevices();
+        if (cancelled || !devs.length) return;
+        let lastId = null; try { lastId = localStorage.getItem(LAST_DEVICE_KEY); } catch { /* ignore */ }
+        const dev = devs.find((d) => d.id === lastId) || devs[0];
+        if (!dev) return;
+        trackDevice(dev);
+        reconnect(3, { silent: true }).catch(() => {});
+      } catch { /* getDevices unsupported / denied */ }
+    })();
+    return () => { cancelled = true; clearTimeout(reconnTimer.current); };
+  }, [reconnect, trackDevice]);
 
   return { status, error, connect, print, disconnect };
 }

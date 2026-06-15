@@ -146,6 +146,11 @@ router.post('/auth/google', async (req, res) => {
     await qrun('DELETE FROM invites WHERE id=?', [inv.id]);
   }
   if (user.status !== 'ACTIVE') return res.status(403).json({ error: 'account disabled' });
+  // Record a LOGIN in each company the user belongs to (for the Team activity trail).
+  try {
+    const ms = await qall("SELECT tenant_id FROM memberships WHERE user_id=? AND status='ACTIVE'", [user.id]);
+    for (const m of ms) audit(m.tenant_id, user.id, 'LOGIN', 'session', user.id, {});
+  } catch { /* non-critical */ }
   return loginResponse(res, req, user);
 });
 
@@ -282,11 +287,13 @@ router.get('/me/activity', requireAuth, async (req, res) => {
 
 // Company-wide activity trail (GM+): every user's audited actions.
 router.get('/activity/all', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
-  const { user_id, action, before } = req.query;
+  const { user_id, action, before, from, to } = req.query;
   const where = ['a.tenant_id=?'], args = [req.ctx.tenant_id];
   if (user_id) { where.push('a.user_id=?'); args.push(user_id); }
   if (action)  { where.push('a.action=?'); args.push(action); }
   if (before)  { where.push('a.created_at < ?'); args.push(parseInt(before, 10) || 0); }
+  if (from) { const e = Math.floor(new Date(`${from}T00:00:00`).getTime() / 1000); if (e) { where.push('a.created_at >= ?'); args.push(e); } }
+  if (to)   { const e = Math.floor(new Date(`${to}T23:59:59`).getTime() / 1000);   if (e) { where.push('a.created_at <= ?'); args.push(e); } }
   const rows = await qall(
     `SELECT a.action, a.entity, a.entity_id, a.meta, a.created_at, a.user_id,
             u.name actor_name, u.email actor_email
@@ -1154,6 +1161,7 @@ router.post('/pos/sales', requireAuth, needTenant('SECRETARY'), async (req, res)
       [uuid(), req.ctx.tenant_id, l.product_id, site_id, 'SALE', -l.qty, 'receipt#' + nextNo, req.user.id]);
   }
   emitEvent(req.ctx.tenant_id, site_id, 'sale.created', { sale_id: id, receipt_no: nextNo, total, customer_name: b.customer_name || null, payment_method: (b.payment_method || 'CASH').toUpperCase(), status });
+  audit(req.ctx.tenant_id, req.user.id, 'SALE', 'pos_sale', id, { receipt_no: nextNo, total });
   res.status(201).json(await qone('SELECT * FROM pos_sales WHERE id=?', [id]));
 });
 router.get('/pos/sales', requireAuth, async (req, res) => {

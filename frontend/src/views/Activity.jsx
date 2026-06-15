@@ -20,6 +20,8 @@ function describe(a) {
     case 'CLOCK_OUT':    return { icon: '🔵', text: `Clocked out ${m.staff || 'staff'}` };
     case 'FACE_ENROLL':  return { icon: '🙂', text: 'Enrolled a staff face' };
     case 'REMOVE_MEMBER': return { icon: '👤', text: 'Removed a member' };
+    case 'SALE':         return { icon: '🧾', text: `Rang up sale${m.receipt_no ? ` #${m.receipt_no}` : ''}${m.total != null ? ` — ${ngn(m.total)}` : ''}` };
+    case 'LOGIN':        return { icon: '🔑', text: 'Signed in' };
     default:             return { icon: '•', text: `${a.action} ${a.entity || ''}`.trim() };
   }
 }
@@ -29,22 +31,32 @@ export default function Activity() {
   const role = useRole();
   const isMgrUp = role && atLeast(role, 'GENERAL_MANAGER');
   const [data, setData] = useState(null);
-  const [team, setTeam] = useState(null);
+  const [team, setTeam] = useState([]);
+  const [teamEnd, setTeamEnd] = useState(false);
+  const [filters, setFilters] = useState({ user_id: '', from: '', to: '' });
+  const [members, setMembers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState('activity');
 
-  const load = useCallback(async () => {
+  useEffect(() => {
     setLoading(true);
-    try {
-      const [mine, all] = await Promise.all([
-        api(scoped('/me/activity')),
-        isMgrUp ? api(scoped('/activity/all')).catch(() => []) : Promise.resolve(null),
-      ]);
-      setData(mine); setTeam(all);
-    } catch { setData({ audits: [], emails: [] }); }
-    setLoading(false);
+    api(scoped('/me/activity')).then(setData).catch(() => setData({ audits: [], emails: [] })).finally(() => setLoading(false));
+    if (isMgrUp) api(scoped('/members')).then((d) => setMembers(d.members || [])).catch(() => {});
   }, [tenant, isMgrUp]);
-  useEffect(() => { load(); }, [load]);
+
+  const fetchTeam = useCallback(async ({ before = null, append = false } = {}) => {
+    if (!isMgrUp) return;
+    const p = new URLSearchParams();
+    if (filters.user_id) p.set('user_id', filters.user_id);
+    if (filters.from) p.set('from', filters.from);
+    if (filters.to) p.set('to', filters.to);
+    if (before) p.set('before', before);
+    const rows = await api(scoped(`/activity/all?${p}`)).catch(() => []);
+    setTeam((prev) => (append ? [...prev, ...rows] : rows));
+    setTeamEnd(rows.length < 100);
+  }, [isMgrUp, filters]);
+  useEffect(() => { fetchTeam({}); }, [fetchTeam]);
+  const loadMore = () => { if (team.length) fetchTeam({ before: team[team.length - 1].created_at, append: true }); };
 
   const audits = data?.audits || [];
   const emails = data?.emails || [];
@@ -80,26 +92,39 @@ export default function Activity() {
           </div>
         )
       ) : tab === 'team' ? (
-        !team || team.length === 0 ? (
-          <div className="empty"><div className="ic">👥</div><p>No team activity yet</p></div>
-        ) : (
-          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            {team.map((a, i) => {
-              const d = describe(a);
-              return (
-                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid var(--line)' }}>
-                  <div style={{ fontSize: 18 }}>{d.icon}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 600 }}>{d.text}</div>
-                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                      <strong style={{ color: 'var(--ink)' }}>{a.actor_name || a.actor_email || 'Someone'}</strong> · {when(a.created_at)}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+        <>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+            <select className="input" style={{ flex: '1 1 140px' }} value={filters.user_id} onChange={(e) => setFilters((f) => ({ ...f, user_id: e.target.value }))}>
+              <option value="">Everyone</option>
+              {members.map((m) => <option key={m.user_id || m.id} value={m.user_id || m.id}>{m.name || m.email}</option>)}
+            </select>
+            <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filters.from} max={filters.to || undefined} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} />
+            <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} />
           </div>
-        )
+          {team.length === 0 ? (
+            <div className="empty"><div className="ic">👥</div><p>No matching activity</p></div>
+          ) : (
+            <>
+              <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                {team.map((a, i) => {
+                  const d = describe(a);
+                  return (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderBottom: '1px solid var(--line)' }}>
+                      <div style={{ fontSize: 18 }}>{d.icon}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 600 }}>{d.text}</div>
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                          <strong style={{ color: 'var(--ink)' }}>{a.actor_name || a.actor_email || 'Someone'}</strong> · {when(a.created_at)}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {!teamEnd && <button className="btn btn-ghost btn-sm" style={{ marginTop: 10 }} onClick={loadMore}>Load more</button>}
+            </>
+          )}
+        </>
       ) : (
         emails.length === 0 ? (
           <div className="empty"><div className="ic">✉️</div><p>No messages sent yet</p></div>

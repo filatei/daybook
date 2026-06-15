@@ -115,11 +115,13 @@ function ReportForm({ report, sites, onSave, onClose }) {
 }
 
 export default function Reports() {
-  const { openModal, closeModal, sites, tenant } = useStore();
+  const { openModal, closeModal, sites, tenant, toast } = useStore();
   const role = useRole();
   const isSM = role && !atLeast(role, 'GENERAL_MANAGER');
+  const isGM = atLeast(role, 'GENERAL_MANAGER');
   const [reports, setReports] = useState([]);
   const [pos, setPos] = useState(null);
+  const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ site: '', from: '', to: '' });
 
@@ -130,14 +132,24 @@ export default function Reports() {
       if (filters.site) params.set('site', filters.site);
       if (filters.from) params.set('from', filters.from);
       if (filters.to) params.set('to', filters.to);
-      const [data, posData] = await Promise.all([
+      const [data, posData, ord] = await Promise.all([
         api(scoped(`/reports?${params}`)),
         api(scoped(`/pos/range?${params}`)).catch(() => null),  // imported + live POS sales
+        api(scoped(`/pos/sales?source=app&${params}`)).catch(() => []),  // in-app orders only
       ]);
-      setReports(data); setPos(posData);
+      setReports(data); setPos(posData); setOrders(ord || []);
     } catch { setReports([]); }
     setLoading(false);
   }, [tenant, filters]);
+
+  const deleteOrder = async (o) => {
+    if (!window.confirm(`Delete order #${o.receipt_no} (${ngn(o.total)})? This cannot be undone.`)) return;
+    try {
+      await api(scoped(`/pos/sales/${o.id}`), { method: 'DELETE' });
+      setOrders((p) => p.filter((x) => x.id !== o.id));
+      toast('Order deleted', 'ok');
+    } catch (e) { toast(e.message || 'Delete failed', 'err'); }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -185,6 +197,29 @@ export default function Reports() {
             <div key={b.code} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0' }}>
               <span style={{ color: 'var(--muted)' }}>{b.site}</span>
               <span style={{ fontWeight: 600 }}>{ngn(b.sales)} · {b.orders.toLocaleString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* In-app orders (deletable while testing) */}
+      {!loading && orders.length > 0 && (
+        <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+            <strong style={{ fontSize: 14 }}>In-app orders</strong>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{orders.length}</span>
+          </div>
+          {orders.map((o) => (
+            <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700 }}>#{String(o.receipt_no).padStart(4, '0')} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer_name || 'Walk-in'}</span></div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.sale_date} · {o.site_name || '—'} · {o.payment_method}</div>
+              </div>
+              <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.total)}</div>
+              {isGM && (
+                <button title="Delete order" onClick={() => deleteOrder(o)}
+                  style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🗑</button>
+              )}
             </div>
           ))}
         </div>

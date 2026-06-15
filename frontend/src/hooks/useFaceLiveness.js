@@ -6,8 +6,10 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-// face-api.js model weights — served reliably from the GitHub repo via jsDelivr.
-const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+// Self-hosted face-api models + library (served from our own origin → works at
+// sites with weak internet, and offline after the first load via the SW cache).
+const MODEL_URL = '/face/models';
+const FACEAPI_SRC = '/face/face-api.js';
 
 // Eye landmark indices in the 68-point model
 const LEFT_EYE  = [36, 37, 38, 39, 40, 41];
@@ -60,7 +62,7 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
         if (!window.faceapi) {
           await new Promise((resolve, reject) => {
             const s = document.createElement('script');
-            s.src = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
+            s.src = FACEAPI_SRC;
             s.onload = resolve; s.onerror = reject;
             document.head.appendChild(s);
           });

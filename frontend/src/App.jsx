@@ -15,6 +15,9 @@ import Admin from './views/Admin.jsx';
 import Sell from './views/Sell.jsx';
 import Gate from './views/Gate.jsx';
 import Reconcile from './views/Reconcile.jsx';
+import More from './views/More.jsx';
+import Payroll from './views/Payroll.jsx';
+import Generators from './views/Generators.jsx';
 
 function Inner() {
   const { user, tab, login, logout, toast, setTenant, setSites, tenant, tenants } = useStore();
@@ -83,6 +86,9 @@ function Inner() {
         {tab === 'sell'      && <Sell />}
         {tab === 'gate'      && <Gate />}
         {tab === 'reconcile' && <Reconcile />}
+        {tab === 'more'       && <More />}
+        {tab === 'payroll'    && <Payroll />}
+        {tab === 'generators' && <Generators />}
       </main>
       <Modal />
       <Toast />

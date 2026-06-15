@@ -1,6 +1,9 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import Staff from './Staff.jsx';
+import Documents from './Documents.jsx';
+import Reconcile from './Reconcile.jsx';
 
 function SiteForm({ site, onSave, onClose }) {
   const { toast } = useStore();
@@ -199,13 +202,16 @@ export default function Admin() {
 
   return (
     <div>
-      <div className="seg" style={{ marginBottom: 16 }}>
+      <div className="seg" style={{ marginBottom: 16, overflowX: 'auto', flexWrap: 'nowrap' }}>
         <button className={`seg-b${tab === 'sites'    ? ' on' : ''}`} onClick={() => setTab('sites')}>🏗️ Sites</button>
         <button className={`seg-b${tab === 'members'  ? ' on' : ''}`} onClick={() => setTab('members')}>👥 Members</button>
         <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>
+        <button className={`seg-b${tab === 'staff'     ? ' on' : ''}`} onClick={() => setTab('staff')}>👷 Staff</button>
+        <button className={`seg-b${tab === 'documents' ? ' on' : ''}`} onClick={() => setTab('documents')}>📁 Docs</button>
+        <button className={`seg-b${tab === 'reconcile' ? ' on' : ''}`} onClick={() => setTab('reconcile')}>🏦 Reconcile</button>
       </div>
 
-      {loading ? (
+      {tab === 'staff' ? <Staff /> : tab === 'documents' ? <Documents /> : tab === 'reconcile' ? <Reconcile /> : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

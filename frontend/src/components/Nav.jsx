@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useStore, useRole, useActiveTenant, atLeast } from '../store.jsx';
 
 function useInstallPrompt() {
@@ -21,6 +21,42 @@ function useInstallPrompt() {
   return { canInstall, install };
 }
 
+// ── Profile avatar + dropdown (replaces the old sign-out icon) ─────────────────
+function ProfileMenu({ user, isGMup, go, logout, canInstall, install }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, []);
+  const initial = (user?.name || user?.email || '?').trim()[0]?.toUpperCase() || '?';
+  const item = (label, icon, fn) => (
+    <button className="pm-item" onClick={() => { setOpen(false); fn(); }}>
+      <span style={{ width: 20 }}>{icon}</span>{label}
+    </button>
+  );
+  return (
+    <div className="profile-wrap" ref={ref}>
+      <button className="avatar-btn" onClick={() => setOpen((o) => !o)} title="Account">
+        {user?.photo_url ? <img src={user.photo_url} alt="" style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} /> : initial}
+      </button>
+      {open && (
+        <div className="pm pop-in">
+          <div className="pm-head">
+            <div style={{ fontWeight: 800 }}>{user?.name || 'Signed in'}</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{user?.email}</div>
+          </div>
+          {isGMup && item('Admin', '⚙️', () => go('admin'))}
+          {canInstall && item('Install app', '⬇', install)}
+          <div style={{ borderTop: '1px solid var(--line)', margin: '4px 0' }} />
+          {item('Sign out', '⏻', logout)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Nav() {
   const { go, tab, tenants, tenant, setTenant, logout, user } = useStore();
   const role    = useRole();
@@ -28,24 +64,23 @@ export default function Nav() {
   const { canInstall, install } = useInstallPrompt();
 
   const isGMup       = role && atLeast(role, 'GENERAL_MANAGER');
-  const isSuperAdmin  = user?.is_superadmin && !tenant;
-  // Show Sell & Gate for any active tenant context
+  const isSuperAdmin = user?.is_superadmin && !tenant;
   const showSell = !!active;
-  const showGate = !!active;
 
   const brand = active?.brand_color || '#0ea5e9';
 
+  // Five primary destinations. Everything else lives under More or the profile menu.
   const tabs = [
     { id: 'dashboard', icon: '📊', label: 'Dashboard', show: true },
-    { id: 'sell',      icon: '💳', label: 'Sell',      show: showSell },
-    { id: 'reports',   icon: '🧾', label: 'Reports',   show: true },
-    { id: 'staff',     icon: '👷', label: 'Staff',     show: true },
-    { id: 'gate',      icon: '🚧', label: 'Gate',      show: showGate },
+    { id: 'sell',      icon: '💳', label: 'Sales',     show: showSell },
     { id: 'expenses',  icon: '💸', label: 'Expenses',  show: true },
-    { id: 'reconcile', icon: '🏦', label: 'Reconcile', show: true },
-    { id: 'documents', icon: '📁', label: 'Docs',      show: true },
-    { id: 'admin',     icon: '⚙️', label: 'Admin',     show: isGMup },
+    { id: 'reports',   icon: '🧾', label: 'Reports',   show: true },
+    { id: 'more',      icon: '⋯',  label: 'More',      show: true },
   ].filter((t) => t.show);
+
+  // "More" is the active highlight for any destination that lives inside it.
+  const MORE_TABS = ['more', 'gate', 'payroll', 'generators'];
+  const isActive = (id) => id === 'more' ? MORE_TABS.includes(tab) : tab === id;
 
   return (
     <>
@@ -63,20 +98,13 @@ export default function Nav() {
               <option key={t.id} value={t.id}>{t.name}</option>
             ))}
           </select>
-          {canInstall && (
-            <button
-              onClick={install}
-              title="Install app"
-              style={{ background: 'rgba(255,255,255,.2)', border: '1px solid rgba(255,255,255,.4)', color: '#fff', borderRadius: 8, padding: '5px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}
-            >⬇ Install</button>
-          )}
-          <button className="nav-logout" onClick={logout} title="Sign out">⏻</button>
+          <ProfileMenu user={user} isGMup={isGMup} go={go} logout={logout} canInstall={canInstall} install={install} />
         </div>
 
         {/* Desktop tab strip (hidden on mobile via CSS) */}
         <nav className="nav-tabs">
           {tabs.map(({ id, icon, label }) => (
-            <button key={id} className={tab === id ? 'active' : ''} onClick={() => go(id)}>
+            <button key={id} className={isActive(id) ? 'active' : ''} onClick={() => go(id)}>
               <span className="ic">{icon}</span>{label}
             </button>
           ))}
@@ -86,7 +114,7 @@ export default function Nav() {
       {/* ── Bottom nav (mobile only, fixed at bottom) ─────────── */}
       <nav className="bottom-nav">
         {tabs.map(({ id, icon, label }) => (
-          <button key={id} className={tab === id ? 'active' : ''} onClick={() => go(id)}>
+          <button key={id} className={isActive(id) ? 'active' : ''} onClick={() => go(id)}>
             <span className="ic">{icon}</span>
             <span>{label}</span>
           </button>

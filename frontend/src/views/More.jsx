@@ -1,0 +1,38 @@
+import React from 'react';
+import { useStore, useRole, useActiveTenant, atLeast } from '../store.jsx';
+
+/**
+ * More — launcher for secondary / operational screens that don't warrant a
+ * primary tab.  Role-gated: Payroll is GM+; Generators is manager+ (SITE_MANAGER+).
+ */
+export default function More() {
+  const { go } = useStore();
+  const role = useRole();
+  const active = useActiveTenant();
+  const isGM = role && atLeast(role, 'GENERAL_MANAGER');
+  const isMgr = role && atLeast(role, 'SITE_MANAGER');
+
+  const items = [
+    { id: 'gate',       icon: '🚧', label: 'Gate',       desc: 'Scan & verify receipts at loading/exit', show: !!active },
+    { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',     show: isGM },
+    { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',     show: isMgr },
+  ].filter((i) => i.show);
+
+  return (
+    <div>
+      <div className="section-title" style={{ marginTop: 0 }}>More</div>
+      <div className="more-grid">
+        {items.map((i) => (
+          <button key={i.id} className="more-card" onClick={() => go(i.id)}>
+            <div className="more-ic">{i.icon}</div>
+            <div>
+              <div style={{ fontWeight: 800 }}>{i.label}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>{i.desc}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+      {items.length === 0 && <div className="empty"><div className="ic">⋯</div><p>Nothing here for your role yet</p></div>}
+    </div>
+  );
+}

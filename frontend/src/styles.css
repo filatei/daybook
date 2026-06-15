@@ -51,6 +51,40 @@ a { color: var(--brand-d); text-decoration: none; }
   width: 36px; height: 36px; border-radius: 50%; font-size: 16px;
   cursor: pointer; display: grid; place-items: center;
 }
+
+/* ── Profile avatar + dropdown ─────────────────────────────────────────────── */
+.profile-wrap { position: relative; margin-left: auto; }
+.avatar-btn {
+  width: 36px; height: 36px; border-radius: 50%; overflow: hidden;
+  background: rgba(255,255,255,.22); border: 1px solid rgba(255,255,255,.45);
+  color: #fff; font-weight: 800; font-size: 15px; cursor: pointer;
+  display: grid; place-items: center; padding: 0;
+}
+.pm {
+  position: absolute; right: 0; top: calc(100% + 8px);
+  background: #fff; border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(15,23,42,.18); min-width: 220px; z-index: 200; padding: 6px;
+}
+.pm-head { padding: 8px 10px 10px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.pm-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 10px; border: none; background: none; text-align: left;
+  cursor: pointer; border-radius: 9px; font-weight: 600; font-size: 14px; color: var(--ink);
+}
+.pm-item:hover { background: #f1f5f9; }
+
+/* ── More launcher ─────────────────────────────────────────────────────────── */
+.more-grid { display: flex; flex-direction: column; gap: 10px; }
+.more-card {
+  display: flex; align-items: center; gap: 14px; width: 100%;
+  padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px;
+  background: #fff; cursor: pointer; text-align: left;
+}
+.more-card:active { transform: scale(.99); }
+.more-ic {
+  font-size: 24px; width: 46px; height: 46px; flex: 0 0 auto;
+  display: grid; place-items: center; border-radius: 12px; background: var(--brand-l, #e0f2fe);
+}
 .nav-tabs {
   display: flex; overflow-x: auto; gap: 2px;
   padding: 0 10px 8px; scrollbar-width: none;

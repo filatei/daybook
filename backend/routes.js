@@ -996,6 +996,37 @@ router.get('/pos/sales/:id', requireAuth, async (req, res) => {
   if (!c || (c.role === 'SITE_MANAGER' && sale.site_id && sale.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
   res.json({ ...sale, items: J(sale.items_json, []), tenant: await tenantById(sale.tenant_id), site: sale.site_id ? await siteById(sale.site_id) : null });
 });
+
+// Gate: look up receipt by number (for gate staff to verify before releasing vehicle)
+router.get('/pos/gate/:receiptNo', requireAuth, async (req, res) => {
+  const s = await scope(req);
+  if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const rn = parseInt(req.params.receiptNo, 10);
+  if (isNaN(rn)) return res.status(400).json({ error: 'invalid receipt number' });
+  const sale = await qone(
+    `SELECT p.*, s.name site_name FROM pos_sales p
+     LEFT JOIN sites s ON s.id = p.site_id
+     WHERE p.tenant_id=? AND p.receipt_no=?
+     ORDER BY p.created_at DESC LIMIT 1`,
+    [s.ctx.tenant_id, rn],
+  );
+  if (!sale) return res.status(404).json({ error: `Receipt #${rn} not found` });
+  res.json({ ...sale, items: J(sale.items_json, []) });
+});
+
+// Gate: mark sale as exited (truck/customer has left the premises)
+router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  if (!sale) return res.status(404).json({ error: 'not found' });
+  const c = await contextFor(req.user, sale.tenant_id);
+  if (!c || !atLeast(c.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'forbidden' });
+  if (sale.exited_at) return res.status(400).json({ error: 'Already exited', exited_at: sale.exited_at });
+  const ts = nowS();
+  await qrun('UPDATE pos_sales SET exited_at=? WHERE id=?', [ts, sale.id]);
+  await audit(sale.tenant_id, req.user.id, 'EXIT', 'pos_sale', sale.id, { receipt_no: sale.receipt_no });
+  res.json({ ...sale, exited_at: ts, items: J(sale.items_json, []) });
+});
+
 router.get('/pos/summary', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const date = req.query.date; if (!date) return res.status(400).json({ error: 'date required' });

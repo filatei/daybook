@@ -84,7 +84,10 @@ export default function Admin() {
   }, [tenant]);
 
   const loadMembers = useCallback(async () => {
-    try { setMembers(await api(scoped('/members'))); } catch { setMembers([]); }
+    try {
+      const data = await api(scoped('/members'));
+      setMembers(data.members || []);
+    } catch { setMembers([]); }
   }, [tenant]);
 
   useEffect(() => {

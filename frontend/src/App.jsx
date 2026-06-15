@@ -13,6 +13,7 @@ import Expenses from './views/Expenses.jsx';
 import Documents from './views/Documents.jsx';
 import Admin from './views/Admin.jsx';
 import Sell from './views/Sell.jsx';
+import Gate from './views/Gate.jsx';
 
 function Inner() {
   const { user, tab, login, logout, toast, setTenant, setSites, tenant, tenants } = useStore();
@@ -79,6 +80,7 @@ function Inner() {
         {tab === 'documents' && <Documents />}
         {tab === 'admin'     && <Admin />}
         {tab === 'sell'      && <Sell />}
+        {tab === 'gate'      && <Gate />}
       </main>
       <Modal />
       <Toast />

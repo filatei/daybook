@@ -677,6 +677,11 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_payruns_t       ON payroll_runs(tenant_id, period_start);
     CREATE INDEX IF NOT EXISTS idx_paylines_run    ON payroll_run_lines(run_id);
   `);
+
+  // ── Phase 4: Gate verification ─────────────────────────────────────────────
+  await pool.query(`
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS exited_at BIGINT;
+  `);
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

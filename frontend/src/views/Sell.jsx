@@ -129,13 +129,18 @@ export default function Sell() {
   }, [tenant]);
   useEffect(() => { seedFeed(); }, [seedFeed]);
   // Testing: delete an in-app sale (GM only). Restores stock server-side.
-  const deleteOrder = async (s) => {
-    if (!window.confirm(`Delete sale ${s.receipt_no ? '#' + s.receipt_no : ''} (${ngn(s.amount)})? This cannot be undone.`)) return;
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const doDelete = async () => {
+    if (!confirmDel) return;
+    setDeleting(true);
     try {
-      await api(scoped(`/pos/sales/${s.id}`), { method: 'DELETE' });
-      setFeed((f) => f.filter((x) => x.id !== s.id));
+      await api(scoped(`/pos/sales/${confirmDel.id}`), { method: 'DELETE' });
+      setFeed((f) => f.filter((x) => x.id !== confirmDel.id));
       toast('Sale deleted', 'ok');
+      setConfirmDel(null);
     } catch (e) { toast(e.message || 'Delete failed', 'err'); }
+    setDeleting(false);
   };
   const { connected: liveConnected } = useRealtime((evt) => {
     if (evt.type !== 'fido.sale' && evt.type !== 'sale.created') return;
@@ -352,7 +357,7 @@ export default function Sell() {
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
                   <span style={{ fontWeight: 700 }}>{ngn(s.amount)}</span>
                   {s.src === 'db' && s.receipt_no != null && (
-                    <button title="Delete sale (testing)" onClick={() => deleteOrder(s)}
+                    <button title="Delete sale (testing)" onClick={() => setConfirmDel(s)}
                       style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 6, width: 22, height: 22, fontSize: 13, cursor: 'pointer', lineHeight: 1, display: 'grid', placeItems: 'center' }}>🗑</button>
                   )}
                 </span>
@@ -501,6 +506,24 @@ export default function Sell() {
               {posting ? <span className="spin" /> : (bt.status === 'ready' ? '🖨 ' : null)}
               {bt.status === 'ready' ? 'Charge & Print' : 'Charge'} {ngn(subtotal)}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Animated delete confirm (replaces browser alert) */}
+      {confirmDel && (
+        <div onClick={() => !deleting && setConfirmDel(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 320, margin: 0, textAlign: 'center' }}>
+            <div style={{ fontSize: 30, marginBottom: 4 }}>🗑</div>
+            <div style={{ fontWeight: 800, fontSize: 17 }}>Delete sale {confirmDel.receipt_no ? `#${confirmDel.receipt_no}` : ''}?</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', margin: '6px 0 16px' }}>{ngn(confirmDel.amount)} · stock will be restored. This cannot be undone.</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setConfirmDel(null)} disabled={deleting}>Cancel</button>
+              <button className="btn" style={{ flex: 1, background: 'var(--err)' }} onClick={doDelete} disabled={deleting}>
+                {deleting ? <span className="spin" /> : 'Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}

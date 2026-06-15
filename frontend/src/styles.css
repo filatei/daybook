@@ -103,6 +103,8 @@ a { color: var(--brand-d); text-decoration: none; }
 .card.tap { cursor: pointer; transition: transform .12s; }
 .card.tap:active { transform: scale(.985); }
 @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes pop { from { opacity: 0; transform: scale(.94); } to { opacity: 1; transform: none; } }
+.pop-in { animation: pop .16s ease backwards; }
 .card h2, .card h3 { margin: 0 0 10px; }
 
 .section-title {

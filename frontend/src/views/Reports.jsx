@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
+import ReceiptPreview from '../components/ReceiptPreview.jsx';
 
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
 
@@ -126,6 +127,9 @@ export default function Reports() {
   const [pos, setPos] = useState(null);
   const [orders, setOrders] = useState([]);
   const [orderQ, setOrderQ] = useState('');
+  const [viewOrder, setViewOrder] = useState(null);   // order open in the receipt modal
+  const [askDelete, setAskDelete] = useState(false);  // animated delete confirm step
+  const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ site: '', from: '', to: '' });
 
@@ -146,35 +150,48 @@ export default function Reports() {
     setLoading(false);
   }, [tenant, filters]);
 
-  const deleteOrder = async (o) => {
-    if (!window.confirm(`Delete order #${o.receipt_no} (${ngn(o.total)})? This cannot be undone.`)) return;
-    try {
-      await api(scoped(`/pos/sales/${o.id}`), { method: 'DELETE' });
-      setOrders((p) => p.filter((x) => x.id !== o.id));
-      toast('Order deleted', 'ok');
-    } catch (e) { toast(e.message || 'Delete failed', 'err'); }
+  // Build the print/preview payload for an order row.
+  const receiptOf = (o) => {
+    const when = o.created_at ? new Date(o.created_at * 1000) : new Date(`${o.sale_date}T00:00:00`);
+    return {
+      company: activeTenant?.name || 'FIDO WATER',
+      site_name: o.site_name || null,
+      receipt_no: o.receipt_no,
+      date_str: when.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+      time_str: when.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+      items: JSON.parse(o.items_json || '[]'),
+      total: o.total,
+      payment_method: o.payment_method,
+      amount_paid: o.amount_paid ?? o.total,
+      change: Math.max(0, (o.amount_paid || 0) - o.total),
+      customer_name: o.customer_name || null,
+      served_by: o.sold_by_name || null,
+    };
   };
 
-  const printOrder = async (o) => {
+  const openOrder = (o, deleteFirst = false) => { setViewOrder(o); setAskDelete(deleteFirst); };
+  const closeOrder = () => { setViewOrder(null); setAskDelete(false); setBusy(false); };
+
+  const printViewed = async () => {
+    if (!viewOrder) return;
+    setBusy(true);
     try {
       if (bt.status !== 'ready') await bt.connect();   // user gesture → connect printer
-      const when = o.created_at ? new Date(o.created_at * 1000) : new Date(`${o.sale_date}T00:00:00`);
-      await bt.print({
-        company: activeTenant?.name || 'FIDO WATER',
-        site_name: o.site_name || null,
-        receipt_no: o.receipt_no,
-        date_str: when.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
-        time_str: when.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
-        items: JSON.parse(o.items_json || '[]'),
-        total: o.total,
-        payment_method: o.payment_method,
-        amount_paid: o.amount_paid ?? o.total,
-        change: Math.max(0, (o.amount_paid || 0) - o.total),
-        customer_name: o.customer_name || null,
-        served_by: o.sold_by_name || null,
-      });
-      toast(`Receipt #${o.receipt_no} printed ✓`, 'ok');
+      await bt.print(receiptOf(viewOrder));
+      toast(`Receipt #${viewOrder.receipt_no} printed ✓`, 'ok');
     } catch (e) { toast(e.message || 'Print failed', 'err'); }
+    setBusy(false);
+  };
+
+  const confirmDelete = async () => {
+    if (!viewOrder) return;
+    setBusy(true);
+    try {
+      await api(scoped(`/pos/sales/${viewOrder.id}`), { method: 'DELETE' });
+      setOrders((p) => p.filter((x) => x.id !== viewOrder.id));
+      toast('Order deleted', 'ok');
+      closeOrder();
+    } catch (e) { toast(e.message || 'Delete failed', 'err'); setBusy(false); }
   };
 
   const shownOrders = orders.filter((o) => {
@@ -250,17 +267,18 @@ export default function Reports() {
             <div style={{ padding: '14px 16px', fontSize: 13, color: 'var(--muted)' }}>No matching orders</div>
           ) : shownOrders.map((o) => (
             <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
+              <button onClick={() => openOrder(o)} title="View receipt"
+                style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
                 <div style={{ fontWeight: 700 }}>#{String(o.receipt_no).padStart(4, '0')} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer_name || 'Walk-in'}</span></div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                   {o.sale_date} · {o.site_name || '—'} · {o.payment_method}{o.sold_by_name ? ` · ${o.sold_by_name}` : ''}
                 </div>
-              </div>
+              </button>
               <div style={{ fontWeight: 800, whiteSpace: 'nowrap', marginRight: 4 }}>{ngn(o.total)}</div>
-              <button title="Print receipt" onClick={() => printOrder(o)}
+              <button title="Print receipt" onClick={() => openOrder(o)}
                 style={{ border: 'none', background: '#e0f2fe', color: '#0369a1', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🖨</button>
               {isGM && (
-                <button title="Delete order" onClick={() => deleteOrder(o)}
+                <button title="Delete order" onClick={() => openOrder(o, true)}
                   style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🗑</button>
               )}
             </div>
@@ -288,6 +306,41 @@ export default function Reports() {
       )}
 
       <button className="fab" onClick={() => openForm()}>+</button>
+
+      {/* Order receipt modal — preview, print (with confirm), animated delete */}
+      {viewOrder && (
+        <div onClick={closeOrder}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 340, margin: 0, maxHeight: '90vh', overflowY: 'auto' }}>
+            <ReceiptPreview receipt={receiptOf(viewOrder)} />
+
+            {!askDelete ? (
+              <div style={{ display: 'grid', gap: 8, marginTop: 14 }}>
+                <button className="btn" onClick={printViewed} disabled={busy}>
+                  {busy ? <span className="spin" /> : '🖨 '}{bt.status === 'ready' ? 'Print receipt' : 'Connect printer & print'}
+                </button>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-ghost" style={{ flex: 1 }} onClick={closeOrder} disabled={busy}>Close</button>
+                  {isGM && (
+                    <button className="btn" style={{ flex: 1, background: '#fee2e2', color: 'var(--err)' }} onClick={() => setAskDelete(true)} disabled={busy}>🗑 Delete</button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="pop-in" style={{ marginTop: 14, background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: 14, textAlign: 'center' }}>
+                <div style={{ fontWeight: 700, color: '#991b1b' }}>Delete order #{viewOrder.receipt_no}?</div>
+                <div style={{ fontSize: 13, color: '#b91c1c', margin: '4px 0 12px' }}>{ngn(viewOrder.total)} · stock will be restored. This cannot be undone.</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setAskDelete(false)} disabled={busy}>Cancel</button>
+                  <button className="btn" style={{ flex: 1, background: 'var(--err)' }} onClick={confirmDelete} disabled={busy}>
+                    {busy ? <span className="spin" /> : 'Delete'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

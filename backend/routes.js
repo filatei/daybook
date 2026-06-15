@@ -1088,6 +1088,39 @@ router.get('/pos/summary', requireAuth, async (req, res) => {
 router.get('/pos/range', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(s.ctx ? 200 : 400).json({ error: s.error || 'select a workspace' });
   const { from, to, site } = req.query;
+
+  // Pre-cutover: POS-connected tenants (fido/fiafia) read LIVE from the source
+  // system, so today's in-progress sales show up.  pos_sales is only the
+  // historical migration snapshot — it is NOT updated with new fido sales.
+  if (from && to && await posEnabled(s.ctx.tenant_id)) {
+    try {
+      let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
+      if (s.ctx.role === 'SITE_MANAGER') {
+        const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]);
+        sites = sc ? [sc.code] : sites;
+      } else if (site) {
+        const sc = await qone('SELECT code FROM sites WHERE id=?', [site]);
+        if (sc) sites = [sc.code];
+      }
+      const [bySiteR, byDayR, byMethodR] = await Promise.all([
+        sales.query({ from, to, sites, groupBy: 'site' }),
+        sales.query({ from, to, sites, groupBy: 'day' }),
+        sales.query({ from, to, sites, groupBy: 'paymentMethod' }),
+      ]);
+      const isCash = (m) => String(m || '').toUpperCase().includes('CASH');
+      const orders = byMethodR.reduce((a, r) => a + (r.orders || 0), 0);
+      const salesTot = byMethodR.reduce((a, r) => a + (r.amount || 0), 0);
+      const cash = byMethodR.filter((r) => isCash(r.group)).reduce((a, r) => a + (r.amount || 0), 0);
+      return res.json({
+        live: true,
+        totals: { sales: salesTot, orders, cash, transfer: salesTot - cash },
+        bySite: bySiteR.map((r) => ({ site: r.group || '—', code: r.group, sales: r.amount, orders: r.orders })),
+        byDay: byDayR.map((r) => ({ day: r.group, sales: r.amount })).sort((a, b) => (a.day < b.day ? -1 : 1)),
+        byMethod: byMethodR.map((r) => ({ method: r.group || '—', sales: r.amount, orders: r.orders })),
+      });
+    } catch (e) { /* fall through to the pos_sales snapshot on any source error */ }
+  }
+
   const where = ['tenant_id=?'], args = [s.ctx.tenant_id];
   if (s.ctx.role === 'SITE_MANAGER') { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
   if (from) { where.push('sale_date>=?'); args.push(from); }

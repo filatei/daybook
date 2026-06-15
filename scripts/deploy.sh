@@ -20,9 +20,14 @@ cd "${BACKEND}" || die "missing ${BACKEND}"
 log "Pulling latest image…"
 docker compose pull --quiet || log "pull skipped (building locally?)"
 
-# ── 2. Restart container ──────────────────────────────────────────────────────
-log "Starting daybook…"
-docker compose up -d --force-recreate --remove-orphans
+# ── 2. Restart the APP container only ─────────────────────────────────────────
+# --no-deps + naming the service so Postgres is NOT recreated. Recreating the DB
+# (the old `up --force-recreate` did) terminates every live connection — which
+# kills any long-running job (e.g. a Mongo→Postgres ETL) mid-flight with
+# "terminating connection due to administrator command". Postgres is restart:always
+# so it stays up on its own; we only ever cycle the app on deploy.
+log "Starting daybook (app only; Postgres left running)…"
+docker compose up -d --no-deps --force-recreate daybook
 
 # Host port chosen by remote-install.sh and pinned in .env (default 8091).
 HOST_PORT="$(grep -E '^DAYBOOK_HOST_PORT=' .env 2>/dev/null | head -1 | cut -d= -f2- || true)"

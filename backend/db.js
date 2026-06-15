@@ -35,6 +35,9 @@ async function initDb() {
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
   });
+  // Don't let a dropped idle connection (e.g. Postgres restarted) crash the
+  // process with an unhandled 'error' event — pg reconnects on the next query.
+  pool.on('error', (err) => { console.error('[db] pool error (will reconnect):', err.message); });
   // Verify connectivity
   const client = await pool.connect();
   client.release();

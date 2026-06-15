@@ -116,6 +116,33 @@ async function sendDailyReport({ tenant, site, report, to, attachments = [] }) {
   return { messageId: info.messageId, subject, to };
 }
 
+/**
+ * Notify someone they've been added to a company on Daybook, with a sign-in link.
+ * @param {object} opts - { to, tenantName, roleLabel, inviterName, brand? }
+ */
+async function sendInvite({ to, tenantName, roleLabel, inviterName, brand = '#0ea5e9' }) {
+  const subject = `You've been added to ${tenantName} on Daybook`;
+  const html = `
+  <div style="font-family:Segoe UI,Arial,sans-serif;max-width:560px;margin:auto;color:#1f2937">
+    <div style="background:${brand};color:#fff;padding:22px 24px;border-radius:10px 10px 0 0">
+      <div style="font-size:13px;letter-spacing:2px;opacity:.85">DAYBOOK</div>
+      <div style="font-size:22px;font-weight:800">You've been added to ${esc(tenantName)}</div>
+    </div>
+    <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 10px 10px;padding:24px">
+      <p>${inviterName ? esc(inviterName) + ' added you' : 'You have been added'} to <b>${esc(tenantName)}</b> on Daybook as <b>${esc(roleLabel)}</b>.</p>
+      <p>To get started, sign in with this Google account (<b>${esc(to)}</b>) — you'll join the company automatically with your role.</p>
+      <p style="text-align:center;margin:26px 0">
+        <a href="${PUBLIC_URL}" style="background:${brand};color:#fff;text-decoration:none;font-weight:700;padding:12px 26px;border-radius:10px;display:inline-block">Sign in to Daybook</a>
+      </p>
+      <p style="color:#6b7280;font-size:13px">If the button doesn't work, open <a href="${PUBLIC_URL}" style="color:${brand}">${PUBLIC_URL}</a> and choose "Continue with Google".</p>
+      <hr style="border:none;border-top:1px solid #eee;margin:24px 0"/>
+      <p style="color:#9ca3af;font-size:12px">If you weren't expecting this, you can ignore this email.</p>
+    </div>
+  </div>`;
+  const info = await getTransporter().sendMail({ from: FROM, to, subject, html });
+  return { messageId: info.messageId, subject, to };
+}
+
 async function verifyConnection() {
   try { await getTransporter().verify(); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
@@ -124,4 +151,4 @@ async function verifyConnection() {
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, verifyConnection, FROM };
+module.exports = { sendDailyReport, sendInvite, verifyConnection, FROM };

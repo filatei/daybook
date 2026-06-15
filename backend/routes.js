@@ -14,7 +14,30 @@ const {
   verifyGoogleToken, signSession, requireAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, GOOGLE_CLIENT_ID,
 } = require('./auth');
-const { sendDailyReport, verifyConnection } = require('./mailer');
+const { sendDailyReport, sendInvite, verifyConnection } = require('./mailer');
+
+const ROLE_LABELS = {
+  GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
+  SECRETARY: 'Secretary', ACCOUNTANT: 'Accountant', SNR_ACCOUNTANT: 'Snr Accountant',
+  SITE_MANAGER: 'Manager', GENERAL_MANAGER: 'General Manager', ADMIN: 'Admin',
+};
+
+// Fire-and-forget invite email + email_log entry (never blocks the add).
+async function emailInvite(tenant_id, inviterId, email, role) {
+  try {
+    const t = await qone('SELECT name, brand_color FROM tenants WHERE id=?', [tenant_id]);
+    const inviter = await qone('SELECT name, email FROM users WHERE id=?', [inviterId]);
+    const sent = await sendInvite({
+      to: email, tenantName: t?.name || 'your company', roleLabel: ROLE_LABELS[role] || role,
+      inviterName: inviter?.name || inviter?.email || null, brand: t?.brand_color || '#0ea5e9',
+    });
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
+      [uuid(), tenant_id, email, sent.subject, 'SENT']);
+  } catch (e) {
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)',
+      [uuid(), tenant_id, email, 'You have been added to Daybook', 'FAILED', e.message]).catch(() => {});
+  }
+}
 const { callAI, callAgent, AIError, aiConfigured } = require('./aiClient');
 const sales = require('./salesSource');
 const scheduler = require('./scheduler');
@@ -226,6 +249,7 @@ router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
         [uuid(), existing.id, req.ctx.tenant_id, role, role === 'SITE_MANAGER' ? site_id : null]);
     } catch { return res.status(409).json({ error: 'this user is already a member' }); }
     await audit(req.ctx.tenant_id, req.user.id, 'ADD_MEMBER', 'membership', existing.id, { email, role });
+    emailInvite(req.ctx.tenant_id, req.user.id, lower, role);   // notify (fire-and-forget)
     return res.status(201).json({ added: true, email });
   }
   try {
@@ -233,6 +257,7 @@ router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
       [uuid(), req.ctx.tenant_id, lower, role, role === 'SITE_MANAGER' ? site_id : null, req.user.id]);
   } catch { return res.status(409).json({ error: 'already invited' }); }
   await audit(req.ctx.tenant_id, req.user.id, 'INVITE', 'invite', lower, { role });
+  emailInvite(req.ctx.tenant_id, req.user.id, lower, role);   // notify (fire-and-forget)
   res.status(201).json({ invited: true, email: lower });
 });
 
@@ -287,6 +312,12 @@ router.delete('/members/:id', requireAuth, needTenant('ADMIN'), async (req, res)
 router.delete('/invites/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
   await qrun('DELETE FROM invites WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   res.json({ ok: true });
+});
+router.post('/invites/:id/resend', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const inv = await qone('SELECT * FROM invites WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
+  if (!inv) return res.status(404).json({ error: 'not found' });
+  emailInvite(req.ctx.tenant_id, req.user.id, inv.email, inv.role);
+  res.json({ ok: true, email: inv.email });
 });
 
 // ── DAILY REPORTS ──────────────────────────────────────────────────────────────

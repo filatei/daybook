@@ -13,7 +13,7 @@ export default function More() {
   const isMgr = role && atLeast(role, 'SITE_MANAGER');
 
   const items = [
-    { id: 'gate',       icon: '🚧', label: 'Gate',       desc: 'Scan & verify receipts at loading/exit', show: !!active },
+    { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: !!active },
     { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',     show: isGM },
     { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',     show: isMgr },
   ].filter((i) => i.show);

@@ -72,7 +72,7 @@ export default function Nav() {
 
   // Gate/security users get a single, focused destination — nothing else.
   const tabs = isGate
-    ? [{ id: 'gate', icon: '🚧', label: 'Gate', show: true }]
+    ? [{ id: 'gate', icon: '🚧', label: 'Gate & Loading', show: true }]
     : [
       { id: 'dashboard', icon: '📊', label: 'Dashboard', show: true },
       { id: 'sell',      icon: '💳', label: 'Sales',     show: showSell },

@@ -118,7 +118,7 @@ export default function Gate() {
 
   return (
     <div>
-      <div className="section-title" style={{ marginTop: 0 }}>Scan / Verify Receipt</div>
+      <div className="section-title" style={{ marginTop: 0 }}>Gate &amp; Loading — Scan / Verify Receipt</div>
 
       {/* Search bar — auto-focused for barcode scanner */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
@@ -220,15 +220,20 @@ export default function Gate() {
             )}
           </div>
 
-          {/* Action buttons */}
+          {/* Action buttons — one operator can mark loaded and/or released */}
           {status === 'PENDING' && (
-            <button className="btn" onClick={markLoaded} disabled={acting} style={{ background: '#1d4ed8' }}>
-              {acting ? <span className="spin" /> : '📦'} Mark as Loaded
-            </button>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <button className="btn" onClick={markLoaded} disabled={acting} style={{ background: '#1d4ed8' }}>
+                {acting ? <span className="spin" /> : '📦'} Mark as Loaded
+              </button>
+              <button className="btn btn-ghost" onClick={markExited} disabled={acting}>
+                {acting ? <span className="spin" /> : '🚪'} Allow / Mark as Exited
+              </button>
+            </div>
           )}
           {status === 'LOADED' && (
             <button className="btn" onClick={markExited} disabled={acting}>
-              {acting ? <span className="spin" /> : '🚪'} Mark as Exited
+              {acting ? <span className="spin" /> : '🚪'} Allow / Mark as Exited
             </button>
           )}
           {status === 'EXITED' && (

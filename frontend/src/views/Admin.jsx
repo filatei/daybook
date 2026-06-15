@@ -61,7 +61,7 @@ function MemberForm({ members, onInvite, onClose }) {
       <input type="email" className="input" value={email} onChange={(e) => setEmail(e.target.value)} />
       <label className="fl">Role</label>
       <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-        <option value="GATE">Gate / Security (scan & release only)</option>
+        <option value="GATE">Gate &amp; Loading (scan, load &amp; release)</option>
         <option value="SITE_MANAGER">Site Manager</option>
         <option value="GENERAL_MANAGER">General Manager</option>
         <option value="ADMIN">Admin</option>

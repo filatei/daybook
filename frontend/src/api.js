@@ -4,6 +4,7 @@ let _tenant = null;
 let _token = null;
 
 export function setToken(t) { _token = t; }
+export function getToken() { return _token; }
 export function setActiveTenant(id) { _tenant = id; }
 export function getActiveTenant() { return _tenant; }
 

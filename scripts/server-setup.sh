@@ -49,7 +49,7 @@ chmod 440 /etc/sudoers.d/daybook-ops
 
 # ── 5. Enable required Apache modules + vhost ─────────────────────────────────
 log "Enabling Apache modules…"
-a2enmod proxy proxy_http headers rewrite ssl >/dev/null 2>&1 || true
+a2enmod proxy proxy_http proxy_wstunnel headers rewrite ssl >/dev/null 2>&1 || true
 
 # ── 6. systemd unit ───────────────────────────────────────────────────────────
 if [ -f "${OPT}/backend/infra/systemd/daybook.service" ]; then

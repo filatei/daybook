@@ -1,6 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore } from '../store.jsx';
+import { useRealtime } from '../hooks/useRealtime.js';
+
+const clock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 const RANGES = [
   { label: 'This week',  days: 7 },
@@ -43,6 +46,20 @@ export default function Dashboard() {
   const [pos, setPos] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Live sales feed (streamed from the still-running fido POS, pre-cutover).
+  const [live, setLive] = useState({ total: 0, count: 0, feed: [] });
+  const flash = useRef(0);
+  const { connected } = useRealtime((evt) => {
+    if (evt.type !== 'fido.sale' && evt.type !== 'sale.created') return;
+    const amount = Number(evt.payload?.amount ?? evt.payload?.total ?? 0);
+    setLive((p) => ({
+      total: p.total + amount,
+      count: p.count + 1,
+      feed: [{ id: `${evt.seq}-${Date.now()}`, site: evt.payload?.site || '', amount, pm: evt.payload?.payment_method || '', at: evt.payload?.at ? Math.floor(new Date(evt.payload.at).getTime() / 1000) : Math.floor(Date.now() / 1000) }, ...p.feed].slice(0, 8),
+    }));
+    flash.current += 1;
+  });
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -70,6 +87,30 @@ export default function Dashboard() {
 
   return (
     <div>
+      {/* Live sales feed — streams from the running fido POS before cutover */}
+      {(connected || live.count > 0) && (
+        <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid #16a34a' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: connected ? '#16a34a' : '#94a3b8', boxShadow: connected ? '0 0 0 4px rgba(22,163,74,.18)' : 'none', display: 'inline-block' }} />
+              LIVE SALES{connected ? '' : ' (reconnecting…)'}
+            </span>
+            <span style={{ fontWeight: 800 }}>{ngn(live.total)} <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>· {live.count}</span></span>
+          </div>
+          {live.feed.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              {live.feed.map((s) => (
+                <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '3px 0', color: 'var(--ink)' }}>
+                  <span style={{ color: 'var(--muted)' }}>{s.site}{s.pm ? ` · ${s.pm}` : ''} · {clock(s.at)}</span>
+                  <span style={{ fontWeight: 700 }}>{ngn(s.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {live.feed.length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Waiting for the next sale…</div>}
+        </div>
+      )}
+
       <div className="seg" style={{ marginBottom: 14 }}>
         {RANGES.map((r, i) => (
           <button key={r.label} className={`seg-b${rangeIdx === i ? ' on' : ''}`} onClick={() => setRangeIdx(i)}>

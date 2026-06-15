@@ -6,6 +6,7 @@ import { useRealtime } from '../hooks/useRealtime.js';
 const clock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 const RANGES = [
+  { label: 'Today',      days: 0 },
   { label: 'This week',  days: 7 },
   { label: 'This month', days: 30 },
   { label: '90 days',    days: 90 },
@@ -42,6 +43,7 @@ function BarChart({ data }) {
 export default function Dashboard() {
   const { tenant } = useStore();
   const [rangeIdx, setRangeIdx] = useState(0);
+  const [day, setDay] = useState('');      // a specific picked day (overrides the range)
   const [data, setData] = useState(null);
   const [pos, setPos] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -63,8 +65,8 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const from = daysAgo(RANGES[rangeIdx].days);
-      const to = today();
+      const from = day || daysAgo(RANGES[rangeIdx].days);   // a picked day overrides the range
+      const to = day || today();
       const [d, p] = await Promise.all([
         api(scoped(`/dashboard?from=${from}&to=${to}`)),
         api(scoped(`/pos/range?from=${from}&to=${to}`)).catch(() => null),  // imported + live POS sales
@@ -72,7 +74,7 @@ export default function Dashboard() {
       setData(d); setPos(p);
     } catch { /* tenant not selected */ }
     setLoading(false);
-  }, [tenant, rangeIdx]);
+  }, [tenant, rangeIdx, day]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -111,12 +113,17 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="seg" style={{ marginBottom: 14 }}>
+      <div className="seg" style={{ marginBottom: 10 }}>
         {RANGES.map((r, i) => (
-          <button key={r.label} className={`seg-b${rangeIdx === i ? ' on' : ''}`} onClick={() => setRangeIdx(i)}>
+          <button key={r.label} className={`seg-b${(!day && rangeIdx === i) ? ' on' : ''}`} onClick={() => { setDay(''); setRangeIdx(i); }}>
             {r.label}
           </button>
         ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+        <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>Pick a day</span>
+        <input type="date" className="input" style={{ flex: 1, maxWidth: 200 }} value={day} max={today()} onChange={(e) => setDay(e.target.value)} />
+        {day && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setDay('')}>Clear</button>}
       </div>
 
       {loading ? (
@@ -167,7 +174,7 @@ export default function Dashboard() {
           )}
 
           <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
-            {usePos ? `${pos.totals.orders.toLocaleString()} orders` : `${t?.reports || 0} report${t?.reports !== 1 ? 's' : ''}`} · {RANGES[rangeIdx].label}
+            {usePos ? `${pos.totals.orders.toLocaleString()} orders` : `${t?.reports || 0} report${t?.reports !== 1 ? 's' : ''}`} · {day || RANGES[rangeIdx].label}
           </div>
         </>
       )}

@@ -24,6 +24,7 @@ const TENANTS = [
       { code: 'OKUTUKUTU', name: 'Okutukutu' },
       { code: 'SWALI', name: 'Swali' },
       { code: 'YENEGWE', name: 'Yenegwe' },
+      { code: 'TORAMA', name: 'Torama' },
     ] },
   { slug: 'fiafia', name: 'Fiafia Water', brand_color: '#16a34a', industry: 'Water production',
     sites: [

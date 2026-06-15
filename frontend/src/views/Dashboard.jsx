@@ -40,6 +40,7 @@ export default function Dashboard() {
   const { tenant } = useStore();
   const [rangeIdx, setRangeIdx] = useState(0);
   const [data, setData] = useState(null);
+  const [pos, setPos] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -47,8 +48,11 @@ export default function Dashboard() {
     try {
       const from = daysAgo(RANGES[rangeIdx].days);
       const to = today();
-      const d = await api(scoped(`/dashboard?from=${from}&to=${to}`));
-      setData(d);
+      const [d, p] = await Promise.all([
+        api(scoped(`/dashboard?from=${from}&to=${to}`)),
+        api(scoped(`/pos/range?from=${from}&to=${to}`)).catch(() => null),  // imported + live POS sales
+      ]);
+      setData(d); setPos(p);
     } catch { /* tenant not selected */ }
     setLoading(false);
   }, [tenant, rangeIdx]);
@@ -56,6 +60,13 @@ export default function Dashboard() {
   useEffect(() => { load(); }, [load]);
 
   const t = data?.totals;
+  // Prefer real POS sales for the headline numbers; fall back to daily-report totals.
+  const usePos = pos && pos.totals.orders > 0;
+  const sales = usePos ? pos.totals.sales : (t?.sales || 0);
+  const cash = usePos ? pos.totals.cash : (t?.cash || 0);
+  const transfer = usePos ? pos.totals.transfer : (t?.deposit || 0);
+  const byDay = usePos ? pos.byDay : data?.byDay;
+  const bySite = usePos ? pos.bySite : data?.bySite;
 
   return (
     <div>
@@ -69,42 +80,42 @@ export default function Dashboard() {
 
       {loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} style={{ height: 72 }} />)}</>
-      ) : !t ? (
+      ) : (!t && !usePos) ? (
         <div className="empty"><div className="ic">📊</div><p>Select a workspace to see data</p></div>
       ) : (
         <>
           <div className="stat-grid">
             <div className="stat accent">
               <div className="k">Total Sales</div>
-              <div className="v">{ngn(t.sales)}</div>
+              <div className="v">{ngn(sales)}</div>
             </div>
             <div className="stat">
               <div className="k">Cash</div>
-              <div className="v">{ngn(t.cash)}</div>
+              <div className="v">{ngn(cash)}</div>
             </div>
             <div className="stat">
-              <div className="k">Deposits</div>
-              <div className="v">{ngn(t.deposit)}</div>
+              <div className="k">{usePos ? 'Transfer/POS' : 'Deposits'}</div>
+              <div className="v">{ngn(transfer)}</div>
             </div>
             <div className="stat">
-              <div className="k">Costs</div>
-              <div className="v">{ngn(t.costs)}</div>
+              <div className="k">{usePos ? 'Orders' : 'Costs'}</div>
+              <div className="v">{usePos ? pos.totals.orders.toLocaleString() : ngn(t?.costs || 0)}</div>
             </div>
           </div>
 
-          {data.byDay?.length > 0 && (
+          {byDay?.length > 0 && (
             <div className="card" style={{ paddingBottom: 8 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6 }}>
                 Daily Sales Trend
               </div>
-              <BarChart data={data.byDay} />
+              <BarChart data={byDay} />
             </div>
           )}
 
-          {data.bySite?.length > 0 && (
+          {bySite?.length > 0 && (
             <div className="card">
               <div className="section-title" style={{ marginTop: 0 }}>By Site</div>
-              {data.bySite.map((s, i) => (
+              {bySite.map((s, i) => (
                 <div className="list-item" key={s.site}>
                   <div className="av" style={{ borderRadius: 8, fontSize: 14, fontWeight: 800 }}>{i + 1}</div>
                   <div className="meta"><div className="t">{s.site}</div></div>
@@ -115,7 +126,7 @@ export default function Dashboard() {
           )}
 
           <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
-            {t.reports} report{t.reports !== 1 ? 's' : ''} · {RANGES[rangeIdx].label}
+            {usePos ? `${pos.totals.orders.toLocaleString()} orders` : `${t?.reports || 0} report${t?.reports !== 1 ? 's' : ''}`} · {RANGES[rangeIdx].label}
           </div>
         </>
       )}

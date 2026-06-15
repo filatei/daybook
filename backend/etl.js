@@ -176,11 +176,15 @@ async function etlCustomers(mongoDB, { nameMap, oidMap, norm }, defaultTenantId)
     if (!tenantId) { stats.skipped++; continue; }              // no site AND no default tenant
     try {
       const r = await qrun(
+        // Dedupe on the unique (tenant_id, lower(name)) index — Fido has ~2k
+        // duplicate-named customers that merge into one Daybook customer (keep
+        // the first ext_id so re-runs stay idempotent; backfill phone/email).
         `INSERT INTO customers (id,tenant_id,name,phone,email,ext_id)
          VALUES (?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
-           name=EXCLUDED.name,
-           phone=COALESCE(EXCLUDED.phone, customers.phone)`,
+         ON CONFLICT (tenant_id, lower(name)) DO UPDATE SET
+           ext_id = COALESCE(customers.ext_id, EXCLUDED.ext_id),
+           phone  = COALESCE(EXCLUDED.phone, customers.phone),
+           email  = COALESCE(EXCLUDED.email, customers.email)`,
         [uuid(), tenantId, name, clean(c.phone) || firstStr(c.phones), clean(c.email) || firstStr(c.emails), ext_id]);
       if (r.rowCount) stats.inserted++;
     } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] customers error:', e.message.slice(0, 140)); }

@@ -20,6 +20,7 @@ import Payroll from './views/Payroll.jsx';
 import Generators from './views/Generators.jsx';
 import Terminals from './views/Terminals.jsx';
 import Products from './views/Products.jsx';
+import SiteMessages from './views/SiteMessages.jsx';
 import Activity from './views/Activity.jsx';
 
 function Inner() {
@@ -105,6 +106,7 @@ function Inner() {
         {tab === 'generators' && <Generators />}
         {tab === 'terminals'  && <Terminals />}
         {tab === 'products'   && <Products />}
+        {tab === 'messages'   && <SiteMessages />}
         {tab === 'activity'   && <Activity />}
       </main>
       <Modal />

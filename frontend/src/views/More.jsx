@@ -15,6 +15,7 @@ export default function More() {
   const isSec = role && atLeast(role, 'SECRETARY');             // Secretary+
 
   const items = [
+    { id: 'messages',   icon: '✉️', label: 'Site Messages', desc: role && atLeast(role, 'ADMIN') ? 'Private messages from site users' : 'Send a private note to the admin', show: !!active },
     { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: isSec && !!active },
     { id: 'documents',  icon: '📁', label: 'Documents',  desc: 'Incident reports & daily logs',           show: isSec },
     { id: 'reconcile',  icon: '🏦', label: 'Reconcile',  desc: 'Transfers, POS & cash deposits',          show: isAcct },

@@ -1013,6 +1013,48 @@ router.get('/suggest/expense-items', requireAuth, async (req, res) => {
   } catch { res.json([]); }   // malformed items_json shouldn't break the picker
 });
 
+// ── SITE MESSAGES (private note from a site user to the admin) ────────────────
+// Visible only to the sender and to admins. Each side can hide its own copy.
+router.get('/site-messages', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const isAdmin = atLeast(s.ctx.role, 'ADMIN');
+  const rows = isAdmin
+    ? await qall(`SELECT m.*, u.name sender_name, u.email sender_email, st.name site_name
+        FROM site_messages m LEFT JOIN users u ON u.id=m.sender_id LEFT JOIN sites st ON st.id=m.site_id
+        WHERE m.tenant_id=? AND m.deleted_by_admin=false ORDER BY m.created_at DESC LIMIT 300`, [s.ctx.tenant_id])
+    : await qall(`SELECT m.*, st.name site_name FROM site_messages m LEFT JOIN sites st ON st.id=m.site_id
+        WHERE m.tenant_id=? AND m.sender_id=? AND m.deleted_by_sender=false ORDER BY m.created_at DESC LIMIT 200`, [s.ctx.tenant_id, req.user.id]);
+  res.json({ is_admin: isAdmin, messages: rows.map((r) => ({
+    id: r.id, body: r.body, site_name: r.site_name || null,
+    sender_name: r.sender_name || null, sender_email: r.sender_email || null,
+    mine: r.sender_id === req.user.id, created_at: Number(r.created_at),
+  })) });
+});
+router.post('/site-messages', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const body = String((req.body || {}).body || '').trim();
+  if (!body) return res.status(400).json({ error: 'message required' });
+  if (body.length > 4000) return res.status(400).json({ error: 'message too long' });
+  const site_id = s.ctx.site_id || (req.body || {}).site_id || null;
+  const id = uuid();
+  await qrun('INSERT INTO site_messages (id,tenant_id,site_id,sender_id,body) VALUES (?,?,?,?,?)', [id, s.ctx.tenant_id, site_id, req.user.id, body]);
+  try {
+    const admins = (await tenantUserIds(s.ctx.tenant_id, 'ADMIN')).filter((u) => u !== req.user.id);
+    await notify(s.ctx.tenant_id, admins, { type: 'message', title: 'New site message', body: body.slice(0, 80), link: 'messages' });
+  } catch { /* notify best-effort */ }
+  res.status(201).json({ id, ok: true });
+});
+router.delete('/site-messages/:id', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const m = await qone('SELECT * FROM site_messages WHERE id=? AND tenant_id=?', [req.params.id, s.ctx.tenant_id]);
+  if (!m) return res.status(404).json({ error: 'not found' });
+  // The sender hides only their own copy; an admin hides only the admin copy.
+  if (m.sender_id === req.user.id) await qrun('UPDATE site_messages SET deleted_by_sender=true WHERE id=?', [m.id]);
+  else if (atLeast(s.ctx.role, 'ADMIN')) await qrun('UPDATE site_messages SET deleted_by_admin=true WHERE id=?', [m.id]);
+  else return res.status(403).json({ error: 'forbidden' });
+  res.json({ ok: true });
+});
+
 // ── ATTENDANCE ────────────────────────────────────────────────────────────────
 const ATT_DIR = path.join(UPLOAD_DIR, 'attendance');
 fs.mkdirSync(ATT_DIR, { recursive: true });

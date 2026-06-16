@@ -879,6 +879,24 @@ async function migrate() {
       ON pos_terminals(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_pos_terminals_tenant ON pos_terminals(tenant_id);
   `);
+
+  // ── Phase 7: Site messages (private note from a site user to the admin) ───────
+  // Visible only to the sender and to admins. Each side can hide its own copy
+  // (deleted_by_sender / deleted_by_admin) without removing the other's.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS site_messages (
+      id               TEXT PRIMARY KEY,
+      tenant_id        TEXT NOT NULL,
+      site_id          TEXT,
+      sender_id        TEXT NOT NULL,
+      body             TEXT NOT NULL,
+      deleted_by_sender BOOLEAN DEFAULT false,
+      deleted_by_admin  BOOLEAN DEFAULT false,
+      created_at       BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_messages_tenant ON site_messages(tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_site_messages_sender ON site_messages(sender_id);
+  `);
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

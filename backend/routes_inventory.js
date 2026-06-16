@@ -101,8 +101,18 @@ router.get('/levels/low', requireAuth, async (req, res) => {
 router.post('/moves', requireAuth, async (req, res) => {
   const c = await ctx(req, res, 'SECRETARY'); if (!c) return;
   const b = req.body || {};
-  const item = await qone('SELECT * FROM stock_items WHERE id=? AND tenant_id=?', [b.item_id, c.tenant_id]);
-  if (!item) return res.status(400).json({ error: 'invalid item' });
+  // Pick an existing item by id, else find-or-create by name (create on the fly).
+  let item = b.item_id ? await qone('SELECT * FROM stock_items WHERE id=? AND tenant_id=?', [b.item_id, c.tenant_id]) : null;
+  if (!item && String(b.item_name || '').trim()) {
+    const name = String(b.item_name).trim();
+    item = await qone('SELECT * FROM stock_items WHERE tenant_id=? AND lower(name)=lower(?)', [c.tenant_id, name]);
+    if (!item) {
+      await qrun('INSERT INTO stock_items (id,tenant_id,name,unit) VALUES (?,?,?,?) ON CONFLICT (tenant_id, lower(name)) DO NOTHING',
+        [uuid(), c.tenant_id, name, b.unit || 'unit']).catch(() => {});
+      item = await qone('SELECT * FROM stock_items WHERE tenant_id=? AND lower(name)=lower(?)', [c.tenant_id, name]);
+    }
+  }
+  if (!item) return res.status(400).json({ error: 'pick or name a stock item' });
   const type = ['RECEIVE', 'ISSUE', 'ADJUST'].includes(String(b.type || '').toUpperCase()) ? String(b.type).toUpperCase() : 'RECEIVE';
   const mag = Math.abs(+b.qty || 0);
   if (!mag && type !== 'ADJUST') return res.status(400).json({ error: 'quantity required' });

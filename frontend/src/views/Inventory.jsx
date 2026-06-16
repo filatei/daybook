@@ -55,17 +55,25 @@ function MoveForm({ item, sites, siteBound, onSaved, onClose }) {
   const { toast, tenant } = useStore();
   const [type, setType] = useState('RECEIVE');
   const [f, setF] = useState({ qty: '', unit_cost: '', vendor: '', site_id: sites[0]?.id || '', date: today(), note: '', create_payable: false });
+  const [itemId, setItemId] = useState(item?.id || null);   // when picked from typeahead
+  const [itemName, setItemName] = useState(item?.name || '');
+  const [unit, setUnit] = useState(item?.unit || 'unit');
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const fetchVendors = useCallback(async (q) => {
     try { return (await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`))).map((r) => ({ label: r.vendor || r.label, sub: r.sub || '' })); } catch { return []; }
   }, [tenant]);
+  const fetchItems = useCallback(async (q) => {
+    try { return (await api(scoped(`/inventory/items/suggest?q=${encodeURIComponent(q)}`))).map((r) => ({ id: r.id, label: r.label, sub: r.sub })); } catch { return []; }
+  }, [tenant]);
   const save = async () => {
+    if (!item && !itemName.trim()) return toast('Pick or name a stock item', 'err');
     if (!(+f.qty > 0) && type !== 'ADJUST') return toast('Enter a quantity', 'err');
     setSaving(true);
     try {
       await api(scoped('/inventory/moves'), { method: 'POST', body: {
-        item_id: item.id, type, qty: +f.qty || 0, unit_cost: +f.unit_cost || 0,
+        item_id: itemId || undefined, item_name: itemId ? undefined : itemName.trim(), unit,
+        type, qty: +f.qty || 0, unit_cost: +f.unit_cost || 0,
         vendor: f.vendor.trim() || null, site_id: siteBound ? undefined : (f.site_id || null),
         date: f.date, note: f.note.trim() || null, create_payable: type === 'RECEIVE' && f.create_payable,
       } });
@@ -76,11 +84,22 @@ function MoveForm({ item, sites, siteBound, onSaved, onClose }) {
   };
   const TYPES = { RECEIVE: '⬇ Receive', ISSUE: '⬆ Issue', ADJUST: '⚖ Adjust' };
   return (
-    <Modal onClose={onClose} title={item.name}>
+    <Modal onClose={onClose} title={item ? item.name : 'Stock movement'}>
+      {!item && (
+        <>
+          <label className="fl">Stock item</label>
+          <div style={{ marginBottom: 10 }}>
+            <Typeahead value={itemName} onChange={(v) => { setItemName(v); setItemId(null); }}
+              onPick={(it) => { setItemName(it.label); setItemId(it.id); }}
+              fetchFn={fetchItems} allowCreate minChars={1}
+              createLabel={(q) => `➕ New item “${q}”`} placeholder="Search or add an item…" />
+          </div>
+        </>
+      )}
       <div className="seg" style={{ marginBottom: 10 }}>
         {['RECEIVE', 'ISSUE', 'ADJUST'].map((t) => <button key={t} className={`seg-b${type === t ? ' on' : ''}`} onClick={() => setType(t)}>{TYPES[t]}</button>)}
       </div>
-      <label className="fl">{type === 'ADJUST' ? 'Adjustment (+/−)' : `Quantity (${item.unit || 'unit'})`}</label>
+      <label className="fl">{type === 'ADJUST' ? 'Adjustment (+/−)' : `Quantity (${unit || 'unit'})`}</label>
       <input className="input" type="number" inputMode="decimal" value={f.qty} onChange={(e) => set('qty', e.target.value)} placeholder="0" style={{ marginBottom: 10 }} />
       {type === 'RECEIVE' && (
         <>
@@ -177,6 +196,7 @@ export default function Inventory() {
 
   const openItem = (it) => openModal(<ItemDetail item={it} sites={sites} siteBound={siteBound} canManage={canManage} onChanged={load} onClose={closeModal} />);
   const openNew = () => openModal(<ItemForm onSaved={load} onClose={closeModal} />);
+  const openMove = () => openModal(<MoveForm item={null} sites={sites} siteBound={siteBound} onSaved={load} onClose={closeModal} />);
 
   return (
     <div>
@@ -184,6 +204,7 @@ export default function Inventory() {
         <div className="section-title" style={{ margin: 0 }}>Inventory</div>
         {canManage && <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px' }} onClick={openNew}>＋ Item</button>}
       </div>
+      {canManage && <button className="btn" style={{ marginBottom: 12 }} onClick={openMove}>⬇ Receive / Issue stock</button>}
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={`seg-b${tab === 'all' ? ' on' : ''}`} onClick={() => setTab('all')}>📦 All items</button>
         <button className={`seg-b${tab === 'low' ? ' on' : ''}`} onClick={() => setTab('low')}>⚠️ Low stock{lowCount ? ` (${lowCount})` : ''}</button>

@@ -33,9 +33,11 @@ async function emailInvite(tenant_id, inviterId, email, role) {
     });
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
       [uuid(), tenant_id, email, sent.subject, 'SENT']);
+    return { ok: true };
   } catch (e) {
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)',
       [uuid(), tenant_id, email, 'You have been added to Daybook', 'FAILED', e.message]).catch(() => {});
+    return { ok: false, error: e.message };
   }
 }
 const { callAI, callAgent, AIError, aiConfigured } = require('./aiClient');
@@ -367,7 +369,9 @@ router.delete('/invites/:id', requireAuth, needTenant('ADMIN'), async (req, res)
 router.post('/invites/:id/resend', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const inv = await qone('SELECT * FROM invites WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   if (!inv) return res.status(404).json({ error: 'not found' });
-  emailInvite(req.ctx.tenant_id, req.user.id, inv.email, inv.role);
+  // Await the real send so the client can report a truthful result.
+  const result = await emailInvite(req.ctx.tenant_id, req.user.id, inv.email, inv.role);
+  if (!result || !result.ok) return res.status(502).json({ error: result?.error || 'Email could not be sent — check SMTP settings', email: inv.email });
   res.json({ ok: true, email: inv.email });
 });
 
@@ -764,8 +768,12 @@ router.post('/ai/analyse', requireAuth, async (req, res) => {
 
 // ── STAFF & TIMESHEETS ────────────────────────────────────────────────────────
 // Staff list columns — exclude the bulky face_descriptor; expose face_enrolled flag.
-const STAFF_COLS = `id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext_people_id,status,created_at,
+const STAFF_COLS = `id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,
+  bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,ext_people_id,status,created_at,
   (face_descriptor IS NOT NULL) AS face_enrolled, face_enrolled_at`;
+const STAFF_TYPES = ['REGULAR', 'BAGGER', 'LOADER'];
+// Piece workers (baggers/loaders) are paid per bag; regular staff get a daily/monthly rate.
+const payTypeFor = (staffType, requested) => (staffType === 'BAGGER' || staffType === 'LOADER') ? 'PIECE' : (['DAILY', 'MONTHLY', 'HOURLY'].includes(String(requested || '').toUpperCase()) ? String(requested).toUpperCase() : 'DAILY');
 router.get('/staff', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   if (s.all) return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff ORDER BY full_name`));
@@ -827,9 +835,18 @@ router.post('/staff', requireAuth, needTenant('SECRETARY'), async (req, res) => 
   if (!b.full_name || !site_id) return res.status(400).json({ error: 'full_name and site_id required' });
   const site = await siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
   const id = uuid();
-  try { await qrun('INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext_people_id) VALUES (?,?,?,?,?,?,?,?)',
-    [id, req.ctx.tenant_id, site_id, b.full_name.trim(), b.role_title || null, b.phone || null, b.pay_type || 'DAILY', b.ext_people_id || null]); }
-  catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
+  const staff_type = STAFF_TYPES.includes(String(b.staff_type || '').toUpperCase()) ? String(b.staff_type).toUpperCase() : 'REGULAR';
+  const pay_type = payTypeFor(staff_type, b.pay_type);
+  // Baggers/loaders use a piece role_title by default; regular keep their position.
+  const role_title = (b.role_title || '').trim() || (staff_type === 'REGULAR' ? null : staff_type.charAt(0) + staff_type.slice(1).toLowerCase());
+  try {
+    await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,ext_people_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, req.ctx.tenant_id, site_id, b.full_name.trim(), role_title, b.phone || null, pay_type, staff_type,
+        b.department || null, b.bank_name || null, b.bank_account || null,
+        +b.daily_rate || 0, +b.rate_loaded || 0, +b.rate_bagged || 0, b.ext_people_id || null]);
+  } catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
+  await audit(req.ctx.tenant_id, req.user.id, 'STAFF_ADD', 'staff', id, { full_name: b.full_name, staff_type });
   res.status(201).json(await qone('SELECT * FROM staff WHERE id=?', [id]));
 });
 router.patch('/staff/:id', requireAuth, needTenant('SECRETARY'), async (req, res) => {
@@ -837,8 +854,14 @@ router.patch('/staff/:id', requireAuth, needTenant('SECRETARY'), async (req, res
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (siteBound(req.ctx) && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const f = req.body || {};
-  await qrun('UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,status=?,site_id=? WHERE id=?',
-    [f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, f.pay_type ?? st.pay_type, f.status ?? st.status, siteBound(req.ctx) ? st.site_id : (f.site_id ?? st.site_id), st.id]);
+  const staff_type = f.staff_type != null ? (STAFF_TYPES.includes(String(f.staff_type).toUpperCase()) ? String(f.staff_type).toUpperCase() : st.staff_type) : st.staff_type;
+  const pay_type = f.staff_type != null || f.pay_type != null ? payTypeFor(staff_type, f.pay_type ?? st.pay_type) : st.pay_type;
+  await qrun(`UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,staff_type=?,department=?,bank_name=?,bank_account=?,
+      daily_rate=?,rate_loaded=?,rate_bagged=?,status=?,site_id=? WHERE id=?`,
+    [f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, pay_type, staff_type,
+      f.department ?? st.department, f.bank_name ?? st.bank_name, f.bank_account ?? st.bank_account,
+      f.daily_rate ?? st.daily_rate, f.rate_loaded ?? st.rate_loaded, f.rate_bagged ?? st.rate_bagged,
+      f.status ?? st.status, siteBound(req.ctx) ? st.site_id : (f.site_id ?? st.site_id), st.id]);
   res.json(await qone('SELECT * FROM staff WHERE id=?', [st.id]));
 });
 router.post('/staff/import', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
@@ -1203,12 +1226,16 @@ router.post('/pos/sales', requireAuth, needTenant('SECRETARY'), async (req, res)
        RETURNING id`, [uuid(), req.ctx.tenant_id, cname]).catch(() => null);
     customer_id = cu ? cu.id : null;
   }
+  // Non-cash payments can carry the bank / POS terminal it went through.
+  const pmU = (b.payment_method || 'CASH').toUpperCase();
+  const bank = pmU === 'CASH' ? null : (String(b.bank || '').trim().toUpperCase() || null);
+  const terminal = pmU === 'CASH' ? null : (String(b.terminal || '').trim().toUpperCase() || null);
   await qrun(
-    `INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,client_uid,sold_by)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,bank,terminal,client_uid,sold_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [id, req.ctx.tenant_id, site_id, nextNo, customer_id, cname || null,
       JSON.stringify(lines.map((l) => ({ product_id: l.product_id, name: l.name, qty: l.qty, price: l.price, amount: l.amount }))),
-      subtotal, discount, total, (b.payment_method || 'CASH').toUpperCase(), amount_paid, balance, status, sale_date, b.client_uid || null, req.user.id]);
+      subtotal, discount, total, pmU, amount_paid, balance, status, sale_date, bank, terminal, b.client_uid || null, req.user.id]);
   for (const l of lines) {
     if (!l.track) continue;
     await qrun('UPDATE products SET stock_qty=stock_qty-? WHERE id=?', [l.qty, l.product_id]);
@@ -1427,9 +1454,9 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
   if (method === 'CASH') { where.push("p.payment_method='CASH'"); }
   else if (method === 'NONCASH') { where.push("p.payment_method<>'CASH'"); }
   else if (method) { where.push('p.payment_method=?'); args.push(method.toUpperCase()); }
-  const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, s.name site, u.name entry_by, p.created_at
+  const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
-  res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, items: J(r.items_json, []), at: r.created_at })));
+  res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at })));
 });
 
 // One order's full detail (powers live-line / order drill-down click).
@@ -1444,11 +1471,36 @@ router.get('/pos/orders/:id', requireAuth, async (req, res) => {
       }
     } catch (e) { /* fall through */ }
   }
-  const r = await qone(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, s.name site, u.name entry_by, p.created_at, p.tenant_id, p.site_id
+  const r = await qone(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at, p.tenant_id, p.site_id
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE p.id=?`, [req.params.id]);
   if (!r || r.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (siteBound(s.ctx) && r.site_id && r.site_id !== s.ctx.site_id) return res.status(404).json({ error: 'not found' });
-  res.json({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, items: J(r.items_json, []), at: r.created_at });
+  res.json({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at });
+});
+
+// POS terminals available to this tenant (for the Sell "which POS?" picker).
+// Site-bound users only see terminals at their site (or unassigned ones).
+router.get('/pos/terminals', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const where = ['tenant_id=?', "COALESCE(status,'ACTIVE')<>'INACTIVE'"], args = [s.ctx.tenant_id];
+  if (siteBound(s.ctx)) { where.push('(site_id=? OR site_id IS NULL)'); args.push(s.ctx.site_id); }
+  const rows = await qall(`SELECT id, bank, location, sn, terminal_id, label FROM pos_terminals WHERE ${where.join(' AND ')} ORDER BY bank, location`, args);
+  res.json(rows.map((r) => ({
+    id: r.id, bank: r.bank || '', location: r.location || '', sn: r.sn || '', terminal_id: r.terminal_id || '',
+    label: r.label || [r.bank, r.location].filter(Boolean).join(' · ') || r.terminal_id || r.sn || 'Terminal',
+  })));
+});
+
+// Distinct bank names known to this tenant (terminals + past transfers) — powers
+// the Transfer bank typeahead.  Falls back to a common Nigerian-bank list.
+const COMMON_BANKS = ['ACCESS', 'GTB', 'UBA', 'ZENITH', 'FIRST BANK', 'FCMB', 'FIDELITY', 'STERLING', 'UNION', 'WEMA', 'POLARIS', 'STANBIC', 'ECOBANK', 'KEYSTONE', 'MONIEPOINT', 'OPAY', 'PALMPAY', 'KUDA'];
+router.get('/pos/banks', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const set = new Set();
+  try { (await qall('SELECT DISTINCT bank FROM pos_terminals WHERE tenant_id=? AND bank IS NOT NULL', [s.ctx.tenant_id])).forEach((r) => r.bank && set.add(String(r.bank).toUpperCase())); } catch { /* table may be empty */ }
+  try { (await qall("SELECT DISTINCT bank FROM pos_sales WHERE tenant_id=? AND bank IS NOT NULL AND bank<>'' LIMIT 200", [s.ctx.tenant_id])).forEach((r) => r.bank && set.add(String(r.bank).toUpperCase())); } catch { /* ignore */ }
+  COMMON_BANKS.forEach((b) => set.add(b));
+  res.json([...set].sort());
 });
 
 // ── RECONCILIATIONS (transfer/POS confirmations + cash deposits) ──────────────

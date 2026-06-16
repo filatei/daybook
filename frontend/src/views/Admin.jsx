@@ -211,6 +211,7 @@ export default function Admin() {
   const [sites,    setSites]    = useState([]);
   const [members,  setMembers]  = useState([]);
   const [invites,  setInvites]  = useState([]);
+  const [resendingId, setResendingId] = useState(null);
   const [products, setProducts] = useState([]);
   const [loading,  setLoading]  = useState(true);
 
@@ -231,8 +232,11 @@ export default function Admin() {
     catch (e) { toast(e.message, 'err'); }
   };
   const resendInvite = async (id) => {
-    try { const r = await api(scoped(`/invites/${id}/resend`), { method: 'POST', body: {} }); toast(`Email sent to ${r.email}`, 'ok'); }
-    catch (e) { toast(e.message, 'err'); }
+    if (resendingId) return;
+    setResendingId(id);
+    try { const r = await api(scoped(`/invites/${id}/resend`), { method: 'POST', body: {} }); toast(`Email sent to ${r.email} ✓`, 'ok'); }
+    catch (e) { toast(e.message || 'Email could not be sent', 'err'); }
+    setResendingId(null);
   };
 
   const loadProducts = useCallback(async () => {
@@ -322,8 +326,8 @@ export default function Admin() {
                           <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iv.email}</div>
                           <div style={{ fontSize: 12, color: 'var(--muted)' }}>Joins as {ROLE_LABELS[iv.role] || iv.role} when they sign in</div>
                         </div>
-                        {isAdmin && <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => resendInvite(iv.id)}>✉️ Resend</button>}
-                        {isAdmin && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => revokeInvite(iv.id)}>Remove</button>}
+                        {isAdmin && <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 10px', minWidth: 92 }} onClick={() => resendInvite(iv.id)} disabled={resendingId === iv.id}>{resendingId === iv.id ? <span className="spin" /> : '✉️ Resend'}</button>}
+                        {isAdmin && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => revokeInvite(iv.id)} disabled={resendingId === iv.id}>Remove</button>}
                       </div>
                     ))}
                   </div>

@@ -42,6 +42,8 @@ export function OrderDetailModal({ order, orderId, onClose }) {
           <Row k="Entered by" v={o.entry_by} />
           <Row k="Site" v={o.site} />
           <Row k="Payment" v={o.payment_method} />
+          <Row k="Terminal" v={o.terminal} />
+          <Row k="Bank" v={o.bank} />
           <Row k="Time" v={fmt(o.at)} />
           {Array.isArray(o.items) && o.items.length > 0 && (
             <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>

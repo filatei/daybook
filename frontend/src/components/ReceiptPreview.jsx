@@ -84,6 +84,8 @@ export default function ReceiptPreview({ receipt: r }) {
       <Hr />
       <Row l="TOTAL" r={ngn(r.total)} bold />
       <Row l="Payment:" r={r.payment_method} />
+      {r.terminal && <Row l="Terminal:" r={r.terminal} />}
+      {r.bank && <Row l="Bank:" r={r.bank} />}
       {r.payment_method === 'CASH' && r.amount_paid > 0 && (
         <>
           <Row l="Tendered" r={ngn(r.amount_paid)} />

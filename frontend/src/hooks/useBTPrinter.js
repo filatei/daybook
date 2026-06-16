@@ -95,6 +95,8 @@ export function buildReceipt(opts) {
     change = 0,
     customer_name,
     served_by,
+    bank,
+    terminal,
   } = opts;
 
   const chunks = [];
@@ -124,6 +126,8 @@ export function buildReceipt(opts) {
   push(DIVIDER);
   push(CMD_BOLD_ON, t(twoCol('TOTAL', N(total))), CMD_BOLD_OFF);
   push(t(`Payment: ${payment_method}\n`));
+  if (terminal) push(t(`Terminal: ${terminal}\n`));
+  if (bank) push(t(`Bank: ${bank}\n`));
   if (payment_method === 'CASH' && amount_paid > 0) {
     push(t(twoCol('Tendered', N(amount_paid))));
     push(t(twoCol('Change', N(change))));

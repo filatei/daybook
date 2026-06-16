@@ -32,6 +32,8 @@ async function persistSale(o, site) {
   const saleDate = dateStrLagos(o.createdAt); if (!saleDate) return false;
   const totalAmt = num(o.txn_amount);
   const pm = String(o.paymentMethod || 'CASH').toUpperCase();
+  const bank = String(o.acquirer || o.card_bank || o.bank || o.transfer_from_bank || '').trim().toUpperCase() || null;
+  const terminal = String(o.terminal_location || '').trim().toUpperCase() || null;
   const custExt = o.customer ? String(o.customer) : null;
   let custId = null;
   if (custExt) { try { const c = await qone('SELECT id FROM customers WHERE tenant_id=? AND ext_id=?', [site.tenant_id, custExt]); custId = c ? c.id : null; } catch { /* ignore */ } }
@@ -47,11 +49,11 @@ async function persistSale(o, site) {
   const receiptNo = parseInt(nrow.n, 10);
   const r = await qrun(
     `INSERT INTO pos_sales (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,
-       subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,ext_id,created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       subtotal,discount,total,payment_method,amount_paid,balance,status,sale_date,bank,terminal,ext_id,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
     [uuid(), site.tenant_id, site.id, receiptNo, custId, custName, JSON.stringify(items),
-      totalAmt, 0, totalAmt, pm, totalAmt, 0, 'PAID', saleDate, ext_id, createdAt]);
+      totalAmt, 0, totalAmt, pm, totalAmt, 0, 'PAID', saleDate, bank, terminal, ext_id, createdAt]);
   return !!r.rowCount;
 }
 

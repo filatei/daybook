@@ -507,10 +507,16 @@ async function migrate() {
 
   // Payroll v2 — pay config per staff (pay_type already exists: DAILY | PIECE | …).
   // Piece workers earn per bag loaded and/or bagged; regular staff a daily rate.
+  // staff_type classifies the worker: REGULAR (with a role_title like Secretary,
+  // Operator, Cleaner …), or a piece worker — BAGGER / LOADER.
   await pool.query(`
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS daily_rate  DOUBLE PRECISION DEFAULT 0;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS rate_loaded DOUBLE PRECISION DEFAULT 0;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS rate_bagged DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS staff_type  TEXT DEFAULT 'REGULAR';
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS department  TEXT;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_name   TEXT;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_account TEXT;
     CREATE TABLE IF NOT EXISTS production (
       id          TEXT PRIMARY KEY,
       tenant_id   TEXT NOT NULL REFERENCES tenants(id),
@@ -847,6 +853,31 @@ async function migrate() {
   // ── Phase 5: Loading point tracking ───────────────────────────────────────
   await pool.query(`
     ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS loaded_at BIGINT;
+  `);
+
+  // ── Phase 6: POS terminal / bank capture ──────────────────────────────────
+  // Which bank/terminal a non-cash payment went through (Moniepoint vs GTB …).
+  // `bank` = acquirer/source bank, `terminal` = a human label (location / SN).
+  await pool.query(`
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS bank TEXT;
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS terminal TEXT;
+    CREATE TABLE IF NOT EXISTS pos_terminals (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      site_id     TEXT,
+      ext_id      TEXT,
+      terminal_id TEXT,
+      bank        TEXT,
+      location    TEXT,
+      sn          TEXT,
+      company     TEXT,
+      label       TEXT,
+      status      TEXT DEFAULT 'ACTIVE',
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pos_terminals_ext
+      ON pos_terminals(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pos_terminals_tenant ON pos_terminals(tenant_id);
   `);
 }
 

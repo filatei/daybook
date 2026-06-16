@@ -24,17 +24,18 @@ function ear(pts) {
   return (dist(pts[1], pts[5]) + dist(pts[2], pts[4])) / (2 * dist(pts[0], pts[3]));
 }
 
-const CHALLENGES = ['BLINK', 'TURN_LEFT', 'TURN_RIGHT'];
+// Two quick challenges keep it fast for floor use: blink, then a head turn in
+// EITHER direction. (Was blink + left + right, which got stuck for users.)
+const CHALLENGES = ['BLINK', 'TURN'];
 const CHALLENGE_TEXT = {
   BLINK: 'Blink your eyes',
-  TURN_LEFT: 'Turn your head left',
-  TURN_RIGHT: 'Turn your head right',
-  DONE: 'Liveness verified ✓',
+  TURN: 'Turn your head left or right',
+  DONE: 'Verified ✓',
 };
 
-const EAR_THRESHOLD  = 0.22;  // below this = eyes closed
-const TURN_THRESHOLD = 0.20;  // nose displacement / face width
-const MIN_FACE_CONF  = 0.65;
+const EAR_THRESHOLD  = 0.24;  // below this = eyes closed (a touch more forgiving)
+const TURN_THRESHOLD = 0.12;  // nose displacement / face width — easier to satisfy
+const MIN_FACE_CONF  = 0.5;   // detect faces more readily on phone cameras
 
 export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
   const [step, setStep]         = useState(0);   // index into CHALLENGES (3 = done)
@@ -134,10 +135,8 @@ export function useFaceLiveness({ videoRef, canvasRef, enabled = true }) {
           } else {
             blinkState.current.wasOpen = !eyesClosed;
           }
-        } else if (challenge === 'TURN_LEFT') {
-          if (horizontalShift < -TURN_THRESHOLD) advanceStep();
-        } else if (challenge === 'TURN_RIGHT') {
-          if (horizontalShift > TURN_THRESHOLD) advanceStep();
+        } else if (challenge === 'TURN') {
+          if (Math.abs(horizontalShift) > TURN_THRESHOLD) advanceStep();   // either direction
         }
       } else {
         // No face — clear canvas

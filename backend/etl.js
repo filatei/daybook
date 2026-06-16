@@ -9,7 +9,7 @@
  *   node backend/etl.js [options]
  *
  * Options:
- *   --collection  orders|expenses|staff|customers|products|vendors|generators|payroll|all  (default: all)
+ *   --collection  orders|expenses|staff|customers|products|vendors|terminals|generators|payroll|all  (default: all)
  *   --from        YYYY-MM-DD   (default: 2020-01-01)
  *   --to          YYYY-MM-DD   (default: today)
  *   --dry-run                  count + validate, no writes
@@ -136,17 +136,22 @@ async function etlStaff(mongoDB, { nameMap, oidMap, norm }) {
     if (!site) { stats.skipped++; continue; }
     const name = (p.name || '').trim(); if (!name) { stats.skipped++; continue; }
     try {
+      const active = !p.status || String(p.status).toUpperCase() === 'ACTIVE';
       const r = await qrun(
-        `INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,ext_people_id,status)
-         VALUES (?,?,?,?,?,?,?,?,?)
+        `INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,bank_name,bank_account,ext_people_id,status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,site_id,full_name) DO UPDATE SET
            ext_people_id=COALESCE(EXCLUDED.ext_people_id, staff.ext_people_id),
            role_title=COALESCE(EXCLUDED.role_title, staff.role_title),
            phone=COALESCE(EXCLUDED.phone, staff.phone),
+           department=COALESCE(EXCLUDED.department, staff.department),
+           bank_name=COALESCE(EXCLUDED.bank_name, staff.bank_name),
+           bank_account=COALESCE(EXCLUDED.bank_account, staff.bank_account),
            status=EXCLUDED.status`,
         [uuid(), site.tenant_id, site.id, name,
-          p.jobName || p.department || null, p.phone || null, 'DAILY', ext_id,
-          p.status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE']);
+          clean(p.jobName) || clean(p.category) || null, p.phone || null, 'DAILY', 'REGULAR',
+          clean(p.department) || null, clean(p.bankName) || null, clean(p.bankAccount) || null, ext_id,
+          active ? 'ACTIVE' : 'INACTIVE']);
       if (r.rowCount) stats.inserted++;
     } catch { stats.errors++; }
     progress('staff', stats.scanned, 0);
@@ -393,19 +398,21 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
     }));
 
     const createdAt = Math.floor((order.createdAt instanceof Date ? order.createdAt : new Date()).getTime() / 1000);
+    const bank = isCash ? null : (clean(order.acquirer || order.card_bank || order.bank || order.transfer_from_bank).toUpperCase() || null);
+    const terminal = isCash ? null : (clean(order.terminal_location).toUpperCase() || null);
 
     try {
       const r = await qrun(
         `INSERT INTO pos_sales
           (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,
            subtotal,discount,total,payment_method,amount_paid,balance,status,
-           sale_date,ext_id,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           sale_date,bank,terminal,ext_id,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
         [uuid(), site.tenant_id, site.id, nextReceipt(site.tenant_id),
           custId, custName, JSON.stringify(items),
           total_amount, 0, total_amount, pm, total_amount, 0, 'PAID',
-          saleDate, ext_id, createdAt]);
+          saleDate, bank, terminal, ext_id, createdAt]);
       if (r.rowCount) stats.inserted++;
       else stats.duplicate++;
     } catch (e) {
@@ -574,6 +581,38 @@ async function etlGenerators(mongoDB, { oidMap, nameMap, norm }) {
   return stats;
 }
 
+// ── terminals → pos_terminals (POS machines: bank + location per terminal) ─────
+async function etlTerminals(mongoDB, { nameMap, norm }, defaultTenantId) {
+  const stats = { scanned: 0, inserted: 0, updated: 0, skipped: 0, errors: 0 };
+  if (DRY_RUN) {
+    stats.scanned = await mongoDB.collection('terminals').countDocuments();
+    done('terminals (dry-run)', stats); return stats;
+  }
+  for await (const t of mongoDB.collection('terminals').find({}).batchSize(BATCH_SIZE)) {
+    stats.scanned++;
+    const location = clean(t.terminal_location);
+    const site = resolveSiteByName(nameMap, norm, location) || resolveSiteByName(nameMap, norm, t.company);
+    const tenantId = site ? site.tenant_id : defaultTenantId;
+    if (!tenantId) { stats.skipped++; continue; }
+    const bank = clean(t.bank).toUpperCase() || null;
+    const label = [bank, location].filter(Boolean).join(' · ') || clean(t.terminal_id) || clean(t.sn) || 'Terminal';
+    try {
+      const r = await qrun(
+        `INSERT INTO pos_terminals (id,tenant_id,site_id,ext_id,terminal_id,bank,location,sn,company,label)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id, ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
+           bank=EXCLUDED.bank, location=EXCLUDED.location, sn=EXCLUDED.sn,
+           company=EXCLUDED.company, label=EXCLUDED.label, site_id=COALESCE(EXCLUDED.site_id, pos_terminals.site_id)`,
+        [uuid(), tenantId, site ? site.id : null, String(t._id), clean(t.terminal_id) || null,
+          bank, location || null, clean(t.sn) || null, clean(t.company).toUpperCase() || null, label]);
+      if (r.rowCount) stats.inserted++; else stats.updated++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] terminals error:', e.message.slice(0, 140)); }
+    progress('terminals', stats.scanned, 0);
+  }
+  done('terminals', stats);
+  return stats;
+}
+
 // ── Verify: reconcile Mongo (source) ↔ Postgres (imported rows) ─────────────────
 // Compares row counts per collection, and for orders the total ₦ per site, so you
 // get a clear pass/fail instead of eyeballing. Only counts IMPORTED rows in
@@ -634,7 +673,7 @@ async function main() {
   const defaultTenantId = defTenant ? defTenant.id : null;
   console.log(`[ETL] default tenant for site-less rows: ${defTenant ? defTenant.slug : '(none — site-less customers will be skipped)'}`);
 
-  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'vendors', 'generators', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
+  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'vendors', 'terminals', 'generators', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
   const allStats = {};
   for (const col of run) {
     switch (col) {
@@ -642,6 +681,7 @@ async function main() {
       case 'customers':    allStats.customers    = await etlCustomers(mongoDB, maps, defaultTenantId); break;
       case 'products':     allStats.products     = await etlProducts(mongoDB, defaultTenantId); break;
       case 'vendors':      allStats.vendors      = await etlVendors(mongoDB, maps, defaultTenantId); break;
+      case 'terminals':    allStats.terminals    = await etlTerminals(mongoDB, maps, defaultTenantId); break;
       case 'generators':   allStats.generators   = await etlGenerators(mongoDB, maps); break;
       case 'expenses':     allStats.expenses     = await etlExpenses(mongoDB, maps);  break;
       case 'payroll':      allStats.payroll      = await etlPayroll(mongoDB, maps);   break;

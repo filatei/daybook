@@ -101,6 +101,11 @@ export default function Sell() {
   const [payMethod, setPayMethod] = useState('CASH');
   const [tendered,  setTendered]  = useState('');
   const [tenderedEdited, setTenderedEdited] = useState(false);  // tracks manual override
+  // Non-cash payments: which bank / POS terminal the money went through.
+  const [bank,      setBank]      = useState('');
+  const [terminal,  setTerminal]  = useState('');   // selected terminal label
+  const [terminals, setTerminals] = useState([]);
+  const [banks,     setBanks]     = useState([]);
   const [posting,   setPosting]   = useState(false);
   const [lastSale,  setLastSale]  = useState(null);
   const [pending,   setPending]   = useState(outboxCount());
@@ -147,7 +152,7 @@ export default function Sell() {
     if (evt.type !== 'fido.sale' && evt.type !== 'sale.created') return;
     const p = evt.payload || {};
     setFeed((f) => [{
-      id: `${evt.seq}-${Date.now()}`, receipt_no: p.receipt_no ?? null,
+      id: `${evt.seq}-${Date.now()}`, oid: p.id || p.sale_id || null, receipt_no: p.receipt_no ?? null,
       site: p.site || '', customer: p.customer || null,
       amount: Number(p.amount ?? p.total ?? 0), payment_method: p.payment_method || '',
       at: p.at || Date.now(), _new: true,
@@ -192,6 +197,42 @@ export default function Sell() {
 
   useEffect(() => { load(); }, [load]);
 
+  // POS terminals + known banks for the non-cash "which bank/terminal?" picker.
+  useEffect(() => {
+    api(scoped('/pos/terminals')).then(setTerminals).catch(() => setTerminals([]));
+    api(scoped('/pos/banks')).then(setBanks).catch(() => setBanks([]));
+  }, [tenant]);
+
+  // Reprint a past sale from the ticker: fetch its full order → show the receipt.
+  const [reprinting, setReprinting] = useState(false);
+  const reprint = async (row) => {
+    const oid = row.oid || (row.src === 'db' ? row.id : null);
+    if (!oid || reprinting) return;
+    setReprinting(true);
+    try {
+      const o = await api(scoped(`/pos/orders/${oid}`));
+      const at = new Date(typeof o.at === 'number' ? o.at * 1000 : o.at);
+      setReceipt({
+        company: activeTenant?.name || 'FIDO WATER',
+        site_name: o.site || null,
+        receipt_no: o.order_no,
+        date_str: at.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+        time_str: at.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+        items: o.items || [],
+        total: o.amount,
+        payment_method: o.payment_method,
+        amount_paid: o.amount,
+        change: 0,
+        customer_name: o.customer || null,
+        served_by: o.entry_by || null,
+        bank: o.bank || null,
+        terminal: o.terminal || null,
+        reprint: true,
+      });
+    } catch (e) { toast(e.message || 'Could not load receipt', 'err'); }
+    setReprinting(false);
+  };
+
   // Derived
   const cartLines   = cart.filter((c) => parseFloat(c.qty) > 0);
   const subtotal    = cartLines.reduce((s, c) => s + (c.product.price || 0) * (parseFloat(c.qty) || 0), 0);
@@ -233,7 +274,7 @@ export default function Sell() {
   };
 
   const newSale = () => {
-    setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false);
+    setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false); setBank(''); setTerminal('');
     setLastSale(null); setPayMethod('CASH');
     clientUid.current = genUid();
   };
@@ -254,6 +295,8 @@ export default function Sell() {
       sale_date: today(),
       client_uid: clientUid.current,
       customer_name: custName.trim() || null,
+      bank: payMethod === 'CASH' ? null : (bank.trim().toUpperCase() || null),
+      terminal: payMethod === 'POS' ? (terminal.trim().toUpperCase() || null) : null,
     };
     try {
       const sale = await api(scoped('/pos/sales'), { method: 'POST', body });
@@ -273,6 +316,8 @@ export default function Sell() {
         change:         payMethod === 'CASH' ? change : 0,
         customer_name:  custName.trim() || null,
         served_by:      servedBy,
+        bank:           payMethod === 'CASH' ? null : (bank.trim().toUpperCase() || null),
+        terminal:       payMethod === 'POS' ? (terminal.trim().toUpperCase() || null) : null,
       };
 
       if (withPrint && bt.status === 'ready') {
@@ -285,7 +330,7 @@ export default function Sell() {
       }
 
       // Reset cart, new uid for next transaction
-      setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false);
+      setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false); setBank(''); setTerminal('');
       clientUid.current = genUid();
       seedFeed();   // refresh ticker so the new sale shows (and is deletable while testing)
     } catch (e) {
@@ -307,6 +352,8 @@ export default function Sell() {
           change: payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0,
           customer_name: custName.trim() || null,
           served_by: servedBy,
+          bank: payMethod === 'CASH' ? null : (bank.trim().toUpperCase() || null),
+          terminal: payMethod === 'POS' ? (terminal.trim().toUpperCase() || null) : null,
         };
         if (withPrint && bt.status === 'ready') {
           try { await bt.print(rdata); } catch { /* printer optional */ }
@@ -314,7 +361,7 @@ export default function Sell() {
           setReceipt(rdata);
         }
         toast('Offline — sale queued, will sync when back online ⚡', 'info');
-        setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false);
+        setCart([]); setCustName(''); setTendered(''); setTenderedEdited(false); setBank(''); setTerminal('');
         clientUid.current = genUid();
       } else {
         toast(e.message || 'Charge failed', 'err');
@@ -349,21 +396,29 @@ export default function Sell() {
           <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>No sales yet today — waiting…</div>
         ) : (
           <div style={{ marginTop: 8, maxHeight: 220, overflowY: 'auto' }}>
-            {feed.map((s) => (
-              <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 13, padding: '4px 0', borderBottom: '1px solid var(--line)', background: s._new ? 'rgba(22,163,74,.06)' : 'transparent' }}>
-                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8 }}>
+            {feed.map((s) => {
+              const canReprint = !!(s.oid || s.src === 'db');
+              return (
+              <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, padding: '4px 0', borderBottom: '1px solid var(--line)', background: s._new ? 'rgba(22,163,74,.06)' : 'transparent' }}>
+                <button onClick={() => canReprint && reprint(s)} disabled={!canReprint || reprinting}
+                  title={canReprint ? 'Tap to view / reprint receipt' : ''}
+                  style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8, border: 'none', background: 'none', textAlign: 'left', cursor: canReprint ? 'pointer' : 'default', color: 'var(--ink)', font: 'inherit' }}>
                   <strong style={{ fontWeight: 700 }}>{s.customer || 'Walk-in'}</strong>
                   <span style={{ color: 'var(--muted)' }}>{s.site ? ` · ${s.site}` : ''}{s.payment_method ? ` · ${s.payment_method}` : ''} · {saleTime(s.at)}</span>
-                </span>
+                </button>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
                   <span style={{ fontWeight: 700 }}>{ngn(s.amount)}</span>
+                  {canReprint && (
+                    <button title="View / reprint receipt" onClick={() => reprint(s)} disabled={reprinting}
+                      style={{ border: 'none', background: '#eff6ff', color: '#1e40af', borderRadius: 6, width: 22, height: 22, fontSize: 12, cursor: 'pointer', lineHeight: 1, display: 'grid', placeItems: 'center' }}>🖨</button>
+                  )}
                   {s.src === 'db' && s.receipt_no != null && (
                     <button title="Delete sale (testing)" onClick={() => setConfirmDel(s)}
                       style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 6, width: 22, height: 22, fontSize: 13, cursor: 'pointer', lineHeight: 1, display: 'grid', placeItems: 'center' }}>🗑</button>
                   )}
                 </span>
               </div>
-            ))}
+            ); })}
           </div>
         )}
       </div>
@@ -386,15 +441,6 @@ export default function Sell() {
           <button className="btn btn-ghost btn-sm" onClick={newSale}>New Sale</button>
         </div>
       )}
-
-      {/* Customer name — typeahead */}
-      <Typeahead
-        value={custName}
-        onChange={setCustName}
-        fetchFn={fetchCustomers}
-        placeholder="Customer — type to search or add (blank = walk-in)"
-        style={{ marginBottom: 12 }}
-      />
 
       {/* Product search — typeahead: pick to add straight to the cart */}
       <Typeahead
@@ -439,9 +485,20 @@ export default function Sell() {
       {cart.length > 0 && (
         <div className="card" style={{ marginTop: 0 }}>
           {/* Cart header */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <div style={{ fontWeight: 700 }}>Order</div>
             <button className="btn btn-ghost btn-sm" onClick={() => setCart([])}>Clear</button>
+          </div>
+
+          {/* Customer — type to search existing or add a new name (blank = walk-in) */}
+          <div style={{ marginBottom: 10 }}>
+            <label className="fl">Customer</label>
+            <Typeahead
+              value={custName}
+              onChange={setCustName}
+              fetchFn={fetchCustomers}
+              placeholder="Search or add a name (blank = walk-in)"
+            />
           </div>
 
           {/* Grid header */}
@@ -463,11 +520,39 @@ export default function Sell() {
           {/* Payment method */}
           <div className="seg" style={{ marginTop: 14 }}>
             {PAY.map((m) => (
-              <button key={m} className={`seg-b${payMethod === m ? ' on' : ''}`} onClick={() => setPayMethod(m)}>
+              <button key={m} className={`seg-b${payMethod === m ? ' on' : ''}`}
+                onClick={() => { setPayMethod(m); if (m === 'CASH') { setBank(''); setTerminal(''); } }}>
                 {PAY_LABELS[m]}
               </button>
             ))}
           </div>
+
+          {/* Which POS terminal? (carries its bank) */}
+          {payMethod === 'POS' && (
+            <div style={{ marginTop: 10 }}>
+              <label className="fl">POS terminal</label>
+              {terminals.length > 0 ? (
+                <select className="input" value={terminal}
+                  onChange={(e) => { setTerminal(e.target.value); const t = terminals.find((x) => x.label === e.target.value); setBank(t ? (t.bank || '') : ''); }}>
+                  <option value="">Select terminal…</option>
+                  {terminals.map((t) => <option key={t.id} value={t.label}>{t.label}</option>)}
+                </select>
+              ) : (
+                <input className="input" list="bank-list" placeholder="POS bank (e.g. Moniepoint, GTB)"
+                  value={bank} onChange={(e) => setBank(e.target.value)} />
+              )}
+            </div>
+          )}
+
+          {/* Which bank? (transfer) */}
+          {payMethod === 'TRANSFER' && (
+            <div style={{ marginTop: 10 }}>
+              <label className="fl">Bank</label>
+              <input className="input" list="bank-list" placeholder="Bank money came from (e.g. GTB, Access)"
+                value={bank} onChange={(e) => setBank(e.target.value)} />
+            </div>
+          )}
+          <datalist id="bank-list">{banks.map((b) => <option key={b} value={b} />)}</datalist>
 
           {/* Cash tendered */}
           {payMethod === 'CASH' && (
@@ -534,7 +619,7 @@ export default function Sell() {
         <div onClick={() => setReceipt(null)}
           style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
           <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 340, margin: 0, textAlign: 'center', maxHeight: '88vh', overflowY: 'auto' }}>
-            <div style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600, marginBottom: 10 }}>Sale recorded ✓</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600, marginBottom: 10 }}>{receipt.reprint ? 'Receipt' : 'Sale recorded ✓'}</div>
             <ReceiptPreview receipt={receipt} />
             <button className="btn" onClick={doPrint} disabled={printingReceipt} style={{ margin: '14px 0 8px' }}>
               {printingReceipt ? <span className="spin" /> : '🖨 '}

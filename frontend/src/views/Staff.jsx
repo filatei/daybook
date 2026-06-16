@@ -1,7 +1,117 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { api, scoped, today, getToken } from '../api.js';
-import { useStore } from '../store.jsx';
+import { useStore, useRole, atLeast } from '../store.jsx';
 import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/useFaceLiveness.js';
+
+// Common positions for regular staff (free text still allowed via the datalist).
+const POSITIONS = ['Secretary', 'Operator', 'Cleaner', 'Security', 'Sales', 'Driver', 'Supervisor', 'Manager', 'Accountant', 'Storekeeper', 'Technician'];
+
+// ── Add / edit staff form ─────────────────────────────────────────────────────
+function StaffForm({ sites, siteBound, defaultSite, onSaved, onClose }) {
+  const { toast } = useStore();
+  const [f, setF] = useState({
+    full_name: '', site_id: defaultSite || (sites[0]?.id || ''), staff_type: 'REGULAR',
+    role_title: '', phone: '', daily_rate: '', rate_loaded: '', rate_bagged: '',
+    bank_name: '', bank_account: '', pay_type: 'DAILY',
+  });
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
+  const isPiece = f.staff_type === 'BAGGER' || f.staff_type === 'LOADER';
+
+  const save = async () => {
+    if (!f.full_name.trim()) { toast('Enter the staff name', 'err'); return; }
+    if (!f.site_id) { toast('Pick a site', 'err'); return; }
+    setSaving(true);
+    try {
+      await api(scoped('/staff'), { method: 'POST', body: {
+        full_name: f.full_name.trim(), site_id: f.site_id, staff_type: f.staff_type,
+        role_title: isPiece ? null : (f.role_title.trim() || null), phone: f.phone.trim() || null,
+        pay_type: f.pay_type, daily_rate: +f.daily_rate || 0,
+        rate_loaded: +f.rate_loaded || 0, rate_bagged: +f.rate_bagged || 0,
+        bank_name: f.bank_name.trim() || null, bank_account: f.bank_account.trim() || null,
+      } });
+      toast('Staff added ✓', 'ok');
+      onSaved && onSaved();
+      onClose && onClose();
+    } catch (e) { toast(e.message || 'Could not add staff', 'err'); }
+    setSaving(false);
+  };
+
+  const TYPE_LABEL = { REGULAR: '👤 Regular', BAGGER: '📦 Bagger', LOADER: '🏋 Loader' };
+  return (
+    <div onClick={() => !saving && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 420, margin: 0, maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 12 }}>New staff</div>
+
+        <label className="fl">Full name</label>
+        <input className="input" value={f.full_name} onChange={set('full_name')} placeholder="e.g. John Okoro" style={{ marginBottom: 10 }} />
+
+        {!siteBound && sites.length > 0 && (
+          <>
+            <label className="fl">Site</label>
+            <select className="input" value={f.site_id} onChange={set('site_id')} style={{ marginBottom: 10 }}>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </>
+        )}
+
+        <label className="fl">Staff type</label>
+        <div className="seg" style={{ marginBottom: 10 }}>
+          {['REGULAR', 'BAGGER', 'LOADER'].map((t) => (
+            <button key={t} className={`seg-b${f.staff_type === t ? ' on' : ''}`} onClick={() => setF((p) => ({ ...p, staff_type: t }))}>{TYPE_LABEL[t]}</button>
+          ))}
+        </div>
+
+        {f.staff_type === 'REGULAR' ? (
+          <>
+            <label className="fl">Position</label>
+            <input className="input" list="position-list" value={f.role_title} onChange={set('role_title')} placeholder="e.g. Secretary, Operator, Cleaner" style={{ marginBottom: 10 }} />
+            <datalist id="position-list">{POSITIONS.map((p) => <option key={p} value={p} />)}</datalist>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label className="fl">Pay basis</label>
+                <select className="input" value={f.pay_type} onChange={set('pay_type')}>
+                  <option value="DAILY">Daily</option>
+                  <option value="MONTHLY">Monthly</option>
+                </select>
+              </div>
+              <div style={{ flex: 1 }}>
+                <label className="fl">{f.pay_type === 'MONTHLY' ? 'Monthly (₦)' : 'Daily rate (₦)'}</label>
+                <input className="input" type="number" inputMode="numeric" value={f.daily_rate} onChange={set('daily_rate')} placeholder="0" />
+              </div>
+            </div>
+          </>
+        ) : (
+          <div style={{ marginBottom: 10 }}>
+            <label className="fl">{f.staff_type === 'LOADER' ? 'Rate per bag loaded (₦)' : 'Rate per bag bagged (₦)'}</label>
+            <input className="input" type="number" inputMode="numeric"
+              value={f.staff_type === 'LOADER' ? f.rate_loaded : f.rate_bagged}
+              onChange={set(f.staff_type === 'LOADER' ? 'rate_loaded' : 'rate_bagged')} placeholder="0" />
+          </div>
+        )}
+
+        <label className="fl">Phone (optional)</label>
+        <input className="input" value={f.phone} onChange={set('phone')} placeholder="080…" style={{ marginBottom: 10 }} />
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+          <div style={{ flex: 1.2 }}>
+            <label className="fl">Bank (optional)</label>
+            <input className="input" value={f.bank_name} onChange={set('bank_name')} placeholder="e.g. GTB" />
+          </div>
+          <div style={{ flex: 1.5 }}>
+            <label className="fl">Account no.</label>
+            <input className="input" value={f.bank_account} onChange={set('bank_account')} placeholder="0123456789" />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Add staff'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── Face liveness clock-in modal ──────────────────────────────────────────────
 function ClockModal({ staff, todayRecord, onDone, onClose }) {
@@ -280,6 +390,10 @@ export default function Staff() {
   const [loading, setLoading] = useState(true);
   const [siteFilter, setSiteFilter] = useState('');
   const [mode, setMode] = useState('clock');   // clock | report
+  const [showAdd, setShowAdd] = useState(false);
+  const role = useRole();
+  const canManage = role && atLeast(role, 'SECRETARY');
+  const siteBound = role && !atLeast(role, 'GENERAL_MANAGER');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -343,6 +457,10 @@ export default function Staff() {
         <div className="stat"><div className="k">Total Staff</div><div className="v">{staff.length}</div></div>
       </div>
 
+      {canManage && (
+        <button className="btn" style={{ marginBottom: 14 }} onClick={() => setShowAdd(true)}>＋ New staff</button>
+      )}
+
       {loading ? (
         <>{[...Array(6)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : staff.length === 0 ? (
@@ -369,6 +487,16 @@ export default function Staff() {
         </div>
       )}
       </>
+      )}
+
+      {showAdd && (
+        <StaffForm
+          sites={sites}
+          siteBound={siteBound}
+          defaultSite={siteFilter || (sites[0]?.id || '')}
+          onSaved={load}
+          onClose={() => setShowAdd(false)}
+        />
       )}
     </div>
   );

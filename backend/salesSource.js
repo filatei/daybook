@@ -104,7 +104,10 @@ async function recentOrders({ sites, date, limit = 40 }) {
  * the "orders for this site" drill-down and printable per-order detail.
  */
 const n2 = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
-const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1 };
+const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
+// Which bank/terminal a payment went through: POS uses the acquirer/card bank +
+// terminal location; transfer uses the source bank.
+const orderBank = (o) => String(o.acquirer || o.card_bank || o.bank || o.transfer_from_bank || '').trim().toUpperCase() || null;
 const mapOrder = (o) => ({
   id: String(o._id),
   order_no: o.fidoOrderId ?? o.orderId ?? null,
@@ -113,6 +116,8 @@ const mapOrder = (o) => ({
   entry_by: String(o.userName || '').trim() || null,
   amount: Math.round(n2(o.txn_amount)),
   payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
+  bank: orderBank(o),
+  terminal: String(o.terminal_location || '').trim().toUpperCase() || null,
   items: (Array.isArray(o.products) ? o.products : []).map((p) => ({
     name: p.name || 'Item', qty: n2(p.qty), price: n2(p.price), amount: Math.round(n2(p.amount) || n2(p.qty) * n2(p.price)),
   })),

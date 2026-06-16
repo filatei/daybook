@@ -680,7 +680,7 @@ async function etlInventory(mongoDB, { nameMap, norm }, defaultTenantId) {
     const itemId = itemByExt[String(m.name)];   // inventory.name → Stockitem _id
     if (!itemId) { stats.skipped++; continue; }
     const qtyMag = num(m.qty); if (!qtyMag) { stats.skipped++; continue; }
-    const ops = clean(m.ops).toUpperCase();
+    const ops = (clean(m.ops) || '').toUpperCase();
     const isIssue = /ISSUE|OUT|USED|CONSUM|PRODUC/.test(ops);
     const type = isIssue ? 'ISSUE' : 'RECEIVE';
     const qty = isIssue ? -qtyMag : qtyMag;

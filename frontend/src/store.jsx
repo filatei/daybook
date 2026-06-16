@@ -55,6 +55,8 @@ export function StoreProvider({ children }) {
   const tabRef = useRef('dashboard');
   const histRef = useRef(['dashboard']);
   const modalRef = useRef(null);
+  const guardRef = useRef(false);   // current modal asks "discard changes?" on Back
+  const dirtyRef = useRef(false);   // …only when the form was actually edited
 
   const go = useCallback((tab) => {
     if (tabRef.current !== tab) { histRef.current.push(tab); tabRef.current = tab; }
@@ -66,15 +68,18 @@ export function StoreProvider({ children }) {
     setTimeout(() => dispatch({ type: 'TOAST', toast: null }), ms);
   }, []);
 
-  const openModal = useCallback((node) => { modalRef.current = node; dispatch({ type: 'MODAL', modal: node }); }, []);
-  const closeModal = useCallback(() => { modalRef.current = null; dispatch({ type: 'MODAL', modal: null }); }, []);
+  // openModal(node, { guard }) — guard prompts to discard unsaved edits on Back.
+  const openModal = useCallback((node, opts = {}) => { modalRef.current = node; guardRef.current = !!opts.guard; dirtyRef.current = false; dispatch({ type: 'MODAL', modal: node }); }, []);
+  const closeModal = useCallback(() => { modalRef.current = null; guardRef.current = false; dirtyRef.current = false; dispatch({ type: 'MODAL', modal: null }); }, []);
+  const setDirty = useCallback((v = true) => { dirtyRef.current = !!v; }, []);
 
   useEffect(() => {
     const buffer = () => { try { window.history.pushState({ db: true }, ''); } catch { /* ignore */ } };
     buffer();   // arm the spare entry on first load
     const onPop = () => {
       if (modalRef.current) {                       // 1) Back closes an open modal first
-        modalRef.current = null; dispatch({ type: 'MODAL', modal: null });
+        if (guardRef.current && dirtyRef.current && !window.confirm('Discard your unsaved changes?')) { buffer(); return; }
+        modalRef.current = null; guardRef.current = false; dirtyRef.current = false; dispatch({ type: 'MODAL', modal: null });
       } else {                                       // 2) …then steps back a screen (or dashboard)
         const h = histRef.current;
         if (h.length > 1) h.pop();
@@ -97,7 +102,7 @@ export function StoreProvider({ children }) {
   }, []);
 
   const setSites = useCallback((sites) => dispatch({ type: 'SET_SITES', sites }), []);
-  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, logout };
+  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, setDirty, logout };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

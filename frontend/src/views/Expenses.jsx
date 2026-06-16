@@ -6,7 +6,7 @@ import Typeahead from '../components/Typeahead.jsx';
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
 
 function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
-  const { toast, tenant } = useStore();
+  const { toast, tenant, setDirty } = useStore();
   const [saving, setSaving] = useState(false);
   const fetchVendors = useCallback(async (q) => {
     const rows = await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`));
@@ -23,7 +23,7 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     site_id: expense?.site_id || sites[0]?.id || '',
     vendor: expense?.vendor || '',
   });
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => { setDirty(true); setF((p) => ({ ...p, [k]: v })); };
 
   // Line items: item name, qty, rate → amount = qty × rate.
   const [rows, setRows] = useState(() => {
@@ -34,8 +34,8 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     if (expense && expense.amount) return [{ name: expense.description || expense.category || 'Item', qty: '1', price: String(expense.amount) }];
     return [{ name: '', qty: '1', price: '' }];
   });
-  const setRow = (i, k, v) => setRows((p) => p.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
-  const addRow = () => setRows((p) => [...p, { name: '', qty: '1', price: '' }]);
+  const setRow = (i, k, v) => { setDirty(true); setRows((p) => p.map((r, j) => (j === i ? { ...r, [k]: v } : r))); };
+  const addRow = () => { setDirty(true); setRows((p) => [...p, { name: '', qty: '1', price: '' }]); };
   const delRow = (i) => setRows((p) => (p.length > 1 ? p.filter((_, j) => j !== i) : p));
   const lineAmt = (r) => (parseFloat(r.qty) || 0) * (parseFloat(r.price) || 0);
   const total = rows.reduce((s, r) => s + lineAmt(r), 0);
@@ -147,7 +147,7 @@ export default function Expenses() {
   useEffect(() => { load(); }, [load]);
 
   const openForm = (exp = null) => {
-    openModal(<ExpenseForm expense={exp} sites={sites} categories={categories} onSave={load} onClose={closeModal} />);
+    openModal(<ExpenseForm expense={exp} sites={sites} categories={categories} onSave={load} onClose={closeModal} />, { guard: true });
   };
 
   const total = expenses.reduce((s, e) => s + (+e.amount || 0), 0);

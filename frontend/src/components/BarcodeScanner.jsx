@@ -7,7 +7,7 @@ import React, { useEffect, useRef, useState } from 'react';
 
 const FORMATS = ['code_128', 'ean_13', 'ean_8', 'code_39', 'upc_a', 'qr_code'];
 
-export default function BarcodeScanner({ onDetect, onClose }) {
+export default function BarcodeScanner({ onDetect, onClose, title = 'Point at the receipt barcode', accept = /\d/ }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(0);
@@ -34,7 +34,7 @@ export default function BarcodeScanner({ onDetect, onClose }) {
           if (doneRef.current || !videoRef.current) return;
           try {
             const codes = await detector.detect(videoRef.current);
-            const hit = codes.find((c) => c.rawValue && /\d/.test(c.rawValue));
+            const hit = codes.find((c) => c.rawValue && accept.test(c.rawValue));
             if (hit) { doneRef.current = true; stop(); onDetect(hit.rawValue.trim()); return; }
           } catch { /* frame not ready */ }
           rafRef.current = requestAnimationFrame(scan);
@@ -60,7 +60,7 @@ export default function BarcodeScanner({ onDetect, onClose }) {
           <div style={{ width: '78%', maxWidth: 360, height: 140, border: '3px solid rgba(255,255,255,.9)', borderRadius: 14, boxShadow: '0 0 0 9999px rgba(0,0,0,.35)' }} />
         </div>
         <div style={{ position: 'absolute', top: 0, left: 0, right: 0, padding: '14px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#fff' }}>
-          <span style={{ fontWeight: 700 }}>Point at the receipt barcode</span>
+          <span style={{ fontWeight: 700 }}>{title}</span>
           <button onClick={onClose} style={{ border: 'none', background: 'rgba(255,255,255,.2)', color: '#fff', width: 38, height: 38, borderRadius: '50%', fontSize: 18, cursor: 'pointer' }}>✕</button>
         </div>
         {(err || !supported) && (

@@ -19,7 +19,7 @@ export default function Products() {
   }, [tenant]);
   useEffect(() => { load(); }, [load]);
 
-  const openForm = (product = null) => openModal(<ProductForm product={product} onSave={load} onClose={closeModal} />);
+  const openForm = (product = null) => openModal(<ProductForm product={product} onSave={load} onClose={closeModal} />, { guard: true });
 
   if (!canManage) return <div className="empty"><div className="ic">🔒</div><p>You don't have access to manage products</p></div>;
 

@@ -7,7 +7,7 @@ import ReceiptPreview from '../components/ReceiptPreview.jsx';
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
 
 function ReportForm({ report, sites, onSave, onClose }) {
-  const { toast } = useStore();
+  const { toast, setDirty } = useStore();
   const role = useRole();
   const isGM = atLeast(role, 'GENERAL_MANAGER');
   const [saving, setSaving] = useState(false);
@@ -23,7 +23,7 @@ function ReportForm({ report, sites, onSave, onClose }) {
     submit: false,
   });
 
-  const setField = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const setField = (k, v) => { setDirty(true); setF((p) => ({ ...p, [k]: v })); };
   const totalSales = f.sales.reduce((s, l) => s + (+l.amount || 0), 0);
 
   const save = async (submit = false) => {
@@ -348,7 +348,8 @@ export default function Reports() {
         sites={sites}
         onSave={load}
         onClose={closeModal}
-      />
+      />,
+      { guard: true }
     );
   };
 

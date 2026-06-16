@@ -124,7 +124,7 @@ function SettingsTab() {
 
 // ── Product form ────────────────────────────────────────────────────────────
 export function ProductForm({ product, onSave, onClose }) {
-  const { toast } = useStore();
+  const { toast, setDirty } = useStore();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({
     name:        product?.name        || '',
@@ -136,7 +136,7 @@ export function ProductForm({ product, onSave, onClose }) {
     track_stock: product?.track_stock ?? false,
     status:      product?.status      || 'ACTIVE',
   });
-  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => { setDirty(true); setF((p) => ({ ...p, [k]: v })); };
 
   const save = async () => {
     if (!f.name || f.price === '') return toast('Name and price required', 'err');
@@ -252,7 +252,7 @@ export default function Admin() {
     openModal(<SiteForm site={site} onSave={loadSites} onClose={closeModal} />);
   };
   const openProductForm = (product = null) => {
-    openModal(<ProductForm product={product} onSave={loadProducts} onClose={closeModal} />);
+    openModal(<ProductForm product={product} onSave={loadProducts} onClose={closeModal} />, { guard: true });
   };
 
   const inviteMember = async (email, inviteRole, site_id) => {

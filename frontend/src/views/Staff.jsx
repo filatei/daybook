@@ -2,6 +2,54 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { api, scoped, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/useFaceLiveness.js';
+import BarcodeScanner from '../components/BarcodeScanner.jsx';
+
+// ── Badge clock-in/out — scan a staff badge to toggle attendance ──────────────
+function BadgeClock() {
+  const { toast } = useStore();
+  const [scanning, setScanning] = useState(false);
+  const [last, setLast] = useState(null);
+  const onDetect = async (code) => {
+    setScanning(false);
+    try {
+      const r = await api(scoped('/attendance/badge'), { method: 'POST', body: { badge_code: code } });
+      setLast(r);
+      if (r.action === 'in') toast(`${r.staff_name} clocked IN ✓`, 'ok');
+      else if (r.action === 'out') toast(`${r.staff_name} clocked OUT ✓`, 'ok');
+      else toast(r.message || 'Already clocked out today', 'info');
+    } catch (e) { setLast({ error: e.message || 'Badge not recognised' }); toast(e.message || 'Badge not recognised', 'err'); }
+  };
+  const tone = !last ? null : last.error ? { bg: '#fee2e2', fg: '#991b1b' } : last.action === 'out' ? { bg: '#dbeafe', fg: '#1e40af' } : last.action === 'in' ? { bg: '#dcfce7', fg: '#166534' } : { bg: '#fef3c7', fg: '#92400e' };
+  return (
+    <div>
+      <div className="card" style={{ textAlign: 'center', padding: '22px 16px' }}>
+        <div style={{ fontSize: 40 }}>🪪</div>
+        <div style={{ fontWeight: 800, fontSize: 17, marginTop: 6 }}>Badge clock-in</div>
+        <p style={{ fontSize: 13, color: 'var(--muted)', margin: '4px 0 14px' }}>Scan a staff ID badge to clock them in, or out if already in.</p>
+        <button className="btn" onClick={() => setScanning(true)}>📷 Scan badge</button>
+      </div>
+
+      {last && (
+        <div className="card pop-in" style={{ marginTop: 12, textAlign: 'center', background: tone.bg, color: tone.fg }}>
+          {last.error ? (
+            <><div style={{ fontSize: 30 }}>⚠️</div><div style={{ fontWeight: 700 }}>{last.error}</div></>
+          ) : (
+            <>
+              <div style={{ fontSize: 30 }}>{last.action === 'out' ? '🔵' : last.action === 'in' ? '🟢' : '✓'}</div>
+              <div style={{ fontWeight: 800, fontSize: 18 }}>{last.staff_name}</div>
+              <div style={{ fontWeight: 700, marginTop: 2 }}>
+                {last.action === 'in' ? 'Clocked IN' : last.action === 'out' ? 'Clocked OUT' : 'Already clocked out today'}
+              </div>
+            </>
+          )}
+          <button className="btn btn-ghost btn-sm" style={{ marginTop: 12, width: 'auto', padding: '6px 16px' }} onClick={() => setScanning(true)}>Scan next</button>
+        </div>
+      )}
+
+      {scanning && <BarcodeScanner title="Scan the staff badge" accept={/[A-Za-z0-9]{4,}/} onDetect={onDetect} onClose={() => setScanning(false)} />}
+    </div>
+  );
+}
 
 // Common positions for regular staff (free text still allowed via the datalist).
 const POSITIONS = ['Secretary', 'Operator', 'Cleaner', 'Security', 'Sales', 'Driver', 'Supervisor', 'Manager', 'Accountant', 'Storekeeper', 'Technician'];
@@ -438,6 +486,7 @@ export default function Staff() {
     <div>
       <div className="seg" style={{ marginBottom: 14, overflowX: 'auto', flexWrap: 'nowrap' }}>
         <button className={`seg-b${mode === 'clock' ? ' on' : ''}`} onClick={() => setMode('clock')}>🟢 Clock</button>
+        <button className={`seg-b${mode === 'badge' ? ' on' : ''}`} onClick={() => setMode('badge')}>🪪 Badge</button>
         <button className={`seg-b${mode === 'report' ? ' on' : ''}`} onClick={() => setMode('report')}>🕑 Attendance</button>
         <button className={`seg-b${mode === 'production' ? ' on' : ''}`} onClick={() => setMode('production')}>📦 Production</button>
       </div>
@@ -450,7 +499,7 @@ export default function Staff() {
         </select>
       )}
 
-      {mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} /> : (
+      {mode === 'badge' ? <BadgeClock /> : mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} /> : (
       <>
       <div className="stat-grid" style={{ marginBottom: 14 }}>
         <div className="stat accent"><div className="k">Present Today</div><div className="v">{present}</div></div>

@@ -845,8 +845,9 @@ router.post('/ai/analyse', requireAuth, async (req, res) => {
 // ── STAFF & TIMESHEETS ────────────────────────────────────────────────────────
 // Staff list columns — exclude the bulky face_descriptor; expose face_enrolled flag.
 const STAFF_COLS = `id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,
-  bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,ext_people_id,status,created_at,
+  bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,badge_code,ext_people_id,status,created_at,
   (face_descriptor IS NOT NULL) AS face_enrolled, face_enrolled_at`;
+const newBadgeCode = () => 'B' + Math.random().toString(36).slice(2, 9).toUpperCase();
 const STAFF_TYPES = ['REGULAR', 'BAGGER', 'LOADER'];
 // Piece workers (baggers/loaders) are paid per bag; regular staff get a daily/monthly rate.
 const payTypeFor = (staffType, requested) => (staffType === 'BAGGER' || staffType === 'LOADER') ? 'PIECE' : (['DAILY', 'MONTHLY', 'HOURLY'].includes(String(requested || '').toUpperCase()) ? String(requested).toUpperCase() : 'DAILY');
@@ -916,11 +917,11 @@ router.post('/staff', requireAuth, needTenant('SECRETARY'), async (req, res) => 
   // Baggers/loaders use a piece role_title by default; regular keep their position.
   const role_title = (b.role_title || '').trim() || (staff_type === 'REGULAR' ? null : staff_type.charAt(0) + staff_type.slice(1).toLowerCase());
   try {
-    await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,ext_people_id)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,badge_code,ext_people_id)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, req.ctx.tenant_id, site_id, b.full_name.trim(), role_title, b.phone || null, pay_type, staff_type,
         b.department || null, b.bank_name || null, b.bank_account || null,
-        +b.daily_rate || 0, +b.rate_loaded || 0, +b.rate_bagged || 0, b.ext_people_id || null]);
+        +b.daily_rate || 0, +b.rate_loaded || 0, +b.rate_bagged || 0, newBadgeCode(), b.ext_people_id || null]);
   } catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
   await audit(req.ctx.tenant_id, req.user.id, 'STAFF_ADD', 'staff', id, { full_name: b.full_name, staff_type });
   res.status(201).json(await qone('SELECT * FROM staff WHERE id=?', [id]));
@@ -1121,6 +1122,33 @@ router.post('/attendance/clock', requireAuth, needTenant('SECRETARY'), async (re
   }
   await audit(req.ctx.tenant_id, req.user.id, kind === 'in' ? 'CLOCK_IN' : 'CLOCK_OUT', 'attendance', id, { staff: st.full_name, date });
   res.status(existing ? 200 : 201).json({ id, kind, clock: now });
+});
+
+// Badge clock-in/out: scan a staff badge code → auto clock-in (first scan today)
+// or clock-out (already clocked in). Fast, hands-free attendance for the floor.
+router.post('/attendance/badge', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const code = String((req.body || {}).badge_code || '').trim().toUpperCase();
+  if (!code) return res.status(400).json({ error: 'badge code required' });
+  const st = await qone('SELECT * FROM staff WHERE tenant_id=? AND UPPER(badge_code)=?', [req.ctx.tenant_id, code]);
+  if (!st) return res.status(404).json({ error: 'Badge not recognised' });
+  if (st.status === 'INACTIVE') return res.status(400).json({ error: `${st.full_name} is inactive` });
+  if (siteBound(req.ctx) && st.site_id && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: `${st.full_name} belongs to another site` });
+  const date = new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const now = nowS();
+  const existing = await qone('SELECT * FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=?', [req.ctx.tenant_id, st.id, date]);
+  let action;
+  if (!existing) {
+    await qrun('INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,captured_by) VALUES (?,?,?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, st.site_id, st.id, date, now, req.user.id]);
+    action = 'in';
+  } else if (!existing.clock_out) {
+    await qrun('UPDATE attendance SET clock_out=?, updated_at=? WHERE id=?', [now, now, existing.id]);
+    action = 'out';
+  } else {
+    return res.json({ staff_id: st.id, staff_name: st.full_name, action: 'done', clock_in: existing.clock_in, clock_out: existing.clock_out, message: `${st.full_name} already clocked out today` });
+  }
+  await audit(req.ctx.tenant_id, req.user.id, action === 'in' ? 'CLOCK_IN' : 'CLOCK_OUT', 'attendance', st.id, { staff: st.full_name, date, via: 'badge' });
+  res.json({ staff_id: st.id, staff_name: st.full_name, role: st.role_title || null, action, clock: now });
 });
 router.get('/attendance/:id/img/:which', requireAuth, async (req, res) => {
   const a = await qone('SELECT * FROM attendance WHERE id=?', [req.params.id]);

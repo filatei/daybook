@@ -4,6 +4,7 @@ import { useStore, useRole, atLeast, useActiveTenant } from '../store.jsx';
 import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/useFaceLiveness.js';
 import { brandFor, printBadges } from '../badge.js';
 import BarcodeScanner from '../components/BarcodeScanner.jsx';
+import SwipeRow from '../components/SwipeRow.jsx';
 
 // ── Badge clock-in/out — scan a staff badge to toggle attendance ──────────────
 function BadgeClock() {
@@ -552,30 +553,32 @@ export default function Staff() {
           {shownStaff.map((s) => {
             const st = statusIcon(s);
             return (
-              <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
-                <button onClick={() => openClock(s)} title="Clock in / out"
-                  style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0, border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
-                  <div className="av">{s.full_name?.[0]?.toUpperCase() || '?'}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 700 }}>{s.full_name} {s.face_enrolled ? <span title="Face enrolled" style={{ fontSize: 12 }}>🙂</span> : <span title="No face on file" style={{ fontSize: 12, opacity: .5 }}>📷</span>}</div>
-                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>{s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}</div>
-                  </div>
-                </button>
-                {canManage && (
+              <SwipeRow key={s.id} rowStyle={{ padding: '12px 16px', borderBottom: '1px solid var(--line)' }}
+                main={<>
+                  <button onClick={() => openClock(s)} title="Clock in / out"
+                    style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0, border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
+                    <div className="av">{s.full_name?.[0]?.toUpperCase() || '?'}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700 }}>{s.full_name} {s.face_enrolled ? <span title="Face enrolled" style={{ fontSize: 12 }}>🙂</span> : <span title="No face on file" style={{ fontSize: 12, opacity: .5 }}>📷</span>}</div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}</div>
+                    </div>
+                  </button>
+                  <button onClick={() => openClock(s)} title="Clock in / out" style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: st.color, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                    <span style={{ fontSize: 18 }}>{st.icon}</span>
+                    {st.label}
+                  </button>
+                </>}
+                actions={canManage ? <>
                   <button onClick={() => openClock(s, true)} title={s.face_enrolled ? 'Re-enrol face' : 'Enrol face'}
-                    style={{ border: 'none', background: s.face_enrolled ? '#f1f5f9' : '#dcfce7', color: s.face_enrolled ? 'var(--muted)' : '#166534', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                    style={{ border: 'none', background: s.face_enrolled ? '#e2e8f0' : '#dcfce7', color: s.face_enrolled ? 'var(--muted)' : '#166534', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>
                     {s.face_enrolled ? '🙂 Re-enrol' : '📸 Enrol'}
                   </button>
-                )}
-                {canManage && s.badge_code && (
-                  <button onClick={() => printBadge(s)} title="Print this staff's badge"
-                    style={{ border: 'none', background: '#eff6ff', color: '#1e40af', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>🪪</button>
-                )}
-                <button onClick={() => openClock(s)} title="Clock in / out" style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: st.color, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-                  <span style={{ fontSize: 18 }}>{st.icon}</span>
-                  {st.label}
-                </button>
-              </div>
+                  {s.badge_code && (
+                    <button onClick={() => printBadge(s)} title="Print this staff's badge"
+                      style={{ border: 'none', background: '#eff6ff', color: '#1e40af', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>🪪</button>
+                  )}
+                </> : null}
+              />
             );
           })}
         </div>

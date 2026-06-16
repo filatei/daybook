@@ -6,7 +6,7 @@ import BarcodeScanner from '../components/BarcodeScanner.jsx';
 
 // ── Badge clock-in/out — scan a staff badge to toggle attendance ──────────────
 function BadgeClock() {
-  const { toast } = useStore();
+  const { toast, go } = useStore();
   const [scanning, setScanning] = useState(false);
   const [last, setLast] = useState(null);
   const onDetect = async (code) => {
@@ -27,6 +27,7 @@ function BadgeClock() {
         <div style={{ fontWeight: 800, fontSize: 17, marginTop: 6 }}>Badge clock-in</div>
         <p style={{ fontSize: 13, color: 'var(--muted)', margin: '4px 0 14px' }}>Scan a staff ID badge to clock them in, or out if already in.</p>
         <button className="btn" onClick={() => setScanning(true)}>📷 Scan badge</button>
+        <button className="btn btn-ghost btn-sm" style={{ marginTop: 10, width: 'auto', padding: '6px 14px' }} onClick={() => go('badges')}>🪪 Design &amp; print staff badges →</button>
       </div>
 
       {last && (
@@ -174,6 +175,7 @@ function ClockModal({ staff, todayRecord, onDone, onClose, enroll = false }) {
   const [threshold, setThreshold] = useState(FACE_MATCH_THRESHOLD);
   const [enrolling, setEnrolling] = useState(false);
   const [forceEnroll, setForceEnroll] = useState(!!enroll); // start in enrol mode when asked
+  const [removing, setRemoving] = useState(false);
 
   const kind = todayRecord?.clock_in && !todayRecord?.clock_out ? 'out' : 'in';
   const enrollMode = enrolled === null || forceEnroll;
@@ -215,6 +217,19 @@ function ClockModal({ staff, todayRecord, onDone, onClose, enroll = false }) {
       toast(`${staff.full_name}'s face enrolled ✓`, 'ok');
     } catch (e) { toast(e.message || 'Enrollment failed', 'err'); }
     setEnrolling(false);
+  };
+
+  // Remove an enrolled face (e.g. wrong person / re-do enrolment from scratch).
+  const removeFace = async () => {
+    if (!window.confirm(`Remove ${staff.full_name}'s enrolled face?`)) return;
+    setRemoving(true);
+    try {
+      await api(scoped(`/staff/${staff.id}/face`), { method: 'DELETE' });
+      setEnrolled(null); setForceEnroll(false); reset();
+      toast(`${staff.full_name}'s face removed`, 'ok');
+      onDone && onDone();
+    } catch (e) { toast(e.message || 'Could not remove face', 'err'); }
+    setRemoving(false);
   };
 
   // After liveness: verify identity then clock.
@@ -301,8 +316,13 @@ function ClockModal({ staff, todayRecord, onDone, onClose, enroll = false }) {
         )}
       </div>
 
-      {enrolled && !enrollMode && status !== 'detecting' && status !== 'matching' && (
-        <button className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={() => { setForceEnroll(true); reset(); }}>Re-enrol face</button>
+      {enrolled && status !== 'detecting' && status !== 'matching' && !clocking && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          {!enrollMode && <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={() => { setForceEnroll(true); reset(); }}>🙂 Re-enrol face</button>}
+          <button className="btn btn-ghost btn-sm" style={{ flex: 1, color: 'var(--err)' }} disabled={removing} onClick={removeFace}>
+            {removing ? <span className="spin" /> : '🗑 Remove face'}
+          </button>
+        </div>
       )}
     </div>
   );
@@ -437,6 +457,7 @@ export default function Staff() {
   const [attendance, setAttendance] = useState({});
   const [loading, setLoading] = useState(true);
   const [siteFilter, setSiteFilter] = useState('');
+  const [query, setQuery] = useState('');
   const [mode, setMode] = useState('clock');   // clock | report
   const [showAdd, setShowAdd] = useState(false);
   const role = useRole();
@@ -511,13 +532,21 @@ export default function Staff() {
         <button className="btn" style={{ marginBottom: 14 }} onClick={() => setShowAdd(true)}>＋ New staff</button>
       )}
 
-      {loading ? (
+      {staff.length > 0 && (
+        <input className="input" style={{ marginBottom: 12 }} value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder="🔍 Search staff by name or role…" />
+      )}
+
+      {(() => { const shownStaff = staff.filter((s) => { const q = query.trim().toLowerCase(); return !q || (s.full_name || '').toLowerCase().includes(q) || (s.role_title || '').toLowerCase().includes(q) || (s.badge_code || '').toLowerCase().includes(q); }); return (
+      loading ? (
         <>{[...Array(6)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : staff.length === 0 ? (
         <div className="empty"><div className="ic">👷</div><p>No staff found</p></div>
+      ) : shownStaff.length === 0 ? (
+        <div className="empty"><div className="ic">🔍</div><p>No staff match “{query}”</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {staff.map((s) => {
+          {shownStaff.map((s) => {
             const st = statusIcon(s);
             return (
               <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
@@ -543,7 +572,7 @@ export default function Staff() {
             );
           })}
         </div>
-      )}
+      )); })()}
       </>
       )}
 

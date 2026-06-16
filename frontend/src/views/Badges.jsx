@@ -37,8 +37,9 @@ export default function Badges() {
   const list = useMemo(() => (staff || []).filter((s) => s.status !== 'INACTIVE' && s.badge_code), [staff]);
   const siteName = (id) => sites.find((x) => x.id === id)?.name || '';
 
-  const printAll = () => {
-    const cards = list.map((s) => `
+  const printBadges = (items) => {
+    if (!items.length) return;
+    const cards = items.map((s) => `
       <div class="badge">
         <div class="hdr" style="background:${brand.color}">
           <img src="${brand.logo}" alt="logo"/>
@@ -91,7 +92,7 @@ export default function Badges() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
         <div className="section-title" style={{ margin: 0 }}>Staff badges</div>
-        <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px' }} onClick={printAll} disabled={!list.length}>🖨 Print {list.length || ''}</button>
+        <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px' }} onClick={() => printBadges(list)} disabled={!list.length}>🖨 Print all {list.length || ''}</button>
       </div>
       <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0, marginBottom: 12 }}>
         Print these ID cards for each staff member. The barcode is scanned at Staff → Badge to clock in and out.
@@ -122,10 +123,14 @@ export default function Badges() {
                 <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>{s.role_title || s.staff_type || 'Staff'}</div>
                 <div style={{ fontSize: 11, color: '#94a3b8' }}>{siteName(s.site_id)}</div>
               </div>
-              <div style={{ padding: '4px 10px 10px', borderTop: '1px dashed var(--line)' }}>
+              <div style={{ padding: '4px 10px 8px', borderTop: '1px dashed var(--line)' }}>
                 <Barcode128 value={s.badge_code} height={40} />
                 <div style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, fontWeight: 700, letterSpacing: 1, textAlign: 'center', marginTop: 2 }}>{s.badge_code}</div>
               </div>
+              <button onClick={() => printBadges([s])} title="Print this badge"
+                style={{ width: '100%', border: 'none', borderTop: '1px solid var(--line)', background: '#f8fafc', color: brand.color, fontWeight: 700, fontSize: 12.5, padding: '8px 0', cursor: 'pointer' }}>
+                🖨 Print badge
+              </button>
             </div>
           ))}
         </div>

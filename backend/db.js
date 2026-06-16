@@ -976,6 +976,23 @@ async function migrate() {
   // ── Phase 10: finished-goods — which product the daily "bagged" count produces.
   // Finished on-hand per site = Σ bags_bagged (produced) − Σ that product sold.
   await pool.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS bagged_product_id TEXT`);
+
+  // Manual finished-goods production log — for products without an auto count
+  // source (e.g. preform → 50cl/75cl bottles). Produced per site per day.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS fg_production (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      site_id     TEXT,
+      product_id  TEXT NOT NULL,
+      qty         DOUBLE PRECISION NOT NULL,
+      prod_date   TEXT NOT NULL,
+      note        TEXT,
+      created_by  TEXT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fg_prod ON fg_production(tenant_id, product_id);
+  `);
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

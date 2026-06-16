@@ -97,42 +97,63 @@ router.get('/levels/low', requireAuth, async (req, res) => {
   res.json(rows.map((r) => ({ ...r, on_hand: Number(r.on_hand) })).filter((r) => r.on_hand <= r.reorder_level));
 });
 
-// ── Finished goods — bagging produces stock (per site); sales draw it down ────
-// on-hand per site = Σ bags_bagged (produced) − Σ that product sold via POS.
+// Record manual finished-goods production (e.g. bottles) for a product/site/day.
+router.post('/production', requireAuth, async (req, res) => {
+  const c = await ctx(req, res, 'SECRETARY'); if (!c) return;
+  const b = req.body || {};
+  const p = await qone('SELECT id FROM products WHERE id=? AND tenant_id=?', [b.product_id, c.tenant_id]);
+  if (!p) return res.status(400).json({ error: 'invalid product' });
+  const qty = +b.qty || 0; if (!(qty > 0)) return res.status(400).json({ error: 'quantity required' });
+  const site_id = siteBound(c) ? c.site_id : (b.site_id || null);
+  await qrun('INSERT INTO fg_production (id,tenant_id,site_id,product_id,qty,prod_date,note,created_by) VALUES (?,?,?,?,?,?,?,?)',
+    [uuid(), c.tenant_id, site_id, p.id, qty, (b.date || nowDate()).slice(0, 10), b.note || null, req.user.id]);
+  res.status(201).json({ ok: true });
+});
+
+// ── Finished goods — production (bagged auto + logged) vs sales → per-site stock.
 router.get('/finished', requireAuth, async (req, res) => {
   const c = await ctx(req, res, 'GATEMAN'); if (!c) return;
   const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [c.tenant_id]);
-  const prod = t && t.bagged_product_id ? await qone('SELECT id,name,unit FROM products WHERE id=?', [t.bagged_product_id]) : null;
-  if (!prod) return res.json({ configured: false, product: null, sites: [] });
+  const baggedId = t && t.bagged_product_id;
+  // Finished product set = the bagged product + any product with a production log.
+  const ids = new Set(); if (baggedId) ids.add(baggedId);
+  for (const r of await qall('SELECT DISTINCT product_id FROM fg_production WHERE tenant_id=?', [c.tenant_id])) ids.add(r.product_id);
+  if (!ids.size) return res.json({ configured: false, bagged_product_id: baggedId || null, products: [] });
+  const idArr = [...ids], ph = idArr.map(() => '?').join(',');
+  const prods = await qall(`SELECT id,name,unit FROM products WHERE tenant_id=? AND id IN (${ph})`, [c.tenant_id, ...idArr]);
   const from = req.query.from || nowDate(), to = req.query.to || from;
-  const siteRows = await qall('SELECT id,name FROM sites WHERE tenant_id=? ORDER BY name', [c.tenant_id]);
-  const nameById = {}; siteRows.forEach((s) => { nameById[s.id] = s.name; });
+  const sitesRows = await qall('SELECT id,name FROM sites WHERE tenant_id=? ORDER BY name', [c.tenant_id]);
+  const nameById = {}; sitesRows.forEach((s) => { nameById[s.id] = s.name; });
+  const sb = siteBound(c) ? c.site_id : null;
 
-  const prodWhere = ['tenant_id=?'], prodArgs = [c.tenant_id];
-  if (siteBound(c)) { prodWhere.push('site_id=?'); prodArgs.push(c.site_id); }
-  const produced = await qall(
-    `SELECT site_id, COALESCE(SUM(bags_bagged),0) total,
-       COALESCE(SUM(CASE WHEN work_date BETWEEN ? AND ? THEN bags_bagged ELSE 0 END),0) period
-     FROM production WHERE ${prodWhere.join(' AND ')} GROUP BY site_id`, [from, to, ...prodArgs]);
-
-  let sold = [];
-  try {
-    const sWhere = ['p.tenant_id=?', "p.items_json IS NOT NULL", "left(p.items_json,1)='['", 'lower(elem->>?)=lower(?)'];
-    const sArgs = [c.tenant_id, 'name', prod.name];
-    if (siteBound(c)) { sWhere.push('p.site_id=?'); sArgs.push(c.site_id); }
-    sold = await qall(
-      `SELECT p.site_id, COALESCE(SUM((elem->>'qty')::numeric),0) total,
-         COALESCE(SUM(CASE WHEN p.sale_date BETWEEN ? AND ? THEN (elem->>'qty')::numeric ELSE 0 END),0) period
-       FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
-       WHERE ${sWhere.join(' AND ')} GROUP BY p.site_id`, [from, to, ...sArgs]);
-  } catch { sold = []; }
-
-  const by = {};
-  for (const r of produced) { by[r.site_id] = by[r.site_id] || { produced_total: 0, produced_period: 0, sold_total: 0, sold_period: 0 }; by[r.site_id].produced_total = Number(r.total); by[r.site_id].produced_period = Number(r.period); }
-  for (const r of sold) { by[r.site_id] = by[r.site_id] || { produced_total: 0, produced_period: 0, sold_total: 0, sold_period: 0 }; by[r.site_id].sold_total = Number(r.total); by[r.site_id].sold_period = Number(r.period); }
-  const sites = Object.keys(by).map((sid) => ({ site_id: sid, site: nameById[sid] || '—', ...by[sid], on_hand: Math.round((by[sid].produced_total - by[sid].sold_total) * 100) / 100 }))
-    .sort((a, b) => b.on_hand - a.on_hand);
-  res.json({ configured: true, product: { id: prod.id, name: prod.name, unit: prod.unit }, from, to, sites });
+  const out = [];
+  for (const pr of prods) {
+    const by = {};
+    const touch = (sid) => (by[sid] = by[sid] || { produced_total: 0, produced_period: 0, sold_total: 0, sold_period: 0 });
+    // logged production
+    const lw = ['tenant_id=?', 'product_id=?'], la = [c.tenant_id, pr.id]; if (sb) { lw.push('site_id=?'); la.push(sb); }
+    for (const r of await qall(`SELECT site_id, COALESCE(SUM(qty),0) total, COALESCE(SUM(CASE WHEN prod_date BETWEEN ? AND ? THEN qty ELSE 0 END),0) period FROM fg_production WHERE ${lw.join(' AND ')} GROUP BY site_id`, [from, to, ...la])) {
+      const s = touch(r.site_id); s.produced_total += Number(r.total); s.produced_period += Number(r.period);
+    }
+    // bagged auto production (only for the bagged product)
+    if (pr.id === baggedId) {
+      const bw = ['tenant_id=?'], ba = [c.tenant_id]; if (sb) { bw.push('site_id=?'); ba.push(sb); }
+      for (const r of await qall(`SELECT site_id, COALESCE(SUM(bags_bagged),0) total, COALESCE(SUM(CASE WHEN work_date BETWEEN ? AND ? THEN bags_bagged ELSE 0 END),0) period FROM production WHERE ${bw.join(' AND ')} GROUP BY site_id`, [from, to, ...ba])) {
+        const s = touch(r.site_id); s.produced_total += Number(r.total); s.produced_period += Number(r.period);
+      }
+    }
+    // sold via POS (match by product name)
+    try {
+      const sw = ['p.tenant_id=?', "p.items_json IS NOT NULL", "left(p.items_json,1)='['", 'lower(elem->>?)=lower(?)'], sa = [c.tenant_id, 'name', pr.name];
+      if (sb) { sw.push('p.site_id=?'); sa.push(sb); }
+      for (const r of await qall(`SELECT p.site_id, COALESCE(SUM((elem->>'qty')::numeric),0) total, COALESCE(SUM(CASE WHEN p.sale_date BETWEEN ? AND ? THEN (elem->>'qty')::numeric ELSE 0 END),0) period FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem WHERE ${sw.join(' AND ')} GROUP BY p.site_id`, [from, to, ...sa])) {
+        const s = touch(r.site_id); s.sold_total += Number(r.total); s.sold_period += Number(r.period);
+      }
+    } catch { /* malformed items_json — skip */ }
+    const sites = Object.keys(by).map((sid) => ({ site_id: sid, site: nameById[sid] || '—', ...by[sid], on_hand: Math.round((by[sid].produced_total - by[sid].sold_total) * 100) / 100 })).sort((a, b) => b.on_hand - a.on_hand);
+    out.push({ id: pr.id, name: pr.name, unit: pr.unit, auto: pr.id === baggedId, sites, on_hand_total: Math.round(sites.reduce((a, s) => a + s.on_hand, 0) * 100) / 100 });
+  }
+  res.json({ configured: true, bagged_product_id: baggedId || null, from, to, products: out });
 });
 
 // ── Stock movement: RECEIVE / ISSUE / ADJUST (optionally creates a payable) ────

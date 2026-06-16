@@ -163,51 +163,96 @@ function ItemDetail({ item, sites, siteBound, canManage, onChanged, onClose }) {
   );
 }
 
-// ── Finished goods: produced (bagged) vs sold → per-site on-hand ──────────────
+// ── Finished goods: production (bagged auto + logged) vs sold → per-site stock ─
 const FG_RANGES = [{ label: 'Today', d: 0 }, { label: 'This week', d: 7 }, { label: 'This month', d: 30 }];
 const fgAgo = (n) => { const x = new Date(); x.setDate(x.getDate() - n); return x.toISOString().slice(0, 10); };
+
+function ProductionForm({ sites, siteBound, onSaved, onClose }) {
+  const { toast, tenant } = useStore();
+  const [products, setProducts] = useState([]);
+  const [f, setF] = useState({ product_id: '', qty: '', site_id: sites[0]?.id || '', date: today(), note: '' });
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { api(scoped('/products')).then((p) => { const a = (p || []).filter((x) => x.status !== 'INACTIVE'); setProducts(a); setF((s) => ({ ...s, product_id: a[0]?.id || '' })); }).catch(() => {}); }, [tenant]);
+  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
+  const save = async () => {
+    if (!f.product_id) return toast('Pick a product', 'err');
+    if (!(+f.qty > 0)) return toast('Enter a quantity', 'err');
+    setSaving(true);
+    try { await api(scoped('/inventory/production'), { method: 'POST', body: { product_id: f.product_id, qty: +f.qty, site_id: siteBound ? undefined : (f.site_id || null), date: f.date, note: f.note.trim() || null } }); toast('Production recorded ✓', 'ok'); onSaved(); onClose(); }
+    catch (e) { toast(e.message || 'Failed', 'err'); }
+    setSaving(false);
+  };
+  return (
+    <Modal onClose={onClose} title="Record production">
+      <label className="fl">Product (e.g. 50cl / 75cl bottle)</label>
+      <select className="input" value={f.product_id} onChange={set('product_id')} style={{ marginBottom: 10 }}>
+        {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      <div className="grid2">
+        <div><label className="fl">Quantity produced</label><input className="input" type="number" inputMode="decimal" value={f.qty} onChange={set('qty')} placeholder="0" /></div>
+        <div><label className="fl">Date</label><input className="input" type="date" max={today()} value={f.date} onChange={set('date')} /></div>
+      </div>
+      {!siteBound && sites.length > 1 && (
+        <><label className="fl">Site</label><select className="input" value={f.site_id} onChange={set('site_id')}>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></>
+      )}
+      <label className="fl">Note</label>
+      <input className="input" value={f.note} onChange={set('note')} placeholder="optional" />
+      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
+        <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Save'}</button>
+      </div>
+    </Modal>
+  );
+}
+
 function FinishedGoods() {
-  const { tenant, go } = useStore();
+  const { tenant, go, openModal, closeModal, sites } = useStore();
+  const role = useRole();
+  const canManage = role && atLeast(role, 'SECRETARY');
+  const siteBound = role && !atLeast(role, 'SNR_ACCOUNTANT');
   const [ri, setRi] = useState(0);
   const [data, setData] = useState(null);
   const load = useCallback(async () => {
     const from = fgAgo(FG_RANGES[ri].d), to = today();
-    try { setData(await api(scoped(`/inventory/finished?from=${from}&to=${to}`))); } catch { setData({ configured: false, sites: [] }); }
+    try { setData(await api(scoped(`/inventory/finished?from=${from}&to=${to}`))); } catch { setData({ configured: false, products: [] }); }
   }, [tenant, ri]);
   useEffect(() => { load(); }, [load]);
+  const openProd = () => openModal(<ProductionForm sites={sites} siteBound={siteBound} onSaved={load} onClose={closeModal} />);
   if (data === null) return <>{[...Array(3)].map((_, i) => <div className="skel" key={i} />)}</>;
-  if (!data.configured) return (
-    <div className="empty"><div className="ic">🏭</div><p>No finished product set yet.</p>
-      <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px', marginTop: 8 }} onClick={() => go('admin')}>Set it in Admin → Settings</button>
-    </div>
-  );
-  const unit = data.product?.unit || '';
-  const totalOnHand = data.sites.reduce((a, s) => a + s.on_hand, 0);
   return (
     <div>
-      <div className="seg" style={{ marginBottom: 10 }}>
-        {FG_RANGES.map((r, i) => <button key={r.label} className={`seg-b${ri === i ? ' on' : ''}`} onClick={() => setRi(i)}>{r.label}</button>)}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        <div className="seg" style={{ flex: 1 }}>{FG_RANGES.map((r, i) => <button key={r.label} className={`seg-b${ri === i ? ' on' : ''}`} onClick={() => setRi(i)}>{r.label}</button>)}</div>
       </div>
-      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
-        <div><div style={{ fontWeight: 700 }}>{data.product?.name}</div><div style={{ fontSize: 12, color: 'var(--muted)' }}>on hand (all sites)</div></div>
-        <strong style={{ fontSize: 20, color: totalOnHand < 0 ? 'var(--err)' : 'var(--ink)' }}>{fmtNum(totalOnHand)} {unit}</strong>
-      </div>
-      {data.sites.length === 0 ? <div className="empty"><p>No production or sales yet</p></div> : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {data.sites.map((s) => (
-            <div key={s.site_id} style={{ padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <strong>{s.site}</strong>
-                <strong style={{ color: s.on_hand < 0 ? 'var(--err)' : '#166534' }}>{fmtNum(s.on_hand)} {unit} on hand</strong>
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
-                {FG_RANGES[ri].label}: produced {fmtNum(s.produced_period)} · sold {fmtNum(s.sold_period)}
-              </div>
-            </div>
-          ))}
+      {canManage && <button className="btn" style={{ marginBottom: 12 }} onClick={openProd}>＋ Record production (bottles…)</button>}
+
+      {!data.configured ? (
+        <div className="empty"><div className="ic">🏭</div><p>No finished product set up yet.</p>
+          <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 6 }}>Map the bagged product in <b>Admin → Settings</b>, and/or record production above for bottles.</div>
+          <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px', marginTop: 10 }} onClick={() => go('admin')}>Open Admin → Settings</button>
         </div>
-      )}
-      <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 10 }}>On-hand = all-time bagged − all-time sold, per site. Bagged comes from the daily Production grid; sold from POS sales of {data.product?.name}.</p>
+      ) : data.products.map((p) => (
+        <div key={p.id} style={{ marginBottom: 14 }}>
+          <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 6 }}>
+            <div><div style={{ fontWeight: 700 }}>{p.name} {p.auto && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#eff6ff', color: '#1e40af' }}>AUTO (bagged)</span>}</div><div style={{ fontSize: 12, color: 'var(--muted)' }}>on hand · all sites</div></div>
+            <strong style={{ fontSize: 19, color: p.on_hand_total < 0 ? 'var(--err)' : 'var(--ink)' }}>{fmtNum(p.on_hand_total)} {p.unit || ''}</strong>
+          </div>
+          {p.sites.length > 0 && (
+            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+              {p.sites.map((s) => (
+                <div key={s.site_id} style={{ padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                    <strong style={{ fontSize: 13.5 }}>{s.site}</strong>
+                    <strong style={{ fontSize: 13.5, color: s.on_hand < 0 ? 'var(--err)' : '#166534' }}>{fmtNum(s.on_hand)} {p.unit || ''}</strong>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 1 }}>{FG_RANGES[ri].label}: produced {fmtNum(s.produced_period)} · sold {fmtNum(s.sold_period)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {data.configured && <p style={{ fontSize: 11.5, color: 'var(--muted)' }}>On-hand = all-time produced − all-time sold, per site. AUTO products come from the daily bagged count; others from recorded production. Sold matched by product name on receipts.</p>}
     </div>
   );
 }

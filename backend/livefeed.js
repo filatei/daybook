@@ -79,6 +79,7 @@ async function poll() {
     // Durable copy first (idempotent), then the ephemeral live broadcast.
     if (LIVE_PERSIST) { try { await persistSale(o, site); } catch (e) { console.error('[livefeed] persist:', e.message); } }
     broadcastLive(site.tenant_id, site.id, 'fido.sale', {
+      id: String(o._id),
       site: o.site, amount: num(o.txn_amount),
       customer: String(o.customerName || o.customer_name || '').trim() || null,
       payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),

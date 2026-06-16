@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useRealtime } from '../hooks/useRealtime.js';
+import { OrdersListModal, OrderDetailModal } from '../components/OrderViews.jsx';
 
 const clock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -47,6 +48,8 @@ export default function Dashboard() {
   const [data, setData] = useState(null);
   const [pos, setPos] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [drill, setDrill] = useState(null);     // { title, query } orders-list modal
+  const [detailId, setDetailId] = useState(null); // single order detail (from live line)
 
   // Live sales feed (streamed from the still-running fido POS, pre-cutover).
   const [live, setLive] = useState({ total: 0, count: 0, feed: [] });
@@ -57,7 +60,7 @@ export default function Dashboard() {
     setLive((p) => ({
       total: p.total + amount,
       count: p.count + 1,
-      feed: [{ id: `${evt.seq}-${Date.now()}`, site: evt.payload?.site || '', amount, pm: evt.payload?.payment_method || '', at: evt.payload?.at ? Math.floor(new Date(evt.payload.at).getTime() / 1000) : Math.floor(Date.now() / 1000) }, ...p.feed].slice(0, 8),
+      feed: [{ id: `${evt.seq}-${Date.now()}`, oid: evt.payload?.id || evt.payload?.sale_id || null, site: evt.payload?.site || '', amount, pm: evt.payload?.payment_method || '', at: evt.payload?.at ? Math.floor(new Date(evt.payload.at).getTime() / 1000) : Math.floor(Date.now() / 1000) }, ...p.feed].slice(0, 8),
     }));
     flash.current += 1;
   });
@@ -87,6 +90,14 @@ export default function Dashboard() {
   const byDay = usePos ? pos.byDay : data?.byDay;
   const bySite = usePos ? pos.bySite : data?.bySite;
 
+  // Build the orders-drill query for the current date range (+ extra filters).
+  const rangeQS = () => {
+    const from = day || daysAgo(RANGES[rangeIdx].days);
+    const to = day || today();
+    return `from=${from}&to=${to}`;
+  };
+  const openOrders = (title, extra = '') => setDrill({ title, query: rangeQS() + (extra ? `&${extra}` : '') });
+
   return (
     <div>
       {/* Live sales feed — streams from the running fido POS before cutover */}
@@ -102,10 +113,10 @@ export default function Dashboard() {
           {live.feed.length > 0 && (
             <div style={{ marginTop: 8 }}>
               {live.feed.map((s) => (
-                <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '3px 0', color: 'var(--ink)' }}>
+                <button key={s.id} onClick={() => s.oid && setDetailId(s.oid)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, fontSize: 12.5, padding: '3px 0', color: 'var(--ink)', width: '100%', border: 'none', background: 'none', cursor: s.oid ? 'pointer' : 'default', textAlign: 'left' }}>
                   <span style={{ color: 'var(--muted)' }}>{s.site}{s.pm ? ` · ${s.pm}` : ''} · {clock(s.at)}</span>
-                  <span style={{ fontWeight: 700 }}>{ngn(s.amount)}</span>
-                </div>
+                  <span style={{ fontWeight: 700 }}>{ngn(s.amount)}{s.oid ? ' ›' : ''}</span>
+                </button>
               ))}
             </div>
           )}
@@ -133,22 +144,22 @@ export default function Dashboard() {
       ) : (
         <>
           <div className="stat-grid">
-            <div className="stat accent">
-              <div className="k">Total Sales</div>
+            <button className="stat accent" onClick={() => usePos && openOrders('All orders')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">Total Sales{usePos ? ' ›' : ''}</div>
               <div className="v">{ngn(sales)}</div>
-            </div>
-            <div className="stat">
-              <div className="k">Cash</div>
+            </button>
+            <button className="stat" onClick={() => usePos && openOrders('Cash orders', 'method=CASH')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">Cash{usePos ? ' ›' : ''}</div>
               <div className="v">{ngn(cash)}</div>
-            </div>
-            <div className="stat">
-              <div className="k">{usePos ? 'Transfer/POS' : 'Deposits'}</div>
+            </button>
+            <button className="stat" onClick={() => usePos && openOrders('Transfer / POS orders', 'method=NONCASH')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">{usePos ? 'Transfer/POS ›' : 'Deposits'}</div>
               <div className="v">{ngn(transfer)}</div>
-            </div>
-            <div className="stat">
-              <div className="k">{usePos ? 'Orders' : 'Costs'}</div>
+            </button>
+            <button className="stat" onClick={() => usePos && openOrders('All orders')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">{usePos ? 'Orders ›' : 'Costs'}</div>
               <div className="v">{usePos ? pos.totals.orders.toLocaleString() : ngn(t?.costs || 0)}</div>
-            </div>
+            </button>
           </div>
 
           {byDay?.length > 0 && (
@@ -164,11 +175,12 @@ export default function Dashboard() {
             <div className="card">
               <div className="section-title" style={{ marginTop: 0 }}>By Site</div>
               {bySite.map((s, i) => (
-                <div className="list-item" key={s.site}>
+                <button className="list-item" key={s.site} onClick={() => usePos && openOrders(s.site, `site_code=${encodeURIComponent(s.code || s.site)}`)}
+                  style={{ width: '100%', border: 'none', background: 'none', cursor: usePos ? 'pointer' : 'default', textAlign: 'left' }}>
                   <div className="av" style={{ borderRadius: 8, fontSize: 14, fontWeight: 800 }}>{i + 1}</div>
-                  <div className="meta"><div className="t">{s.site}</div></div>
+                  <div className="meta"><div className="t">{s.site}{usePos ? ' ›' : ''}</div></div>
                   <div className="amt">{ngn(s.sales)}</div>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -178,6 +190,9 @@ export default function Dashboard() {
           </div>
         </>
       )}
+
+      {drill && <OrdersListModal title={drill.title} query={drill.query} onClose={() => setDrill(null)} />}
+      {detailId && <OrderDetailModal orderId={detailId} onClose={() => setDetailId(null)} />}
     </div>
   );
 }

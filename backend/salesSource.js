@@ -103,28 +103,47 @@ async function recentOrders({ sites, date, limit = 40 }) {
  * Individual orders across a date range (newest first), WITH line items — powers
  * the "orders for this site" drill-down and printable per-order detail.
  */
-async function listOrders({ from, to, sites, limit = 500 }) {
+const n2 = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
+const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1 };
+const mapOrder = (o) => ({
+  id: String(o._id),
+  order_no: o.fidoOrderId ?? o.orderId ?? null,
+  site: o.site || '',
+  customer: String(o.customerName || o.customer_name || '').trim() || null,
+  entry_by: String(o.userName || '').trim() || null,
+  amount: Math.round(n2(o.txn_amount)),
+  payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
+  items: (Array.isArray(o.products) ? o.products : []).map((p) => ({
+    name: p.name || 'Item', qty: n2(p.qty), price: n2(p.price), amount: Math.round(n2(p.amount) || n2(p.qty) * n2(p.price)),
+  })),
+  at: o.createdAt,
+});
+// `method`: 'CASH' | 'TRANSFER' | 'POS' | 'NONCASH' (transfer+pos)
+function methodMatch(method) {
+  if (!method) return null;
+  const m = String(method).toUpperCase();
+  if (m === 'CASH') return { paymentMethod: siteRegex('CASH') };
+  if (m === 'NONCASH') return { paymentMethod: { $not: siteRegex('CASH') } };
+  return { paymentMethod: siteRegex(m) };
+}
+async function listOrders({ from, to, sites, method, limit = 500 }) {
   const db = await getDb();
   const start = new Date(`${from}T00:00:00.000${TZ()}`);
   const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
   const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
   if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
+  const mm = methodMatch(method); if (mm) Object.assign(match, mm);
   const rows = await db.collection('fidoorders')
-    .find(match, { projection: { site: 1, txn_amount: 1, paymentMethod: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1 } })
+    .find(match, { projection: ORDER_PROJ })
     .sort({ createdAt: -1 }).limit(Math.min(+limit || 500, 1000)).toArray();
-  const n = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
-  return rows.map((o) => ({
-    id: String(o._id),
-    order_no: o.fidoOrderId ?? o.orderId ?? null,
-    site: o.site || '',
-    customer: String(o.customerName || o.customer_name || '').trim() || null,
-    amount: Math.round(n(o.txn_amount)),
-    payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
-    items: (Array.isArray(o.products) ? o.products : []).map((p) => ({
-      name: p.name || 'Item', qty: n(p.qty), price: n(p.price), amount: Math.round(n(p.amount) || n(p.qty) * n(p.price)),
-    })),
-    at: o.createdAt,
-  }));
+  return rows.map(mapOrder);
+}
+/** One order by its Mongo _id (for the live-line / order-detail drill-down). */
+async function getOrder(id) {
+  const db = await getDb();
+  let _id; try { _id = new (require('mongodb').ObjectId)(id); } catch { return null; }
+  const o = await db.collection('fidoorders').findOne({ _id }, { projection: ORDER_PROJ });
+  return o ? mapOrder(o) : null;
 }
 
 /** Sum a site's expenses for one day from `expenses`. */
@@ -258,4 +277,4 @@ async function ping() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping };
+module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getOrder, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping };

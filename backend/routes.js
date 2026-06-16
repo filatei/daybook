@@ -1386,20 +1386,43 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const from = req.query.from || new Date().toISOString().slice(0, 10);
   const to = req.query.to || from;
-  const { site } = req.query;
+  const { site, site_code, method } = req.query;
   if (await posEnabled(s.ctx.tenant_id)) {
     try {
       let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
       if (siteBound(s.ctx)) { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
+      else if (site_code) { sites = [site_code]; }
       else if (site) { const sc = await qone('SELECT code FROM sites WHERE id=?', [site]); if (sc) sites = [sc.code]; }
-      return res.json(await sales.listOrders({ from, to, sites, limit: 800 }));
+      return res.json(await sales.listOrders({ from, to, sites, method, limit: 800 }));
     } catch (e) { /* fall through */ }
   }
   const where = ['p.tenant_id=?', 'p.sale_date>=?', 'p.sale_date<=?'], args = [s.ctx.tenant_id, from, to];
   if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
-  const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, s.name site, p.created_at
-    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
-  res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, items: J(r.items_json, []), at: r.created_at })));
+  if (method === 'CASH') { where.push("p.payment_method='CASH'"); }
+  else if (method === 'NONCASH') { where.push("p.payment_method<>'CASH'"); }
+  else if (method) { where.push('p.payment_method=?'); args.push(method.toUpperCase()); }
+  const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, s.name site, u.name entry_by, p.created_at
+    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
+  res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, items: J(r.items_json, []), at: r.created_at })));
+});
+
+// One order's full detail (powers live-line / order drill-down click).
+router.get('/pos/orders/:id', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  if (await posEnabled(s.ctx.tenant_id)) {
+    try {
+      const o = await sales.getOrder(req.params.id);
+      if (o) {
+        if (siteBound(s.ctx)) { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); if (sc && String(o.site).toUpperCase().replace(/[^A-Z0-9]/g, '') !== String(sc.code).toUpperCase().replace(/[^A-Z0-9]/g, '')) return res.status(404).json({ error: 'not found' }); }
+        return res.json(o);
+      }
+    } catch (e) { /* fall through */ }
+  }
+  const r = await qone(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, s.name site, u.name entry_by, p.created_at, p.tenant_id, p.site_id
+    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE p.id=?`, [req.params.id]);
+  if (!r || r.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (siteBound(s.ctx) && r.site_id && r.site_id !== s.ctx.site_id) return res.status(404).json({ error: 'not found' });
+  res.json({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, items: J(r.items_json, []), at: r.created_at });
 });
 
 // ── RECONCILIATIONS (transfer/POS confirmations + cash deposits) ──────────────

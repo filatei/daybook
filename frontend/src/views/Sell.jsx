@@ -497,6 +497,9 @@ export default function Sell() {
               value={custName}
               onChange={setCustName}
               fetchFn={fetchCustomers}
+              allowCreate
+              minChars={1}
+              createLabel={(q) => `➕ Add new customer “${q}”`}
               placeholder="Search or add a name (blank = walk-in)"
             />
           </div>

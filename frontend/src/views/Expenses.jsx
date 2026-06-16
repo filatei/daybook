@@ -12,6 +12,10 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     const rows = await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`));
     return rows.map((r) => ({ label: r.vendor || r.label, sub: r.sub || '' }));
   }, [tenant]);
+  const fetchItems = useCallback(async (q) => {
+    try { return (await api(scoped(`/suggest/expense-items?q=${encodeURIComponent(q)}`))).map((r) => ({ label: r.label })); }
+    catch { return []; }
+  }, [tenant]);
   const [f, setF] = useState({
     category: expense?.category || categories[0] || 'OTHER',
     description: expense?.description || '',
@@ -73,7 +77,8 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
       </div>
       {rows.map((r, i) => (
         <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 56px 88px 70px 26px', gap: 6, alignItems: 'center', marginBottom: 6 }}>
-          <input className="input" style={{ padding: '8px 10px' }} placeholder="Item name" value={r.name} onChange={(e) => setRow(i, 'name', e.target.value)} />
+          <Typeahead value={r.name} onChange={(v) => setRow(i, 'name', v)} fetchFn={fetchItems}
+            allowCreate minChars={1} createLabel={(q) => `➕ Add item “${q}”`} placeholder="Item name" />
           <input className="input" style={{ padding: '8px 6px', textAlign: 'center' }} type="number" inputMode="numeric" value={r.qty} onChange={(e) => setRow(i, 'qty', e.target.value)} />
           <input className="input" style={{ padding: '8px 8px', textAlign: 'right' }} type="number" inputMode="decimal" placeholder="0" value={r.price} onChange={(e) => setRow(i, 'price', e.target.value)} />
           <div style={{ textAlign: 'right', fontWeight: 700, fontSize: 13 }}>{ngn(lineAmt(r))}</div>
@@ -92,6 +97,8 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
         value={f.vendor}
         onChange={(v) => set('vendor', v)}
         fetchFn={fetchVendors}
+        allowCreate
+        createLabel={(q) => `➕ Add new vendor “${q}”`}
         placeholder="Vendor name"
         minChars={1}
       />

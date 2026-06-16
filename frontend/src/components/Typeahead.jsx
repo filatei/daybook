@@ -26,6 +26,8 @@ export default function Typeahead({
   style,
   disabled,
   id,
+  allowCreate = false,   // show a "➕ Add '<typed>'" row so a new entry is clearly accepted
+  createLabel = (q) => `➕ Add “${q}”`,
 }) {
   const [items,  setItems]  = useState([]);
   const [open,   setOpen]   = useState(false);
@@ -41,12 +43,12 @@ export default function Typeahead({
     try {
       const results = (await fetchFn(q)) || [];
       setItems(results);
-      setOpen(results.length > 0);
+      setOpen(results.length > 0 || allowCreate);   // keep open to offer "add new"
       setActive(-1);
     } catch {
-      setItems([]); setOpen(false);
+      setItems([]); setOpen(allowCreate && q.length >= minChars);
     }
-  }, [fetchFn, minChars]);
+  }, [fetchFn, minChars, allowCreate]);
 
   const handleChange = (e) => {
     const v = e.target.value;
@@ -61,17 +63,23 @@ export default function Typeahead({
     setItems([]); setOpen(false); setActive(-1);
   };
 
+  // "Add new" affordance: offered when the typed text isn't already an exact match.
+  const q = (value || '').trim();
+  const hasExact = items.some((it) => String(it.label).trim().toLowerCase() === q.toLowerCase());
+  const showCreate = allowCreate && q.length >= minChars && !hasExact;
+  const createNew = () => { onChange(q); setItems([]); setOpen(false); setActive(-1); };
+
   const handleKeyDown = (e) => {
-    if (!open || !items.length) return;
+    if (!open) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setActive((a) => Math.min(a + 1, items.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActive((a) => Math.max(a - 1, 0));
-    } else if (e.key === 'Enter' && active >= 0) {
-      e.preventDefault();
-      pick(items[active]);
+    } else if (e.key === 'Enter') {
+      if (active >= 0 && items[active]) { e.preventDefault(); pick(items[active]); }
+      else if (showCreate) { e.preventDefault(); createNew(); }
     } else if (e.key === 'Escape') {
       setOpen(false); setActive(-1);
     }
@@ -79,7 +87,7 @@ export default function Typeahead({
 
   // Reopen suggestion list if user clicks back into the field and has text
   const handleFocus = () => {
-    if (value.length >= minChars && items.length > 0) setOpen(true);
+    if (value.length >= minChars && (items.length > 0 || allowCreate)) setOpen(true);
   };
 
   // Close on click outside
@@ -110,7 +118,7 @@ export default function Typeahead({
         spellCheck={false}
         disabled={disabled}
       />
-      {open && (
+      {open && (items.length > 0 || showCreate) && (
         <div className="ta-list">
           {items.map((item, i) => (
             <button
@@ -125,6 +133,17 @@ export default function Typeahead({
               )}
             </button>
           ))}
+          {showCreate && (
+            <button
+              type="button"
+              className="ta-item"
+              onMouseDown={(e) => { e.preventDefault(); createNew(); }}
+              style={{ color: 'var(--brand-d)', fontWeight: 700, borderTop: items.length ? '1px solid var(--line)' : 'none' }}
+            >
+              {createLabel(q)}
+              {items.length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 400, marginTop: 1 }}>Not in list — add as new</div>}
+            </button>
+          )}
         </div>
       )}
     </div>

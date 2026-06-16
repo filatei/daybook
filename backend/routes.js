@@ -919,6 +919,24 @@ router.get('/suggest/vendors', requireAuth, async (req, res) => {
   res.json(out);
 });
 
+// Suggest expense-item names already used (incl. migrated history) — for the
+// itemised expense form. New names are simply accepted (stored on the expense).
+router.get('/suggest/expense-items', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.json([]);
+  const q = (req.query.q || '').toString().trim(); if (q.length < 1) return res.json([]);
+  try {
+    const rows = await qall(
+      `SELECT name, COUNT(*) n FROM (
+         SELECT TRIM(elem->>'name') AS name
+         FROM expenses e, LATERAL jsonb_array_elements(e.items_json::jsonb) elem
+         WHERE e.tenant_id=? AND e.items_json IS NOT NULL AND left(e.items_json,1)='['
+       ) t
+       WHERE name <> '' AND name ILIKE ? GROUP BY name ORDER BY n DESC, name LIMIT 12`,
+      [s.ctx.tenant_id, `%${q}%`]);
+    res.json(rows.map((r) => ({ label: r.name })));
+  } catch { res.json([]); }   // malformed items_json shouldn't break the picker
+});
+
 // ── ATTENDANCE ────────────────────────────────────────────────────────────────
 const ATT_DIR = path.join(UPLOAD_DIR, 'attendance');
 fs.mkdirSync(ATT_DIR, { recursive: true });

@@ -162,7 +162,7 @@ function StaffForm({ sites, siteBound, defaultSite, onSaved, onClose }) {
 }
 
 // ── Face liveness clock-in modal ──────────────────────────────────────────────
-function ClockModal({ staff, todayRecord, onDone, onClose }) {
+function ClockModal({ staff, todayRecord, onDone, onClose, enroll = false }) {
   const { toast } = useStore();
   const videoRef  = useRef(null);
   const canvasRef = useRef(null);
@@ -173,7 +173,7 @@ function ClockModal({ staff, todayRecord, onDone, onClose }) {
   const [enrolled, setEnrolled] = useState(undefined); // undefined=loading, null=none, array=descriptor
   const [threshold, setThreshold] = useState(FACE_MATCH_THRESHOLD);
   const [enrolling, setEnrolling] = useState(false);
-  const [forceEnroll, setForceEnroll] = useState(false); // re-enrol an already-enrolled face
+  const [forceEnroll, setForceEnroll] = useState(!!enroll); // start in enrol mode when asked
 
   const kind = todayRecord?.clock_in && !todayRecord?.clock_out ? 'out' : 'in';
   const enrollMode = enrolled === null || forceEnroll;
@@ -461,13 +461,14 @@ export default function Staff() {
 
   useEffect(() => { load(); }, [load]);
 
-  const openClock = (person) => {
+  const openClock = (person, enroll = false) => {
     openModal(
       <ClockModal
         staff={person}
         todayRecord={attendance[person.id] || null}
         onDone={load}
         onClose={closeModal}
+        enroll={enroll}
       />
     );
   };
@@ -519,18 +520,26 @@ export default function Staff() {
           {staff.map((s) => {
             const st = statusIcon(s);
             return (
-              <button key={s.id} onClick={() => openClock(s)}
-                style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
-                <div className="av">{s.full_name?.[0]?.toUpperCase() || '?'}</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700 }}>{s.full_name} {s.face_enrolled ? <span title="Face enrolled" style={{ fontSize: 12 }}>🙂</span> : <span title="No face on file" style={{ fontSize: 12, opacity: .5 }}>📷</span>}</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}</div>
-                </div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: st.color, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+              <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
+                <button onClick={() => openClock(s)} title="Clock in / out"
+                  style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0, border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
+                  <div className="av">{s.full_name?.[0]?.toUpperCase() || '?'}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700 }}>{s.full_name} {s.face_enrolled ? <span title="Face enrolled" style={{ fontSize: 12 }}>🙂</span> : <span title="No face on file" style={{ fontSize: 12, opacity: .5 }}>📷</span>}</div>
+                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>{s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}</div>
+                  </div>
+                </button>
+                {canManage && (
+                  <button onClick={() => openClock(s, true)} title={s.face_enrolled ? 'Re-enrol face' : 'Enrol face'}
+                    style={{ border: 'none', background: s.face_enrolled ? '#f1f5f9' : '#dcfce7', color: s.face_enrolled ? 'var(--muted)' : '#166534', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                    {s.face_enrolled ? '🙂 Re-enrol' : '📸 Enrol'}
+                  </button>
+                )}
+                <button onClick={() => openClock(s)} title="Clock in / out" style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: st.color, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
                   <span style={{ fontSize: 18 }}>{st.icon}</span>
                   {st.label}
-                </div>
-              </button>
+                </button>
+              </div>
             );
           })}
         </div>

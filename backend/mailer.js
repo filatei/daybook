@@ -181,6 +181,43 @@ async function sendMidMonthPayroll({ tenant, from, to, summary, to: recipients, 
   return { messageId: info.messageId, subject, to: recipients };
 }
 
+/**
+ * Expense lifecycle notice — sent to whoever must action the ticket next.
+ * @param opts { to:[emails], tenantName, brand, expense:{ref,amount,vendor,category,description,site,date},
+ *               state, stateLabel, actionNeeded, actorName, eventText }
+ */
+async function sendExpenseNotice({ to, tenantName, brand = '#2563eb', expense = {}, stateLabel, actionNeeded, actorName, eventText }) {
+  if (!to || (Array.isArray(to) && !to.length)) return { skipped: true };
+  const e = expense;
+  const subject = `[${tenantName || 'Daybook'}] Expense ${e.ref || ''} — ${stateLabel}`;
+  const row = (k, v) => v ? `<tr><td style="padding:5px 10px;color:#6b7280">${esc(k)}</td><td style="padding:5px 10px;font-weight:600">${esc(v)}</td></tr>` : '';
+  const html = `
+  <div style="font-family:Segoe UI,Arial,sans-serif;max-width:560px;margin:auto;color:#1f2937">
+    <div style="background:${brand};color:#fff;padding:20px 24px;border-radius:10px 10px 0 0">
+      <div style="font-size:13px;letter-spacing:2px;opacity:.85">DAYBOOK · EXPENSE</div>
+      <div style="font-size:21px;font-weight:800">${esc(e.ref || 'Expense')} — ${esc(stateLabel)}</div>
+    </div>
+    <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 10px 10px;padding:22px">
+      <p>${esc(eventText || 'This expense was updated.')}</p>
+      ${actionNeeded ? `<p style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 12px;font-weight:700;color:#9a3412">Action needed: ${esc(actionNeeded)}</p>` : ''}
+      <table style="width:100%;border-collapse:collapse;font-size:14px;margin:12px 0">
+        ${row('Amount', ngn(e.amount))}
+        ${row('Vendor', e.vendor)}
+        ${row('Category', e.category)}
+        ${row('Description', e.description)}
+        ${row('Site', e.site)}
+        ${row('Date', e.date)}
+        ${row('By', actorName)}
+      </table>
+      <p style="text-align:center;margin:22px 0">
+        <a href="${PUBLIC_URL}" style="background:${brand};color:#fff;text-decoration:none;font-weight:700;padding:11px 24px;border-radius:10px;display:inline-block">Open Daybook → Expenses</a>
+      </p>
+    </div>
+  </div>`;
+  const info = await getTransporter().sendMail({ from: FROM, to, subject, html });
+  return { messageId: info.messageId, subject, to };
+}
+
 async function verifyConnection() {
   try { await getTransporter().verify(); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
@@ -200,4 +237,4 @@ async function sendTest({ to }) {
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, sendInvite, sendMidMonthPayroll, verifyConnection, sendTest, FROM };
+module.exports = { sendDailyReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, verifyConnection, sendTest, FROM };

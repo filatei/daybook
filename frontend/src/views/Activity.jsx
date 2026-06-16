@@ -27,7 +27,7 @@ function describe(a) {
 }
 
 export default function Activity() {
-  const { tenant } = useStore();
+  const { tenant, go } = useStore();
   const role = useRole();
   const isMgrUp = role && atLeast(role, 'GENERAL_MANAGER');
   const [data, setData] = useState(null);
@@ -36,7 +36,7 @@ export default function Activity() {
   const [filters, setFilters] = useState({ user_id: '', from: '', to: '' });
   const [members, setMembers] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState('activity');
+  const [tab, setTab] = useState('alerts');
 
   useEffect(() => {
     setLoading(true);
@@ -76,11 +76,23 @@ export default function Activity() {
 
   const audits = data?.audits || [];
   const emails = data?.emails || [];
+  const notifs = data?.notifications || [];
+  const unread = notifs.filter((n) => !n.read).length;
+
+  const NICON = { expense: '🧾', billing: '💳', message: '✉️', feature: '💡' };
+  const openNotif = async (n) => {
+    if (!n.read) { api(scoped('/notifications/read'), { method: 'POST', body: { ids: [n.id] } }).catch(() => {}); }
+    if (n.link) go(n.link);
+  };
+  const markAllRead = async () => {
+    try { await api(scoped('/notifications/read'), { method: 'POST', body: {} }); setData((d) => ({ ...d, notifications: (d?.notifications || []).map((n) => ({ ...n, read: 1 })) })); } catch { /* ignore */ }
+  };
 
   return (
     <div>
       <div className="section-title" style={{ marginTop: 0 }}>Activity</div>
       <div className="seg" style={{ marginBottom: 14, overflowX: 'auto', flexWrap: 'nowrap' }}>
+        <button className={`seg-b${tab === 'alerts' ? ' on' : ''}`} onClick={() => setTab('alerts')}>🔔 Alerts{unread ? ` (${unread})` : ''}</button>
         <button className={`seg-b${tab === 'activity' ? ' on' : ''}`} onClick={() => setTab('activity')}>🕑 My activity</button>
         {isMgrUp && <button className={`seg-b${tab === 'team' ? ' on' : ''}`} onClick={() => setTab('team')}>👥 Team</button>}
         <button className={`seg-b${tab === 'messages' ? ' on' : ''}`} onClick={() => setTab('messages')}>✉️ Messages</button>
@@ -88,6 +100,32 @@ export default function Activity() {
 
       {loading ? (
         <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
+      ) : tab === 'alerts' ? (
+        notifs.length === 0 ? (
+          <div className="empty"><div className="ic">🔔</div><p>No alerts</p></div>
+        ) : (
+          <>
+            {unread > 0 && (
+              <div style={{ textAlign: 'right', marginBottom: 8 }}>
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={markAllRead}>Mark all read</button>
+              </div>
+            )}
+            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+              {notifs.map((n) => (
+                <button key={n.id} onClick={() => openNotif(n)}
+                  style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '11px 16px', borderBottom: '1px solid var(--line)', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', background: n.read ? 'none' : 'var(--bg)' }}>
+                  <div style={{ fontSize: 18 }}>{NICON[n.type] || '🔔'}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: n.read ? 600 : 800 }}>{n.title}{!n.read && <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 7, background: 'var(--err)', marginLeft: 6, verticalAlign: 'middle' }} />}</div>
+                    {n.body && <div style={{ fontSize: 13, color: 'var(--muted)' }}>{n.body}</div>}
+                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>{when(n.created_at)}</div>
+                  </div>
+                  {n.link && <div style={{ fontSize: 16, color: 'var(--muted)' }}>›</div>}
+                </button>
+              ))}
+            </div>
+          </>
+        )
       ) : tab === 'activity' ? (
         audits.length === 0 ? (
           <div className="empty"><div className="ic">🕑</div><p>No recent activity</p></div>

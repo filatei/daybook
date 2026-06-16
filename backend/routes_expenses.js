@@ -16,6 +16,7 @@ const multer = require('multer');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
 const { requireAuth, contextFor, accessibleTenants, requestedTenant, atLeast, siteBound } = require('./auth');
+const { notifyExpenseEvent } = require('./notify_expense');
 
 const router = express.Router();
 
@@ -174,7 +175,10 @@ router.post('/', requireAuth, async (req, res) => {
       [amount, tid, site_id, expense_date]);
   }
 
-  res.status(201).json(await qone('SELECT * FROM expenses WHERE id=?', [id]));
+  const created = await qone('SELECT * FROM expenses WHERE id=?', [id]);
+  // Notify those who validate it next (managers) + creator.
+  notifyExpenseEvent({ tenant_id: tid, expense: created, targetState: 'DRAFT', action: 'create', actorId: req.user.id, actorName: req.user.name || req.user.email });
+  res.status(201).json(created);
 });
 
 // ── PATCH /expenses/:id ────────────────────────────────────────────────────────
@@ -378,6 +382,8 @@ router.post('/:id/transition', requireAuth, async (req, res) => {
     `INSERT INTO expense_wf_log (id,tenant_id,expense_id,action,from_state,to_state,note,actor,actor_name)
      VALUES (?,?,?,?,?,?,?,?,?)`,
     [uuid(), a.expense.tenant_id, a.expense.id, action, cur, f.to, note, req.user.id, req.user.name || req.user.email || null]);
+  // Notify whoever must action the ticket next (+ managers always).
+  notifyExpenseEvent({ tenant_id: a.expense.tenant_id, expense: { ...a.expense, wf_state: f.to }, targetState: f.to, action, actorId: req.user.id, actorName: req.user.name || req.user.email });
   res.json({ wf_state: f.to, actions: allowedActions(f.to, a.ctx, { ...a.expense, wf_state: f.to }, req.user.id) });
 });
 

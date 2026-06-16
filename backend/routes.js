@@ -303,9 +303,16 @@ router.get('/me/activity', requireAuth, async (req, res) => {
   let emails = [];
   if (tid) emails = await qall(
     'SELECT to_addrs, subject, status, error, created_at FROM email_log WHERE tenant_id=? ORDER BY created_at DESC LIMIT 25', [tid]);
+  // Per-user in-app alerts (expense lifecycle, billing, messages…).
+  const nargs = [req.user.id];
+  let nwhere = 'user_id=?';
+  if (tid) { nwhere += ' AND (tenant_id=? OR tenant_id IS NULL)'; nargs.push(tid); }
+  const notifications = await qall(
+    `SELECT id, type, title, body, link, read, created_at FROM notifications WHERE ${nwhere} ORDER BY created_at DESC LIMIT 40`, nargs);
   res.json({
     audits: audits.map((a) => ({ ...a, meta: J(a.meta, {}) })),
     emails,
+    notifications,
   });
 });
 

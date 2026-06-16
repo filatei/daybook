@@ -3,6 +3,7 @@ import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import ReceiptPreview from '../components/ReceiptPreview.jsx';
+import OpsForm from './OpsForm.jsx';
 
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
 
@@ -253,6 +254,12 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
               </div>
             )}
 
+            {gen.scope !== 'ALL' && (
+              <div style={{ fontSize: 12, color: gen.summary?.ops ? 'var(--ok)' : 'var(--muted)', margin: '6px 2px' }}>
+                {gen.summary?.ops ? '✓ Day operations captured — included in the report.' : 'No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.'}
+              </div>
+            )}
+
             <label className="fl">Incidents / notes</label>
             <textarea className="input" rows={3} value={incidents} onChange={(e) => setIncidents(e.target.value)}
               placeholder="Anything notable today — incidents, breakdowns, shortages…" />
@@ -420,7 +427,11 @@ export default function Reports() {
       </div>
 
       {/* End-of-day: auto-generate a daily report from the app's data */}
-      <button className="btn" style={{ marginBottom: 14 }} onClick={() => setGenOpen(true)}>✨ Generate daily report</button>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <button className="btn" style={{ flex: 1 }} onClick={() => setGenOpen(true)}>✨ Generate daily report</button>
+        <button className="btn btn-ghost" style={{ flex: '0 0 auto' }} onClick={() => openModal(
+          <OpsForm sites={sites} siteBound={isSM} defaultDate={filters.from || today()} defaultSite={filters.site} onClose={closeModal} />, { guard: true })}>🛠 Day ops</button>
+      </div>
 
       {/* POS sales summary (imported Fido history + live in-app sales) */}
       {pos && pos.totals.orders > 0 && (

@@ -218,6 +218,32 @@ async function sendExpenseNotice({ to, tenantName, brand = '#2563eb', expense = 
   return { messageId: info.messageId, subject, to };
 }
 
+// Render the operator-keyed operations into report HTML (only non-empty groups).
+function opsHtml(ops) {
+  if (!ops || typeof ops !== 'object') return '';
+  const num = (n) => (n === '' || n == null) ? '' : Number(n).toLocaleString();
+  const has = (o) => o && Object.values(o).some((v) => v !== '' && v != null && v !== 0);
+  const kv = (label, obj, rows) => !has(obj) ? '' :
+    `<div style="font-weight:800;margin:8px 0 4px">${esc(label)}</div>
+     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px">${rows.map(([k, key]) => (obj[key] === '' || obj[key] == null) ? '' : `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">${esc(k)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${esc(String(obj[key]))}</td></tr>`).join('')}</table>`;
+  let out = '';
+  out += kv('Packing bags', ops.packing, [['Opening', 'opening'], ['Received', 'received'], ['Used for production', 'used_production'], ['Sales bags', 'sales'], ['Re-bagging', 'rebagging'], ['Damage replacement', 'damage_replacement'], ['Available', 'available']]);
+  out += kv('Bag adjustments', ops.bags, [['Leakage', 'leakage'], ['Staff water', 'staff_water'], ['Extra / bonus', 'extra'], ['Re-bagging', 'rebagging'], ['Damage', 'damage']]);
+  out += kv('Rolls (kg)', ops.rolls, [['Opening', 'opening_kg'], ['Received', 'received_kg'], ['Used', 'used_kg'], ['Available', 'available_kg']]);
+  out += kv('Crates', ops.crates, [['50cl available', 'c50_available'], ['50cl sold', 'c50_sold'], ['60cl available', 'c60_available'], ['75cl available', 'c75_available'], ['Dispenser available', 'dispenser_available']]);
+  out += kv('Water analysis', ops.water, [['PH', 'ph'], ['TDS', 'tds']]);
+  if (Array.isArray(ops.generators) && ops.generators.some((g) => g && g.name)) {
+    out += `<div style="font-weight:800;margin:8px 0 4px">Generator status</div><table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px">${ops.generators.filter((g) => g && g.name).map((g) => `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0">${esc(g.name)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${esc(g.status || '')}</td></tr>`).join('')}</table>`;
+  }
+  if (Array.isArray(ops.ro) && ops.ro.some((r) => r && (r.pure !== '' || r.waste !== ''))) {
+    out += `<div style="font-weight:800;margin:8px 0 4px">RO readings</div><table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px"><thead><tr><th style="text-align:left;padding:4px 10px;color:#6b7280">Unit</th><th style="text-align:right;padding:4px 10px;color:#6b7280">Pure</th><th style="text-align:right;padding:4px 10px;color:#6b7280">Waste</th></tr></thead><tbody>${ops.ro.filter((r) => r && (r.unit || r.pure !== '' || r.waste !== '')).map((r) => `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0">${esc(r.unit || '')}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${esc(String(r.pure ?? ''))}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${esc(String(r.waste ?? ''))}</td></tr>`).join('')}</tbody></table>`;
+  }
+  const text = (label, v) => (v && String(v).trim()) ? `<div style="font-weight:800;margin:8px 0 4px">${esc(label)}</div><div style="white-space:pre-wrap;font-size:13px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:8px 12px;margin-bottom:10px">${esc(v)}</div>` : '';
+  out += text('Materials supplied to other locations', ops.materials);
+  out += text('Expired documents', ops.expired_docs);
+  return out;
+}
+
 /**
  * Email a generated daily report (single site OR the all-sites roll-up).
  * @param opts { tenant, date, report:{scope,site_name,summary,bySite}, incidents, to }
@@ -271,6 +297,7 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
         <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Site</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sales</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Cash</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Transfer/POS</th></tr></thead>
         <tbody>${dist}</tbody>
       </table>` : ''}
+      ${opsHtml(s.ops)}
       ${incidents ? `<div style="font-weight:800;margin:6px 0">Incidents / notes</div>
         <div style="white-space:pre-wrap;font-size:13px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:10px 12px">${esc(incidents)}</div>` : ''}
       <p style="color:#9ca3af;font-size:12px;margin-top:18px">Auto-generated from Daybook sales, production and expenses for ${esc(date)}.</p>

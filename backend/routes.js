@@ -427,8 +427,8 @@ router.get('/reports', requireAuth, async (req, res) => {
 });
 
 router.get('/reports/:id', requireAuth, async (req, res, next) => {
-  // '/reports/generate' is a real route registered later — don't treat it as an id.
-  if (req.params.id === 'generate') return next();
+  // These are real sub-routes registered later — don't treat them as an :id.
+  if (req.params.id === 'generate' || req.params.id === 'ops') return next();
   const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, r.tenant_id);
@@ -614,6 +614,12 @@ async function buildGeneratedReport(ctx, date, siteArg) {
   const totalSales = tot.cash + tot.pos + tot.transfer;
   const single = !wantAll && bySite.length === 1 ? bySite[0] : null;
   const bagReport = single ? await bagDayReport(ctx, single.site_id, date) : null;
+  // Operations the site keyed in (leakage, rolls, generators, RO, water analysis…)
+  let ops = null;
+  if (single) {
+    const oRow = await qone('SELECT data FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [ctx.tenant_id, single.site_id, date]);
+    if (oRow) ops = J(oRow.data, null);
+  }
   return {
     report_date: date, scope: wantAll ? 'ALL' : 'SITE',
     site_id: single ? single.site_id : null,
@@ -623,7 +629,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       orders: tot.orders, totalLoaded: tot.totalLoaded, totalBagged: tot.totalBagged,
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
-      bagReport,
+      bagReport, ops,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
     // Single-site reports are saveable/submittable; the all-sites roll-up is view/email only.
@@ -662,6 +668,31 @@ router.post('/reports/generate/email', requireAuth, needTenant('SECRETARY'), asy
       [uuid(), req.ctx.tenant_id, to.join(','), `Daily report ${date}`, 'FAILED', e.message]).catch(() => {});
     res.status(502).json({ error: 'email failed: ' + e.message });
   }
+});
+
+// ── Daily operations capture (per site/day) ────────────────────────────────────
+router.get('/reports/ops', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : req.query.site;
+  if (!site_id) return res.status(400).json({ error: 'pick a site' });
+  const row = await qone('SELECT * FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [req.ctx.tenant_id, site_id, date]);
+  res.json({ site_id, ops_date: date, data: row ? J(row.data, {}) : {}, updated_at: row ? row.updated_at : null });
+});
+
+router.put('/reports/ops', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site;
+  if (!site_id) return res.status(400).json({ error: 'pick a site' });
+  const site = await siteById(site_id);
+  if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
+  const data = (b.data && typeof b.data === 'object') ? b.data : {};
+  await qrun(
+    `INSERT INTO ops_daily (id,tenant_id,site_id,ops_date,data,updated_by,updated_at)
+     VALUES (?,?,?,?,?,?,?)
+     ON CONFLICT (tenant_id,site_id,ops_date) DO UPDATE SET data=EXCLUDED.data, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at`,
+    [uuid(), req.ctx.tenant_id, site_id, date, JSON.stringify(data), req.user.id, nowS()]);
+  res.json({ ok: true, site_id, ops_date: date });
 });
 
 router.post('/reports/:id/email', requireAuth, async (req, res) => {

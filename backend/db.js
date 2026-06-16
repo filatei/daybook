@@ -689,6 +689,20 @@ async function migrate() {
       created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
     );
     CREATE INDEX IF NOT EXISTS idx_cash_att ON cash_attachments(cash_id);
+
+    -- Daily operations capture (the numbers a site keys in at day end that aren't
+    -- derivable: leakage, packing-bag & roll stock, crates, water analysis,
+    -- generator status, RO readings…). One row per site/day; data is a JSON blob.
+    CREATE TABLE IF NOT EXISTS ops_daily (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      site_id     TEXT NOT NULL REFERENCES sites(id),
+      ops_date    TEXT NOT NULL,
+      data        TEXT,
+      updated_by  TEXT,
+      updated_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      UNIQUE(tenant_id, site_id, ops_date)
+    );
   `);
 
   // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool

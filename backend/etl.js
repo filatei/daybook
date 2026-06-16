@@ -9,7 +9,7 @@
  *   node backend/etl.js [options]
  *
  * Options:
- *   --collection  orders|expenses|staff|customers|products|vendors|terminals|generators|payroll|all  (default: all)
+ *   --collection  orders|expenses|staff|customers|products|vendors|terminals|stockitems|inventory|generators|payroll|all  (default: all)
  *   --from        YYYY-MM-DD   (default: 2020-01-01)
  *   --to          YYYY-MM-DD   (default: today)
  *   --dry-run                  count + validate, no writes
@@ -637,6 +637,65 @@ async function etlTerminals(mongoDB, { nameMap, norm }, defaultTenantId) {
   return stats;
 }
 
+// ── stockitems → stock_items (raw-material catalogue) ─────────────────────────
+async function etlStockItems(mongoDB, defaultTenantId) {
+  const stats = { scanned: 0, inserted: 0, updated: 0, errors: 0 };
+  if (!defaultTenantId) { console.warn('[ETL] stockitems: no default tenant'); return stats; }
+  if (DRY_RUN) { stats.scanned = await mongoDB.collection('stockitems').countDocuments(); done('stockitems (dry-run)', stats); return stats; }
+  for await (const s of mongoDB.collection('stockitems').find({}).batchSize(BATCH_SIZE)) {
+    stats.scanned++;
+    const name = clean(s.name); if (!name) continue;
+    try {
+      const r = await qrun(
+        `INSERT INTO stock_items (id,tenant_id,name,category,unit,barcode,ext_id)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id, ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
+           category=COALESCE(EXCLUDED.category, stock_items.category),
+           unit=COALESCE(EXCLUDED.unit, stock_items.unit)`,
+        [uuid(), defaultTenantId, name, clean(s.category) || null, clean(s.unit) || 'unit', clean(s.barcode) || null, String(s._id)]);
+      if (r.rowCount) stats.inserted++; else stats.updated++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] stockitems error:', e.message.slice(0, 140)); }
+    progress('stockitems', stats.scanned, 0);
+  }
+  done('stockitems', stats);
+  return stats;
+}
+
+// ── inventories → stock_moves (received-from / issued-to movements) ────────────
+async function etlInventory(mongoDB, { nameMap, norm }, defaultTenantId) {
+  const stats = { scanned: 0, inserted: 0, skipped: 0, errors: 0 };
+  if (!defaultTenantId) { console.warn('[ETL] inventory: no default tenant'); return stats; }
+  if (DRY_RUN) { stats.scanned = await mongoDB.collection('inventories').countDocuments(); done('inventory (dry-run)', stats); return stats; }
+  const itemByExt = {};
+  for (const r of await qall('SELECT id, ext_id FROM stock_items WHERE ext_id IS NOT NULL')) itemByExt[r.ext_id] = r.id;
+  const vendorByExt = {};
+  for (const v of await qall('SELECT ext_id, name FROM vendors WHERE ext_id IS NOT NULL')) vendorByExt[v.ext_id] = v.name;
+  for await (const m of mongoDB.collection('inventories').find({}).batchSize(BATCH_SIZE)) {
+    stats.scanned++;
+    const itemId = itemByExt[String(m.name)];   // inventory.name → Stockitem _id
+    if (!itemId) { stats.skipped++; continue; }
+    const qtyMag = num(m.qty); if (!qtyMag) { stats.skipped++; continue; }
+    const ops = clean(m.ops).toUpperCase();
+    const isIssue = /ISSUE|OUT|USED|CONSUM|PRODUC/.test(ops);
+    const type = isIssue ? 'ISSUE' : 'RECEIVE';
+    const qty = isIssue ? -qtyMag : qtyMag;
+    const vendor = m.sender ? (vendorByExt[String(m.sender)] || null) : null;
+    const site = resolveSiteByName(nameMap, norm, m.store);
+    const moveDate = dateStr(m.dateReceived || m.createdAt) || dateStr(new Date());
+    try {
+      const r = await qrun(
+        `INSERT INTO stock_moves (id,tenant_id,item_id,site_id,type,qty,vendor,note,move_date,ext_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT (tenant_id, ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+        [uuid(), defaultTenantId, itemId, site ? site.id : null, type, qty, vendor, clean(m.remarks) || null, moveDate, String(m._id)]);
+      if (r.rowCount) stats.inserted++;
+    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] inventory error:', e.message.slice(0, 140)); }
+    progress('inventory', stats.scanned, 0);
+  }
+  done('inventory', stats);
+  return stats;
+}
+
 // ── Verify: reconcile Mongo (source) ↔ Postgres (imported rows) ─────────────────
 // Compares row counts per collection, and for orders the total ₦ per site, so you
 // get a clear pass/fail instead of eyeballing. Only counts IMPORTED rows in
@@ -697,7 +756,7 @@ async function main() {
   const defaultTenantId = defTenant ? defTenant.id : null;
   console.log(`[ETL] default tenant for site-less rows: ${defTenant ? defTenant.slug : '(none — site-less customers will be skipped)'}`);
 
-  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'vendors', 'terminals', 'generators', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
+  const run = COLLECTION === 'all' ? ['staff', 'customers', 'products', 'vendors', 'terminals', 'stockitems', 'inventory', 'generators', 'expenses', 'payroll', 'orders', 'recuploads', 'cashdeposits'] : [COLLECTION];
   const allStats = {};
   for (const col of run) {
     switch (col) {
@@ -706,6 +765,8 @@ async function main() {
       case 'products':     allStats.products     = await etlProducts(mongoDB, defaultTenantId); break;
       case 'vendors':      allStats.vendors      = await etlVendors(mongoDB, maps, defaultTenantId); break;
       case 'terminals':    allStats.terminals    = await etlTerminals(mongoDB, maps, defaultTenantId); break;
+      case 'stockitems':   allStats.stockitems   = await etlStockItems(mongoDB, defaultTenantId); break;
+      case 'inventory':    allStats.inventory    = await etlInventory(mongoDB, maps, defaultTenantId); break;
       case 'generators':   allStats.generators   = await etlGenerators(mongoDB, maps); break;
       case 'expenses':     allStats.expenses     = await etlExpenses(mongoDB, maps);  break;
       case 'payroll':      allStats.payroll      = await etlPayroll(mongoDB, maps);   break;

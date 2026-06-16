@@ -930,6 +930,48 @@ async function migrate() {
   await pool.query(`
     ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'REGULAR';
   `);
+
+  // ── Phase 9: Inventory — raw-material/stock catalogue + signed movements ──────
+  // on-hand = SUM(stock_moves.qty). RECEIVE = +qty, ISSUE = -qty, ADJUST = signed.
+  // A receive may link to an expense_id (vendor payable) created at the same time.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS stock_items (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL,
+      name          TEXT NOT NULL,
+      category      TEXT,
+      unit          TEXT DEFAULT 'unit',
+      sku           TEXT,
+      barcode       TEXT,
+      reorder_level DOUBLE PRECISION DEFAULT 0,
+      status        TEXT DEFAULT 'ACTIVE',
+      ext_id        TEXT,
+      created_at    BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_items_name ON stock_items(tenant_id, lower(name));
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_items_ext ON stock_items(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS stock_moves (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      item_id     TEXT NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,
+      site_id     TEXT,
+      type        TEXT NOT NULL,                 -- RECEIVE | ISSUE | ADJUST
+      qty         DOUBLE PRECISION NOT NULL,     -- signed: + in, - out
+      unit_cost   DOUBLE PRECISION DEFAULT 0,
+      vendor      TEXT,
+      ref         TEXT,
+      note        TEXT,
+      move_date   TEXT NOT NULL,
+      expense_id  TEXT,
+      created_by  TEXT,
+      ext_id      TEXT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_stock_moves_item ON stock_moves(tenant_id, item_id);
+    CREATE INDEX IF NOT EXISTS idx_stock_moves_site ON stock_moves(tenant_id, site_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_moves_ext ON stock_moves(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+  `);
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

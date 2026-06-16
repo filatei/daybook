@@ -22,6 +22,7 @@ import Terminals from './views/Terminals.jsx';
 import Products from './views/Products.jsx';
 import SiteMessages from './views/SiteMessages.jsx';
 import Badges from './views/Badges.jsx';
+import Inventory from './views/Inventory.jsx';
 import Activity from './views/Activity.jsx';
 
 function Inner() {
@@ -109,6 +110,7 @@ function Inner() {
         {tab === 'products'   && <Products />}
         {tab === 'messages'   && <SiteMessages />}
         {tab === 'badges'     && <Badges />}
+        {tab === 'inventory'  && <Inventory />}
         {tab === 'activity'   && <Activity />}
       </main>
       <Modal />

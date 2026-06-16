@@ -33,7 +33,9 @@ export function printBadges(items, brand, siteName = () => '') {
         <div class="co" style="color:${brand.color}">${escapeHtml(brand.name)}</div>
       </div>
       <div class="body">
-        <div class="av" style="background:${brand.color}">${escapeHtml((s.full_name || '?').trim().charAt(0).toUpperCase())}</div>
+        ${s.photo
+          ? `<div class="ph"><img src="${s.photo}" alt=""/></div>`
+          : `<div class="av" style="background:${brand.color}">${escapeHtml((s.full_name || '?').trim().charAt(0).toUpperCase())}</div>`}
         <div class="nm">${escapeHtml(s.full_name || '')}</div>
         <div class="rl">${escapeHtml(s.role_title || s.staff_type || 'Staff')}</div>
         <div class="st">${escapeHtml(siteName(s.site_id))}</div>
@@ -60,6 +62,8 @@ export function printBadges(items, brand, siteName = () => '') {
       .body { flex: 1; text-align: center; padding: 2mm 3mm; display: flex; flex-direction: column; align-items: center; justify-content: center; }
       .av { width: 16mm; height: 16mm; border-radius: 50%; color: #fff; font-size: 8mm; font-weight: 800;
         display: flex; align-items: center; justify-content: center; margin: 0 0 2mm; }
+      .ph { width: 22mm; height: 28mm; border-radius: 2mm; overflow: hidden; margin: 0 auto 2mm; border: 1px solid #e2e8f0; }
+      .ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
       .nm { font-weight: 800; font-size: 4.2mm; line-height: 1.15; }
       .rl { color: #475569; font-size: 3.2mm; margin-top: 1mm; }
       .st { color: #94a3b8; font-size: 3mm; margin-top: .5mm; }

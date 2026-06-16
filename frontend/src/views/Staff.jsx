@@ -5,6 +5,7 @@ import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/us
 import { brandFor, printBadges } from '../badge.js';
 import BarcodeScanner from '../components/BarcodeScanner.jsx';
 import SwipeRow from '../components/SwipeRow.jsx';
+import PhotoCapture from '../components/PhotoCapture.jsx';
 
 // ── Badge clock-in/out — scan a staff badge to toggle attendance ──────────────
 function BadgeClock() {
@@ -462,7 +463,13 @@ export default function Staff() {
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState('clock');   // clock | report
   const active = useActiveTenant();
-  const printBadge = (s) => printBadges([s], brandFor(active), (id) => sites.find((x) => x.id === id)?.name || '');
+  const [presentOnly, setPresentOnly] = useState(false);
+  const [photoStaff, setPhotoStaff] = useState(null);
+  const printBadge = async (s) => {
+    let photo = s.photo;
+    if (!photo) { try { photo = (await api(scoped(`/staff/${s.id}/photo`))).photo; } catch { /* fall back to avatar */ } }
+    printBadges([{ ...s, photo }], brandFor(active), (id) => sites.find((x) => x.id === id)?.name || '');
+  };
   const [showAdd, setShowAdd] = useState(false);
   const role = useRole();
   const canManage = role && atLeast(role, 'SECRETARY');
@@ -528,8 +535,13 @@ export default function Staff() {
       {mode === 'badge' ? <BadgeClock /> : mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} /> : (
       <>
       <div className="stat-grid" style={{ marginBottom: 14 }}>
-        <div className="stat accent"><div className="k">Present Today</div><div className="v">{present}</div></div>
-        <div className="stat"><div className="k">Total Staff</div><div className="v">{staff.length}</div></div>
+        <button className={`stat${presentOnly ? '' : ' accent'}`} onClick={() => setPresentOnly((v) => !v)}
+          style={{ textAlign: 'left', border: presentOnly ? '2px solid var(--brand-d)' : 'none', cursor: 'pointer' }} title="Tap to show only present staff">
+          <div className="k">Present Today {presentOnly ? '✓' : '›'}</div><div className="v">{present}</div>
+        </button>
+        <button className="stat" onClick={() => { setPresentOnly(false); setQuery(''); }} style={{ textAlign: 'left', border: 'none', cursor: 'pointer' }} title="Show all staff">
+          <div className="k">Total Staff</div><div className="v">{staff.length}</div>
+        </button>
       </div>
 
       {canManage && (
@@ -541,13 +553,13 @@ export default function Staff() {
           placeholder="🔍 Search staff by name or role…" />
       )}
 
-      {(() => { const shownStaff = staff.filter((s) => { const q = query.trim().toLowerCase(); return !q || (s.full_name || '').toLowerCase().includes(q) || (s.role_title || '').toLowerCase().includes(q) || (s.badge_code || '').toLowerCase().includes(q); }); return (
+      {(() => { const shownStaff = staff.filter((s) => { if (presentOnly && !attendance[s.id]?.clock_in) return false; const q = query.trim().toLowerCase(); return !q || (s.full_name || '').toLowerCase().includes(q) || (s.role_title || '').toLowerCase().includes(q) || (s.badge_code || '').toLowerCase().includes(q); }); return (
       loading ? (
         <>{[...Array(6)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : staff.length === 0 ? (
         <div className="empty"><div className="ic">👷</div><p>No staff found</p></div>
       ) : shownStaff.length === 0 ? (
-        <div className="empty"><div className="ic">🔍</div><p>No staff match “{query}”</p></div>
+        <div className="empty"><div className="ic">{presentOnly ? '🟢' : '🔍'}</div><p>{presentOnly ? 'No one is clocked in yet today' : `No staff match “${query}”`}</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {shownStaff.map((s) => {
@@ -569,6 +581,8 @@ export default function Staff() {
                   </button>
                 </>}
                 actions={canManage ? <>
+                  <button onClick={() => setPhotoStaff(s)} title={s.has_photo ? 'Update staff photo' : 'Add staff photo'}
+                    style={{ border: 'none', background: '#f1f5f9', color: s.has_photo ? '#166534' : 'var(--muted)', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>{s.has_photo ? '🖼' : '📷'}</button>
                   <button onClick={() => openClock(s, true)} title={s.face_enrolled ? 'Re-enrol face' : 'Enrol face'}
                     style={{ border: 'none', background: s.face_enrolled ? '#e2e8f0' : '#dcfce7', color: s.face_enrolled ? 'var(--muted)' : '#166534', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>
                     {s.face_enrolled ? '🙂 Re-enrol' : '📸 Enrol'}
@@ -594,6 +608,10 @@ export default function Staff() {
           onSaved={load}
           onClose={() => setShowAdd(false)}
         />
+      )}
+
+      {photoStaff && (
+        <PhotoCapture staff={photoStaff} onSaved={load} onClose={() => setPhotoStaff(null)} />
       )}
     </div>
   );

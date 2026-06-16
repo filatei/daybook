@@ -20,7 +20,7 @@ export default function Badges() {
   const brand = brandFor(active);
 
   const load = useCallback(async () => {
-    try { const params = siteFilter ? `?site=${siteFilter}` : ''; setStaff(await api(scoped(`/staff${params}`))); }
+    try { const p = new URLSearchParams({ photos: '1' }); if (siteFilter) p.set('site', siteFilter); setStaff(await api(scoped(`/staff?${p}`))); }
     catch { setStaff([]); }
   }, [tenant, siteFilter]);
   useEffect(() => { load(); }, [load]);
@@ -62,7 +62,13 @@ export default function Badges() {
                 <div style={{ fontWeight: 800, fontSize: 11, letterSpacing: .4, marginTop: 2, color: brand.color }}>{brand.name}</div>
               </div>
               <div style={{ textAlign: 'center', padding: '2px 8px 4px' }}>
-                <div style={{ width: 44, height: 44, borderRadius: '50%', background: brand.color, color: '#fff', fontSize: 21, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 6px' }}>{(s.full_name || '?').trim().charAt(0).toUpperCase()}</div>
+                {s.photo ? (
+                  <div style={{ width: 52, height: 66, borderRadius: 6, overflow: 'hidden', margin: '0 auto 6px', border: '1px solid var(--line)' }}>
+                    <img src={s.photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  </div>
+                ) : (
+                  <div style={{ width: 44, height: 44, borderRadius: '50%', background: brand.color, color: '#fff', fontSize: 21, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 6px' }}>{(s.full_name || '?').trim().charAt(0).toUpperCase()}</div>
+                )}
                 <div style={{ fontWeight: 800, fontSize: 14, lineHeight: 1.15 }}>{s.full_name}</div>
                 <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>{s.role_title || s.staff_type || 'Staff'}</div>
                 <div style={{ fontSize: 11, color: '#94a3b8' }}>{siteName(s.site_id)}</div>

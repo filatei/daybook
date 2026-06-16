@@ -846,18 +846,19 @@ router.post('/ai/analyse', requireAuth, async (req, res) => {
 // Staff list columns — exclude the bulky face_descriptor; expose face_enrolled flag.
 const STAFF_COLS = `id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,
   bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,badge_code,ext_people_id,status,created_at,
-  (face_descriptor IS NOT NULL) AS face_enrolled, face_enrolled_at`;
+  (face_descriptor IS NOT NULL) AS face_enrolled, face_enrolled_at, (photo IS NOT NULL) AS has_photo`;
 const newBadgeCode = () => 'B' + Math.random().toString(36).slice(2, 9).toUpperCase();
 const STAFF_TYPES = ['REGULAR', 'BAGGER', 'LOADER'];
 // Piece workers (baggers/loaders) are paid per bag; regular staff get a daily/monthly rate.
 const payTypeFor = (staffType, requested) => (staffType === 'BAGGER' || staffType === 'LOADER') ? 'PIECE' : (['DAILY', 'MONTHLY', 'HOURLY'].includes(String(requested || '').toUpperCase()) ? String(requested).toUpperCase() : 'DAILY');
 router.get('/staff', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
-  if (s.all) return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff ORDER BY full_name`));
-  if (siteBound(s.ctx)) return res.json(await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name`, [s.ctx.tenant_id, s.ctx.site_id]));
+  const cols = STAFF_COLS + (req.query.photos === '1' ? ', photo' : '');   // photos for badge screen
+  if (s.all) return res.json(await qall(`SELECT ${cols} FROM staff ORDER BY full_name`));
+  if (siteBound(s.ctx)) return res.json(await qall(`SELECT ${cols} FROM staff WHERE tenant_id=? AND site_id=? AND status='ACTIVE' ORDER BY full_name`, [s.ctx.tenant_id, s.ctx.site_id]));
   const site = req.query.site;
-  res.json(site ? await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name`, [s.ctx.tenant_id, site])
-    : await qall(`SELECT ${STAFF_COLS} FROM staff WHERE tenant_id=? ORDER BY full_name`, [s.ctx.tenant_id]));
+  res.json(site ? await qall(`SELECT ${cols} FROM staff WHERE tenant_id=? AND site_id=? ORDER BY full_name`, [s.ctx.tenant_id, site])
+    : await qall(`SELECT ${cols} FROM staff WHERE tenant_id=? ORDER BY full_name`, [s.ctx.tenant_id]));
 });
 
 // Get a staff member's enrolled face descriptor (for client-side matching at clock-in).
@@ -904,6 +905,30 @@ router.delete('/staff/:id/face', requireAuth, needTenant('SECRETARY'), async (re
   const st = await qone('SELECT id,tenant_id,site_id FROM staff WHERE id=?', [req.params.id]);
   if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   await qrun('UPDATE staff SET face_descriptor=NULL, face_enrolled_at=NULL WHERE id=?', [st.id]);
+  res.json({ ok: true });
+});
+// Passport-style staff photo for the badge (small JPEG data URL, ≤ ~200 KB).
+router.get('/staff/:id/photo', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: 'select a workspace' });
+  const st = await qone('SELECT tenant_id, photo FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  res.json({ photo: st.photo || null });
+});
+router.post('/staff/:id/photo', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const st = await qone('SELECT id,tenant_id,site_id FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (siteBound(req.ctx) && st.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const photo = (req.body || {}).photo;
+  if (typeof photo !== 'string' || !/^data:image\/(png|jpe?g|webp);base64,/.test(photo)) return res.status(400).json({ error: 'photo must be an image data URL' });
+  if (photo.length > 300 * 1024) return res.status(400).json({ error: 'photo too large — keep it small (passport size)' });
+  await qrun('UPDATE staff SET photo=?, photo_at=? WHERE id=?', [photo, nowS(), st.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'STAFF_PHOTO', 'staff', st.id, {});
+  res.json({ ok: true });
+});
+router.delete('/staff/:id/photo', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const st = await qone('SELECT id,tenant_id,site_id FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  await qrun('UPDATE staff SET photo=NULL, photo_at=NULL WHERE id=?', [st.id]);
   res.json({ ok: true });
 });
 router.post('/staff', requireAuth, needTenant('SECRETARY'), async (req, res) => {

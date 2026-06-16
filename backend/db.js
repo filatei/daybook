@@ -517,6 +517,9 @@ async function migrate() {
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS department  TEXT;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_name   TEXT;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_account TEXT;
+    -- Passport-style staff photo (small JPEG data URL) for the ID badge.
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS photo TEXT;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS photo_at BIGINT;
     -- Scannable badge code (printed on the staff ID card) for badge clock-in.
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS badge_code TEXT;
     UPDATE staff SET badge_code = UPPER(SUBSTRING(MD5(id) FROM 1 FOR 8)) WHERE badge_code IS NULL;

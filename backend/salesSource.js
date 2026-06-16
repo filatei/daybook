@@ -141,20 +141,55 @@ function methodMatch(method) {
   if (m === 'NONCASH') return { paymentMethod: { $not: siteRegex('CASH') } };
   return { paymentMethod: siteRegex(m) };
 }
-async function listOrders({ from, to, sites, method, limit = 500 }) {
+const exactRegex = (s) => new RegExp(`^${String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+async function listOrders({ from, to, sites, method, bank, terminal, limit = 500 }) {
   const db = await getDb();
   const start = new Date(`${from}T00:00:00.000${TZ()}`);
   const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
   const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
-  if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
+  const ands = [];
+  if (Array.isArray(sites) && sites.length) ands.push({ $or: sites.map((c) => ({ site: siteRegex(c) })) });
   // Show incentive orders only when explicitly asked; otherwise exclude them so
   // lists match the (incentive-free) sales/cash/transfer totals.
   if (String(method || '').toUpperCase() === 'INCENTIVE') Object.assign(match, IS_INCENTIVE);
   else { Object.assign(match, NOT_INCENTIVE); const mm = methodMatch(method); if (mm) Object.assign(match, mm); }
+  // Filter by which bank / POS terminal the payment went through.
+  if (bank) ands.push({ $or: ['acquirer', 'card_bank', 'bank', 'transfer_from_bank'].map((f) => ({ [f]: exactRegex(bank) })) });
+  if (terminal) match.terminal_location = exactRegex(terminal);
+  if (ands.length) match.$and = ands;
   const rows = await db.collection('fidoorders')
     .find(match, { projection: ORDER_PROJ })
     .sort({ createdAt: -1 }).limit(Math.min(+limit || 500, 1000)).toArray();
   return rows.map(mapOrder);
+}
+
+// Non-cash sales grouped by POS terminal / transfer bank, for the dashboard drill.
+async function bankBreakdown({ from, to, sites }) {
+  const db = await getDb();
+  const start = new Date(`${from}T00:00:00.000${TZ()}`);
+  const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
+  const match = {
+    createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS },
+    orderType: { $ne: 'INCENTIVE' },
+    paymentMethod: { $not: siteRegex('CASH'), $ne: 'INCENTIVE' },
+  };
+  if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
+  const rows = await db.collection('fidoorders').aggregate([
+    { $match: match },
+    { $addFields: {
+      _amt: num('$txn_amount'),
+      _bank: { $toUpper: { $ifNull: ['$acquirer', { $ifNull: ['$card_bank', { $ifNull: ['$bank', { $ifNull: ['$transfer_from_bank', ''] }] }] }] } },
+      _term: { $toUpper: { $ifNull: ['$terminal_location', ''] } },
+      _pos: { $regexMatch: { input: { $toUpper: { $ifNull: ['$paymentMethod', ''] } }, regex: 'POS|CARD' } },
+    } },
+    { $group: { _id: { bank: '$_bank', term: '$_term', pos: '$_pos' }, amount: { $sum: '$_amt' }, orders: { $sum: 1 } } },
+    { $sort: { amount: -1 } }, { $limit: 200 },
+  ]).toArray();
+  return rows.map((r) => ({
+    kind: r._id.pos ? 'POS' : 'TRANSFER',
+    bank: r._id.bank || null, terminal: r._id.term || null,
+    amount: Math.round(r.amount || 0), orders: r.orders,
+  }));
 }
 /** One order by its Mongo _id (for the live-line / order-detail drill-down). */
 async function getOrder(id) {
@@ -311,4 +346,4 @@ async function ping() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getOrder, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping, incentiveTotal, isIncentiveOrder };
+module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getOrder, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping, incentiveTotal, isIncentiveOrder, bankBreakdown };

@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore } from '../store.jsx';
 import { useRealtime } from '../hooks/useRealtime.js';
-import { OrdersListModal, OrderDetailModal } from '../components/OrderViews.jsx';
+import { OrdersListModal, OrderDetailModal, BankBreakdownModal } from '../components/OrderViews.jsx';
 
 const clock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -50,6 +50,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [drill, setDrill] = useState(null);     // { title, query } orders-list modal
   const [detailId, setDetailId] = useState(null); // single order detail (from live line)
+  const [bankDrill, setBankDrill] = useState(null); // { query } transfer/POS breakdown
 
   // Live sales feed (streamed from the still-running fido POS, pre-cutover).
   const [live, setLive] = useState({ total: 0, count: 0, feed: [] });
@@ -152,7 +153,7 @@ export default function Dashboard() {
               <div className="k">Cash{usePos ? ' ›' : ''}</div>
               <div className="v">{ngn(cash)}</div>
             </button>
-            <button className="stat" onClick={() => usePos && openOrders('Transfer / POS orders', 'method=NONCASH')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+            <button className="stat" onClick={() => usePos && setBankDrill(rangeQS())} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
               <div className="k">{usePos ? 'Transfer/POS ›' : 'Deposits'}</div>
               <div className="v">{ngn(transfer)}</div>
             </button>
@@ -199,6 +200,18 @@ export default function Dashboard() {
         </>
       )}
 
+      {bankDrill && (
+        <BankBreakdownModal
+          title="Transfer / POS breakdown"
+          query={bankDrill}
+          onClose={() => setBankDrill(null)}
+          onPick={(r) => {
+            const f = r.terminal ? `terminal=${encodeURIComponent(r.terminal)}` : (r.bank ? `bank=${encodeURIComponent(r.bank)}` : '');
+            setBankDrill(null);
+            openOrders(`${r.kind === 'POS' ? '💳' : '🏦'} ${r.terminal || r.bank || 'Unspecified'}`, `method=NONCASH${f ? '&' + f : ''}`);
+          }}
+        />
+      )}
       {drill && <OrdersListModal title={drill.title} query={drill.query} onClose={() => setDrill(null)} />}
       {detailId && <OrderDetailModal orderId={detailId} onClose={() => setDetailId(null)} />}
     </div>

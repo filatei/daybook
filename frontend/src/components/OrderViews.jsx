@@ -63,6 +63,45 @@ export function OrderDetailModal({ order, orderId, onClose }) {
   );
 }
 
+// Non-cash sales grouped by POS terminal / transfer bank → tap a group to drill
+// into its orders.  `query` carries the date-range (+ optional site) filter.
+export function BankBreakdownModal({ title, query, onClose, onPick }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { api(scoped(`/pos/banks?${query}`)).then(setRows).catch(() => setRows([])); }, [query]);
+  const pos = (rows || []).filter((r) => r.kind === 'POS');
+  const tr = (rows || []).filter((r) => r.kind === 'TRANSFER');
+  const labelOf = (r) => r.terminal || r.bank || 'Unspecified';
+  const Group = ({ heading, list, icon }) => list.length === 0 ? null : (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.5px', margin: '6px 0 2px' }}>{icon} {heading}</div>
+      {list.map((r, i) => (
+        <button key={i} onClick={() => onPick(r)}
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '9px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelOf(r)}</div>
+            {r.terminal && r.bank && <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.bank}</div>}
+          </div>
+          <div style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+            <div style={{ fontWeight: 800 }}>{ngn(r.amount)}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.orders.toLocaleString()} ›</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+  return (
+    <Backdrop onClose={onClose}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <strong>{title || 'Transfer / POS breakdown'}</strong>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={onClose}>✕</button>
+      </div>
+      {rows === null ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
+        : rows.length === 0 ? <div className="empty"><div className="ic">💳</div><p>No transfer/POS sales in this period</p></div>
+          : <><Group heading="POS terminals" list={pos} icon="💳" /><Group heading="Transfer banks" list={tr} icon="🏦" /></>}
+    </Backdrop>
+  );
+}
+
 // Orders list for a filter (site/method/date range) → click a row for detail.
 export function OrdersListModal({ title, query, onClose }) {
   const [rows, setRows] = useState(null);

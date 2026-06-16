@@ -639,7 +639,7 @@ async function etlTerminals(mongoDB, { nameMap, norm }, defaultTenantId) {
 
 // ── stockitems → stock_items (raw-material catalogue) ─────────────────────────
 async function etlStockItems(mongoDB, defaultTenantId) {
-  const stats = { scanned: 0, inserted: 0, updated: 0, errors: 0 };
+  const stats = { scanned: 0, inserted: 0, updated: 0, dup_name: 0, errors: 0 };
   if (!defaultTenantId) { console.warn('[ETL] stockitems: no default tenant'); return stats; }
   if (DRY_RUN) { stats.scanned = await mongoDB.collection('stockitems').countDocuments(); done('stockitems (dry-run)', stats); return stats; }
   for await (const s of mongoDB.collection('stockitems').find({}).batchSize(BATCH_SIZE)) {
@@ -654,7 +654,12 @@ async function etlStockItems(mongoDB, defaultTenantId) {
            unit=COALESCE(EXCLUDED.unit, stock_items.unit)`,
         [uuid(), defaultTenantId, name, clean(s.category) || null, clean(s.unit) || 'unit', clean(s.barcode) || null, String(s._id)]);
       if (r.rowCount) stats.inserted++; else stats.updated++;
-    } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] stockitems error:', e.message.slice(0, 140)); }
+    } catch (e) {
+      // Two fido stock items can share a name (different _id) → name-unique clash.
+      // That's expected; the catalogue keeps one. Count it, don't treat as error.
+      if (e.code === '23505' || /idx_stock_items_name/.test(e.message)) stats.dup_name++;
+      else { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] stockitems error:', e.message.slice(0, 140)); }
+    }
     progress('stockitems', stats.scanned, 0);
   }
   done('stockitems', stats);

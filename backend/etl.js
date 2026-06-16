@@ -402,19 +402,24 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
     const terminal = isCash ? null : (clean(order.terminal_location).toUpperCase() || null);
 
     try {
-      const r = await qrun(
+      // On re-run, backfill bank/terminal onto already-imported rows (only when
+      // currently blank — never overwrite). xmax=0 ⇒ this was a fresh insert.
+      const row = await qone(
         `INSERT INTO pos_sales
           (id,tenant_id,site_id,receipt_no,customer_id,customer_name,items_json,
            subtotal,discount,total,payment_method,amount_paid,balance,status,
            sale_date,bank,terminal,ext_id,created_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+         ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
+           bank     = COALESCE(pos_sales.bank, EXCLUDED.bank),
+           terminal = COALESCE(pos_sales.terminal, EXCLUDED.terminal)
+         RETURNING (xmax = 0) AS inserted`,
         [uuid(), site.tenant_id, site.id, nextReceipt(site.tenant_id),
           custId, custName, JSON.stringify(items),
           total_amount, 0, total_amount, pm, total_amount, 0, 'PAID',
           saleDate, bank, terminal, ext_id, createdAt]);
-      if (r.rowCount) stats.inserted++;
-      else stats.duplicate++;
+      if (row && row.inserted) stats.inserted++;
+      else { stats.duplicate++; if (bank || terminal) stats.backfilled = (stats.backfilled || 0) + 1; }
     } catch (e) {
       // Fallback: ext_id conflict index may not be active yet — log and continue
       stats.errors++;

@@ -162,6 +162,14 @@ export default function Dashboard() {
             </button>
           </div>
 
+          {usePos && pos.totals.incentive > 0 && (
+            <button className="stat" onClick={() => openOrders('Incentive orders', 'method=INCENTIVE')}
+              style={{ cursor: 'pointer', textAlign: 'left', border: 'none', width: '100%', marginBottom: 12, background: '#fffbeb' }}>
+              <div className="k" style={{ color: '#92400e' }}>🎁 Incentive (bonus — not in cash/sales) ›</div>
+              <div className="v" style={{ color: '#92400e' }}>{ngn(pos.totals.incentive)}</div>
+            </button>
+          )}
+
           {byDay?.length > 0 && (
             <div className="card" style={{ paddingBottom: 8 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6 }}>

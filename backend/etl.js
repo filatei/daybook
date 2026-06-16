@@ -382,8 +382,11 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
 
     const saleDate = dateStr(order.createdAt); if (!saleDate) { stats.skipped++; continue; }
     const total_amount = num(order.txn_amount);
-    const pm = clean((order.paymentMethod || 'CASH').toUpperCase()) || 'CASH';
-    const isCash = CASH_METHODS.includes(pm);
+    const rawPm = clean((order.paymentMethod || 'CASH').toUpperCase()) || 'CASH';
+    // Incentive (monthly bonus, no cash collected) is bucketed apart from sales/cash.
+    const incentive = String(order.orderType || '').toUpperCase() === 'INCENTIVE' || rawPm === 'INCENTIVE';
+    const pm = incentive ? 'INCENTIVE' : rawPm;
+    const isCash = !incentive && CASH_METHODS.includes(pm);
     const custExtId = order.customer ? String(order.customer) : null;
     const custId = custExtId ? (custByExt[`${site.tenant_id}:${custExtId}`] || null) : null;
     const custName = clean(order.customerName || order.customer_name);

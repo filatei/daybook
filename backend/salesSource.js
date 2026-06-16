@@ -47,6 +47,13 @@ function dayRange(dateStr) {
 const num = (path) => ({ $convert: { input: path, to: 'double', onError: 0, onNull: 0 } });
 const SALE_STATUS = ['DELIVERED', 'PAID', 'LOADED', 'COMPLETED'];
 const CASH_METHODS = ['CASH'];
+// INCENTIVE orders are a monthly customer-bonus programme: goods given out with
+// NO cash collected. Fido excludes them from sales & cash entirely (they are
+// tracked separately). An order is incentive if its orderType OR paymentMethod
+// says so. Mongo match fragment to keep only NORMAL (revenue) orders:
+const NOT_INCENTIVE = { orderType: { $ne: 'INCENTIVE' }, paymentMethod: { $ne: 'INCENTIVE' } };
+const IS_INCENTIVE = { $or: [{ orderType: 'INCENTIVE' }, { paymentMethod: 'INCENTIVE' }] };
+const isIncentiveOrder = (o) => String(o && o.orderType || '').toUpperCase() === 'INCENTIVE' || String(o && o.paymentMethod || '').toUpperCase() === 'INCENTIVE';
 
 /** Aggregate one site's sales for one day from `fidoorders`. */
 async function getSales(siteCode, dateStr) {
@@ -57,12 +64,15 @@ async function getSales(siteCode, dateStr) {
     { $match: match },
     { $addFields: { _amt: num('$txn_amount') } },
     { $facet: {
-      byPayment: [{ $group: { _id: '$paymentMethod', amount: { $sum: '$_amt' }, count: { $sum: 1 } } }, { $sort: { amount: -1 } }],
-      byProduct: [{ $unwind: { path: '$products', preserveNullAndEmptyArrays: false } },
+      // Sales/cash/products count only NORMAL (revenue) orders — incentive excluded.
+      byPayment: [{ $match: NOT_INCENTIVE }, { $group: { _id: '$paymentMethod', amount: { $sum: '$_amt' }, count: { $sum: 1 } } }, { $sort: { amount: -1 } }],
+      byProduct: [{ $match: { ...NOT_INCENTIVE, 'products.name': { $ne: 'INCENTIVE' } } },
+        { $unwind: { path: '$products', preserveNullAndEmptyArrays: false } },
+        { $match: { 'products.name': { $ne: 'INCENTIVE' } } },
         { $group: { _id: '$products.name', qty: { $sum: num('$products.qty') }, amount: { $sum: num('$products.amount') } } },
         { $sort: { amount: -1 } }],
-      byType: [{ $group: { _id: '$orderType', amount: { $sum: '$_amt' }, count: { $sum: 1 } } }],
-      total: [{ $group: { _id: null, amount: { $sum: '$_amt' }, orders: { $sum: 1 } } }],
+      total: [{ $match: NOT_INCENTIVE }, { $group: { _id: null, amount: { $sum: '$_amt' }, orders: { $sum: 1 } } }],
+      incentive: [{ $match: IS_INCENTIVE }, { $group: { _id: null, amount: { $sum: '$_amt' }, orders: { $sum: 1 } } }],
     } },
   ]).toArray();
 
@@ -72,7 +82,7 @@ async function getSales(siteCode, dateStr) {
   const orders = res?.total?.[0]?.orders || 0;
   const total_cash = byPayment.filter((p) => CASH_METHODS.includes(p.method)).reduce((a, p) => a + p.amount, 0);
   const total_deposit = total - total_cash;
-  return { site: siteCode, date: dateStr, total, orders, total_cash, total_deposit, payments: byPayment, lines, incentive: (res?.byType || []).find((t) => t._id === 'INCENTIVE')?.amount || 0 };
+  return { site: siteCode, date: dateStr, total, orders, total_cash, total_deposit, payments: byPayment, lines, incentive: res?.incentive?.[0]?.amount || 0, incentive_orders: res?.incentive?.[0]?.orders || 0 };
 }
 
 /**
@@ -93,7 +103,7 @@ async function recentOrders({ sites, date, limit = 40 }) {
     site: o.site || '',
     customer: String(o.customerName || o.customer_name || '').trim() || null,
     amount: Math.round(n(o.txn_amount)),
-    payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
+    payment_method: isIncentiveOrder(o) ? 'INCENTIVE' : String(o.paymentMethod || 'CASH').toUpperCase(),
     items: Array.isArray(o.products) ? o.products.length : 0,
     at: o.createdAt,
   }));
@@ -104,7 +114,7 @@ async function recentOrders({ sites, date, limit = 40 }) {
  * the "orders for this site" drill-down and printable per-order detail.
  */
 const n2 = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
-const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
+const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
 // Which bank/terminal a payment went through: POS uses the acquirer/card bank +
 // terminal location; transfer uses the source bank.
 const orderBank = (o) => String(o.acquirer || o.card_bank || o.bank || o.transfer_from_bank || '').trim().toUpperCase() || null;
@@ -115,7 +125,7 @@ const mapOrder = (o) => ({
   customer: String(o.customerName || o.customer_name || '').trim() || null,
   entry_by: String(o.userName || '').trim() || null,
   amount: Math.round(n2(o.txn_amount)),
-  payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
+  payment_method: isIncentiveOrder(o) ? 'INCENTIVE' : String(o.paymentMethod || 'CASH').toUpperCase(),
   bank: orderBank(o),
   terminal: String(o.terminal_location || '').trim().toUpperCase() || null,
   items: (Array.isArray(o.products) ? o.products : []).map((p) => ({
@@ -137,7 +147,10 @@ async function listOrders({ from, to, sites, method, limit = 500 }) {
   const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
   const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
   if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
-  const mm = methodMatch(method); if (mm) Object.assign(match, mm);
+  // Show incentive orders only when explicitly asked; otherwise exclude them so
+  // lists match the (incentive-free) sales/cash/transfer totals.
+  if (String(method || '').toUpperCase() === 'INCENTIVE') Object.assign(match, IS_INCENTIVE);
+  else { Object.assign(match, NOT_INCENTIVE); const mm = methodMatch(method); if (mm) Object.assign(match, mm); }
   const rows = await db.collection('fidoorders')
     .find(match, { projection: ORDER_PROJ })
     .sort({ createdAt: -1 }).limit(Math.min(+limit || 500, 1000)).toArray();
@@ -217,7 +230,7 @@ async function query({ from, to, site, sites, groupBy = 'site' }) {
   const db = await getDb();
   const start = new Date(`${from}T00:00:00.000${TZ()}`);
   const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
-  const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
+  const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS }, ...NOT_INCENTIVE };
   // Tenant isolation: when a site allowlist is given, restrict to those sites.
   if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
   else if (site) match.site = siteRegex(site);
@@ -234,6 +247,20 @@ async function query({ from, to, site, sites, groupBy = 'site' }) {
   pipeline.push({ $sort: { amount: -1 } }, { $limit: 100 });
   const rows = await db.collection('fidoorders').aggregate(pipeline).toArray();
   return rows.map((r) => ({ group: r._id, amount: Math.round(r.amount || 0), orders: r.orders, qty: r.qty }));
+}
+
+/** Sum of INCENTIVE (bonus) orders for a date range — tracked apart from sales. */
+async function incentiveTotal({ from, to, site, sites }) {
+  const db = await getDb();
+  const start = new Date(`${from}T00:00:00.000${TZ()}`);
+  const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
+  const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS }, ...IS_INCENTIVE };
+  if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
+  else if (site) match.site = siteRegex(site);
+  const [r] = await db.collection('fidoorders').aggregate([
+    { $match: match }, { $group: { _id: null, amount: { $sum: num('$txn_amount') }, orders: { $sum: 1 } } },
+  ]).toArray();
+  return { amount: Math.round(r?.amount || 0), orders: r?.orders || 0 };
 }
 
 /** Aggregate fido `expenses` by site / category / day for a date range. */
@@ -282,4 +309,4 @@ async function ping() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getOrder, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping };
+module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getOrder, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping, incentiveTotal, isIncentiveOrder };

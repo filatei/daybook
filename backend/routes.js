@@ -1361,14 +1361,15 @@ router.get('/pos/summary', requireAuth, async (req, res) => {
   const where = ['tenant_id=?', 'sale_date=?'], args = [s.ctx.tenant_id, date];
   if (siteBound(s.ctx)) { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
   const rows = await qall(`SELECT * FROM pos_sales WHERE ${where.join(' AND ')}`, args);
-  const total = rows.reduce((a, r) => a + (r.total || 0), 0);
-  const pay = {}; const prod = {};
+  const pay = {}; const prod = {}; let total = 0, orders = 0, incentive = 0;
   for (const r of rows) {
     pay[r.payment_method] = (pay[r.payment_method] || 0) + (r.total || 0);
+    if (r.payment_method === 'INCENTIVE') { incentive += (r.total || 0); continue; }   // bonus, not sales/cash
+    total += (r.total || 0); orders += 1;
     for (const it of J(r.items_json, [])) { const k = it.name; if (!prod[k]) prod[k] = { product: k, qty: 0, amount: 0 }; prod[k].qty += it.qty; prod[k].amount += it.amount; }
   }
   const cash = pay.CASH || 0;
-  res.json({ date, total, orders: rows.length, total_cash: cash, total_deposit: total - cash,
+  res.json({ date, total, orders, total_cash: cash, total_deposit: total - cash, incentive,
     payments: Object.entries(pay).map(([method, amount]) => ({ method, amount })), lines: Object.values(prod) });
 });
 
@@ -1400,9 +1401,10 @@ router.get('/pos/range', requireAuth, async (req, res) => {
       const orders = byMethodR.reduce((a, r) => a + (r.orders || 0), 0);
       const salesTot = byMethodR.reduce((a, r) => a + (r.amount || 0), 0);
       const cash = byMethodR.filter((r) => isCash(r.group)).reduce((a, r) => a + (r.amount || 0), 0);
+      const inc = await sales.incentiveTotal({ from, to, sites }).catch(() => ({ amount: 0, orders: 0 }));
       return res.json({
         live: true,
-        totals: { sales: salesTot, orders, cash, transfer: salesTot - cash },
+        totals: { sales: salesTot, orders, cash, transfer: salesTot - cash, incentive: inc.amount, incentive_orders: inc.orders },
         bySite: bySiteR.map((r) => ({ site: r.group || '—', code: r.group, sales: r.amount, orders: r.orders })),
         byDay: byDayR.map((r) => ({ day: r.group, sales: r.amount })).sort((a, b) => (a.day < b.day ? -1 : 1)),
         byMethod: byMethodR.map((r) => ({ method: r.group || '—', sales: r.amount, orders: r.orders })),
@@ -1416,15 +1418,22 @@ router.get('/pos/range', requireAuth, async (req, res) => {
   if (to) { where.push('sale_date<=?'); args.push(to); }
   const W = 'WHERE ' + where.join(' AND ');
   const WP = 'WHERE ' + where.map((c) => 'p.' + c).join(' AND ');   // prefixed for the JOIN query
-  const totals = await qone(`SELECT COALESCE(SUM(total),0) sales, COUNT(*) orders,
+  // Incentive orders (bonus, no cash) are excluded from sales/cash and reported apart.
+  const Wn = W + " AND payment_method<>'INCENTIVE'";
+  const WPn = WP + " AND p.payment_method<>'INCENTIVE'";
+  const totals = await qone(`SELECT
+    COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN total ELSE 0 END),0) sales,
+    SUM(CASE WHEN payment_method<>'INCENTIVE' THEN 1 ELSE 0 END) orders,
     COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0) cash,
-    COALESCE(SUM(CASE WHEN payment_method<>'CASH' THEN total ELSE 0 END),0) transfer FROM pos_sales ${W}`, args);
+    COALESCE(SUM(CASE WHEN payment_method NOT IN ('CASH','INCENTIVE') THEN total ELSE 0 END),0) transfer,
+    COALESCE(SUM(CASE WHEN payment_method='INCENTIVE' THEN total ELSE 0 END),0) incentive
+    FROM pos_sales ${W}`, args);
   const bySite = await qall(`SELECT s.name site, s.code, COALESCE(SUM(p.total),0) sales, COUNT(*) orders
-    FROM pos_sales p JOIN sites s ON s.id=p.site_id ${WP} GROUP BY s.id, s.name, s.code ORDER BY sales DESC LIMIT 20`, args);
-  const byDay = await qall(`SELECT sale_date AS "day", COALESCE(SUM(total),0) sales FROM pos_sales ${W} GROUP BY sale_date ORDER BY sale_date DESC LIMIT 60`, args);
+    FROM pos_sales p JOIN sites s ON s.id=p.site_id ${WPn} GROUP BY s.id, s.name, s.code ORDER BY sales DESC LIMIT 20`, args);
+  const byDay = await qall(`SELECT sale_date AS "day", COALESCE(SUM(total),0) sales FROM pos_sales ${Wn} GROUP BY sale_date ORDER BY sale_date DESC LIMIT 60`, args);
   const byMethod = await qall(`SELECT payment_method method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method ORDER BY sales DESC`, args);
   res.json({
-    totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer) },
+    totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer), incentive: Number(totals.incentive) },
     bySite: bySite.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
     byDay: byDay.reverse().map((r) => ({ ...r, sales: Number(r.sales) })),
     byMethod: byMethod.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
@@ -1470,8 +1479,9 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
   const where = ['p.tenant_id=?', 'p.sale_date>=?', 'p.sale_date<=?'], args = [s.ctx.tenant_id, from, to];
   if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
   if (method === 'CASH') { where.push("p.payment_method='CASH'"); }
-  else if (method === 'NONCASH') { where.push("p.payment_method<>'CASH'"); }
+  else if (method === 'NONCASH') { where.push("p.payment_method NOT IN ('CASH','INCENTIVE')"); }
   else if (method) { where.push('p.payment_method=?'); args.push(method.toUpperCase()); }
+  else { where.push("p.payment_method<>'INCENTIVE'"); }   // exclude bonus from "all orders"
   const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
   res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at })));

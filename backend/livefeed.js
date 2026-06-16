@@ -31,9 +31,13 @@ async function persistSale(o, site) {
   const ext_id = String(o._id);
   const saleDate = dateStrLagos(o.createdAt); if (!saleDate) return false;
   const totalAmt = num(o.txn_amount);
-  const pm = String(o.paymentMethod || 'CASH').toUpperCase();
-  const bank = String(o.acquirer || o.card_bank || o.bank || o.transfer_from_bank || '').trim().toUpperCase() || null;
-  const terminal = String(o.terminal_location || '').trim().toUpperCase() || null;
+  const rawPm = String(o.paymentMethod || 'CASH').toUpperCase();
+  // Incentive (monthly customer bonus, no cash collected) — bucket separately so
+  // it never lands in cash/sales totals (mirrors fido).
+  const incentive = String(o.orderType || '').toUpperCase() === 'INCENTIVE' || rawPm === 'INCENTIVE';
+  const pm = incentive ? 'INCENTIVE' : rawPm;
+  const bank = incentive ? null : (String(o.acquirer || o.card_bank || o.bank || o.transfer_from_bank || '').trim().toUpperCase() || null);
+  const terminal = incentive ? null : (String(o.terminal_location || '').trim().toUpperCase() || null);
   const custExt = o.customer ? String(o.customer) : null;
   let custId = null;
   if (custExt) { try { const c = await qone('SELECT id FROM customers WHERE tenant_id=? AND ext_id=?', [site.tenant_id, custExt]); custId = c ? c.id : null; } catch { /* ignore */ } }
@@ -84,7 +88,7 @@ async function poll() {
       id: String(o._id),
       site: o.site, amount: num(o.txn_amount),
       customer: String(o.customerName || o.customer_name || '').trim() || null,
-      payment_method: String(o.paymentMethod || 'CASH').toUpperCase(),
+      payment_method: (String(o.orderType || '').toUpperCase() === 'INCENTIVE' || String(o.paymentMethod || '').toUpperCase() === 'INCENTIVE') ? 'INCENTIVE' : String(o.paymentMethod || 'CASH').toUpperCase(),
       products: Array.isArray(o.products) ? o.products.length : 0,
       at: o.createdAt, source: 'fido',
     });

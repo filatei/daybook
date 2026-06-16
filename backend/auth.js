@@ -117,11 +117,14 @@ function requestedTenant(req) {
 // Operations tier (Secretary = Manager, site-bound) sits BELOW the finance tier
 // (Accountant/Snr Accountant) so payroll can include Accountants but exclude
 // Managers/Secretaries, while operational actions start at Secretary.
+// Snr Accountant ranks EQUAL to General Manager — same access level (cross-site
+// + every GM-gated capability), per business rule. Admin remains above both.
 const ROLE_RANK = {
   GATEMAN: 1, GATE: 1, SUPERVISOR: 2,
   SECRETARY: 3, SITE_MANAGER: 4,
-  ACCOUNTANT: 5, SNR_ACCOUNTANT: 6,
-  GENERAL_MANAGER: 7, ADMIN: 8,
+  ACCOUNTANT: 5,
+  SNR_ACCOUNTANT: 7, GENERAL_MANAGER: 7,
+  ADMIN: 8,
 };
 const atLeast = (role, min) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[min] || 0);
 // A membership is "site-bound" when it has a site and is below Senior Accountant —

@@ -108,14 +108,22 @@ export function StoreProvider({ children }) {
 
 export const useStore = () => useContext(Ctx);
 
-// Role helpers — privilege ladder (low → high)
+// Role helpers — privilege ladder (low → high). Mirrors backend ROLE_RANK.
+// Snr Accountant ranks EQUAL to General Manager (same access level).
 export const ROLES = [
   'GATEMAN', 'GATE', 'SUPERVISOR',
   'SECRETARY', 'SITE_MANAGER',
   'ACCOUNTANT', 'SNR_ACCOUNTANT',
   'GENERAL_MANAGER', 'ADMIN', 'SUPERADMIN',
 ];
-export const atLeast = (role, min) => ROLES.indexOf(role) >= ROLES.indexOf(min);
+const RANK = {
+  GATEMAN: 1, GATE: 1, SUPERVISOR: 2,
+  SECRETARY: 3, SITE_MANAGER: 4,
+  ACCOUNTANT: 5,
+  SNR_ACCOUNTANT: 7, GENERAL_MANAGER: 7,
+  ADMIN: 8, SUPERADMIN: 9,
+};
+export const atLeast = (role, min) => (RANK[role] || 0) >= (RANK[min] || 0);
 // Gate-only roles are locked to the Gate & Loading screen.
 export const GATE_ROLES = ['GATEMAN', 'SUPERVISOR', 'GATE'];
 export const isGateRole = (role) => GATE_ROLES.includes(role);

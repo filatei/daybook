@@ -972,6 +972,10 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_stock_moves_site ON stock_moves(tenant_id, site_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_moves_ext ON stock_moves(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
   `);
+
+  // ── Phase 10: finished-goods — which product the daily "bagged" count produces.
+  // Finished on-hand per site = Σ bags_bagged (produced) − Σ that product sold.
+  await pool.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS bagged_product_id TEXT`);
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

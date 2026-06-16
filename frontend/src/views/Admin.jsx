@@ -148,9 +148,21 @@ function SettingsTab() {
   const [thr, setThr] = useState(0.55);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [bagged, setBagged] = useState('');
+  const [products, setProducts] = useState([]);
+  const [savingBagged, setSavingBagged] = useState(false);
   useEffect(() => {
-    api(scoped('/settings')).then((s) => setThr(s.face_match_threshold ?? 0.55)).catch(() => {}).finally(() => setLoading(false));
+    Promise.all([
+      api(scoped('/settings')).then((s) => { setThr(s.face_match_threshold ?? 0.55); setBagged(s.bagged_product_id || ''); }).catch(() => {}),
+      api(scoped('/products')).then((p) => setProducts(Array.isArray(p) ? p : [])).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, [tenant]);
+  const saveBagged = async () => {
+    setSavingBagged(true);
+    try { await api(scoped('/settings'), { method: 'PATCH', body: { bagged_product_id: bagged || null } }); toast('Saved ✓', 'ok'); }
+    catch (e) { toast(e.message, 'err'); }
+    setSavingBagged(false);
+  };
   const save = async () => {
     setSaving(true);
     try { const r = await api(scoped('/settings'), { method: 'PATCH', body: { face_match_threshold: thr } }); setThr(r.face_match_threshold); toast('Saved ✓', 'ok'); }
@@ -192,6 +204,15 @@ function SettingsTab() {
             : (emailRes.ok ? `✓ Server accepted the test to ${emailRes.to}\nFrom: ${emailRes.from}\nAccepted: ${(emailRes.accepted || []).join(', ') || '—'}\nRejected: ${(emailRes.rejected || []).join(', ') || 'none'}\nServer said: ${emailRes.response || '—'}\n\nIf it accepted but you didn't get it, check Spam, and that ${emailRes.from?.match(/@([^>]+)/)?.[1] || 'the From domain'} is an allowed sender on your relay.` : `✗ Send failed: ${emailRes.error}`)}
         </div>
       )}
+    </div>
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="section-title" style={{ marginTop: 0 }}>🏭 Finished goods</div>
+      <p className="sub">Pick the product that the daily <b>bagged</b> count produces. Bagging adds to that product's per-site stock; sales draw it down (Inventory → Finished goods).</p>
+      <select className="input" value={bagged} onChange={(e) => setBagged(e.target.value)}>
+        <option value="">— not set —</option>
+        {products.filter((p) => p.status !== 'INACTIVE').map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      <button className="btn" style={{ marginTop: 12 }} onClick={saveBagged} disabled={savingBagged}>{savingBagged ? <span className="spin" /> : null} Save</button>
     </div>
     <div className="card">
       <div className="section-title" style={{ marginTop: 0 }}>Face-match strictness</div>

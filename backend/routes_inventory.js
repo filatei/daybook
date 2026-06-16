@@ -97,6 +97,44 @@ router.get('/levels/low', requireAuth, async (req, res) => {
   res.json(rows.map((r) => ({ ...r, on_hand: Number(r.on_hand) })).filter((r) => r.on_hand <= r.reorder_level));
 });
 
+// ── Finished goods — bagging produces stock (per site); sales draw it down ────
+// on-hand per site = Σ bags_bagged (produced) − Σ that product sold via POS.
+router.get('/finished', requireAuth, async (req, res) => {
+  const c = await ctx(req, res, 'GATEMAN'); if (!c) return;
+  const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [c.tenant_id]);
+  const prod = t && t.bagged_product_id ? await qone('SELECT id,name,unit FROM products WHERE id=?', [t.bagged_product_id]) : null;
+  if (!prod) return res.json({ configured: false, product: null, sites: [] });
+  const from = req.query.from || nowDate(), to = req.query.to || from;
+  const siteRows = await qall('SELECT id,name FROM sites WHERE tenant_id=? ORDER BY name', [c.tenant_id]);
+  const nameById = {}; siteRows.forEach((s) => { nameById[s.id] = s.name; });
+
+  const prodWhere = ['tenant_id=?'], prodArgs = [c.tenant_id];
+  if (siteBound(c)) { prodWhere.push('site_id=?'); prodArgs.push(c.site_id); }
+  const produced = await qall(
+    `SELECT site_id, COALESCE(SUM(bags_bagged),0) total,
+       COALESCE(SUM(CASE WHEN work_date BETWEEN ? AND ? THEN bags_bagged ELSE 0 END),0) period
+     FROM production WHERE ${prodWhere.join(' AND ')} GROUP BY site_id`, [from, to, ...prodArgs]);
+
+  let sold = [];
+  try {
+    const sWhere = ['p.tenant_id=?', "p.items_json IS NOT NULL", "left(p.items_json,1)='['", 'lower(elem->>?)=lower(?)'];
+    const sArgs = [c.tenant_id, 'name', prod.name];
+    if (siteBound(c)) { sWhere.push('p.site_id=?'); sArgs.push(c.site_id); }
+    sold = await qall(
+      `SELECT p.site_id, COALESCE(SUM((elem->>'qty')::numeric),0) total,
+         COALESCE(SUM(CASE WHEN p.sale_date BETWEEN ? AND ? THEN (elem->>'qty')::numeric ELSE 0 END),0) period
+       FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
+       WHERE ${sWhere.join(' AND ')} GROUP BY p.site_id`, [from, to, ...sArgs]);
+  } catch { sold = []; }
+
+  const by = {};
+  for (const r of produced) { by[r.site_id] = by[r.site_id] || { produced_total: 0, produced_period: 0, sold_total: 0, sold_period: 0 }; by[r.site_id].produced_total = Number(r.total); by[r.site_id].produced_period = Number(r.period); }
+  for (const r of sold) { by[r.site_id] = by[r.site_id] || { produced_total: 0, produced_period: 0, sold_total: 0, sold_period: 0 }; by[r.site_id].sold_total = Number(r.total); by[r.site_id].sold_period = Number(r.period); }
+  const sites = Object.keys(by).map((sid) => ({ site_id: sid, site: nameById[sid] || '—', ...by[sid], on_hand: Math.round((by[sid].produced_total - by[sid].sold_total) * 100) / 100 }))
+    .sort((a, b) => b.on_hand - a.on_hand);
+  res.json({ configured: true, product: { id: prod.id, name: prod.name, unit: prod.unit }, from, to, sites });
+});
+
 // ── Stock movement: RECEIVE / ISSUE / ADJUST (optionally creates a payable) ────
 router.post('/moves', requireAuth, async (req, res) => {
   const c = await ctx(req, res, 'SECRETARY'); if (!c) return;

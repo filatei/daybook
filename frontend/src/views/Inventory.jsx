@@ -163,6 +163,55 @@ function ItemDetail({ item, sites, siteBound, canManage, onChanged, onClose }) {
   );
 }
 
+// ── Finished goods: produced (bagged) vs sold → per-site on-hand ──────────────
+const FG_RANGES = [{ label: 'Today', d: 0 }, { label: 'This week', d: 7 }, { label: 'This month', d: 30 }];
+const fgAgo = (n) => { const x = new Date(); x.setDate(x.getDate() - n); return x.toISOString().slice(0, 10); };
+function FinishedGoods() {
+  const { tenant, go } = useStore();
+  const [ri, setRi] = useState(0);
+  const [data, setData] = useState(null);
+  const load = useCallback(async () => {
+    const from = fgAgo(FG_RANGES[ri].d), to = today();
+    try { setData(await api(scoped(`/inventory/finished?from=${from}&to=${to}`))); } catch { setData({ configured: false, sites: [] }); }
+  }, [tenant, ri]);
+  useEffect(() => { load(); }, [load]);
+  if (data === null) return <>{[...Array(3)].map((_, i) => <div className="skel" key={i} />)}</>;
+  if (!data.configured) return (
+    <div className="empty"><div className="ic">🏭</div><p>No finished product set yet.</p>
+      <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px', marginTop: 8 }} onClick={() => go('admin')}>Set it in Admin → Settings</button>
+    </div>
+  );
+  const unit = data.product?.unit || '';
+  const totalOnHand = data.sites.reduce((a, s) => a + s.on_hand, 0);
+  return (
+    <div>
+      <div className="seg" style={{ marginBottom: 10 }}>
+        {FG_RANGES.map((r, i) => <button key={r.label} className={`seg-b${ri === i ? ' on' : ''}`} onClick={() => setRi(i)}>{r.label}</button>)}
+      </div>
+      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
+        <div><div style={{ fontWeight: 700 }}>{data.product?.name}</div><div style={{ fontSize: 12, color: 'var(--muted)' }}>on hand (all sites)</div></div>
+        <strong style={{ fontSize: 20, color: totalOnHand < 0 ? 'var(--err)' : 'var(--ink)' }}>{fmtNum(totalOnHand)} {unit}</strong>
+      </div>
+      {data.sites.length === 0 ? <div className="empty"><p>No production or sales yet</p></div> : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {data.sites.map((s) => (
+            <div key={s.site_id} style={{ padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <strong>{s.site}</strong>
+                <strong style={{ color: s.on_hand < 0 ? 'var(--err)' : '#166534' }}>{fmtNum(s.on_hand)} {unit} on hand</strong>
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+                {FG_RANGES[ri].label}: produced {fmtNum(s.produced_period)} · sold {fmtNum(s.sold_period)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 10 }}>On-hand = all-time bagged − all-time sold, per site. Bagged comes from the daily Production grid; sold from POS sales of {data.product?.name}.</p>
+    </div>
+  );
+}
+
 function Modal({ title, children, onClose }) {
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
@@ -205,10 +254,12 @@ export default function Inventory() {
         {canManage && <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px' }} onClick={openNew}>＋ Item</button>}
       </div>
       {canManage && <button className="btn" style={{ marginBottom: 12 }} onClick={openMove}>⬇ Receive / Issue stock</button>}
-      <div className="seg" style={{ marginBottom: 12 }}>
-        <button className={`seg-b${tab === 'all' ? ' on' : ''}`} onClick={() => setTab('all')}>📦 All items</button>
-        <button className={`seg-b${tab === 'low' ? ' on' : ''}`} onClick={() => setTab('low')}>⚠️ Low stock{lowCount ? ` (${lowCount})` : ''}</button>
+      <div className="seg" style={{ marginBottom: 12, overflowX: 'auto', flexWrap: 'nowrap' }}>
+        <button className={`seg-b${tab === 'all' ? ' on' : ''}`} onClick={() => setTab('all')}>📦 Items</button>
+        <button className={`seg-b${tab === 'low' ? ' on' : ''}`} onClick={() => setTab('low')}>⚠️ Low{lowCount ? ` (${lowCount})` : ''}</button>
+        <button className={`seg-b${tab === 'finished' ? ' on' : ''}`} onClick={() => setTab('finished')}>🏭 Finished</button>
       </div>
+      {tab === 'finished' && <FinishedGoods />}
       {items && items.length > 0 && totalValue > 0 && (
         <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', marginBottom: 12 }}>
           <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Stock value{tab === 'low' ? ' (low items)' : ''}</span>

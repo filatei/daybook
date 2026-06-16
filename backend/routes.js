@@ -892,8 +892,8 @@ router.get('/staff/:id/face', requireAuth, async (req, res) => {
 // Tenant settings (face match threshold, …)
 router.get('/settings', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: 'select a workspace' });
-  const t = await qone('SELECT face_match_threshold FROM tenants WHERE id=?', [s.ctx.tenant_id]);
-  res.json({ face_match_threshold: t?.face_match_threshold ?? 0.55 });
+  const t = await qone('SELECT face_match_threshold, bagged_product_id FROM tenants WHERE id=?', [s.ctx.tenant_id]);
+  res.json({ face_match_threshold: t?.face_match_threshold ?? 0.55, bagged_product_id: t?.bagged_product_id || null });
 });
 router.patch('/settings', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const b = req.body || {};
@@ -902,8 +902,13 @@ router.patch('/settings', requireAuth, needTenant('ADMIN'), async (req, res) => 
     if (!(v >= 0.3 && v <= 0.8)) return res.status(400).json({ error: 'threshold must be between 0.30 and 0.80' });
     await qrun('UPDATE tenants SET face_match_threshold=? WHERE id=?', [v, req.ctx.tenant_id]);
   }
-  const t = await qone('SELECT face_match_threshold FROM tenants WHERE id=?', [req.ctx.tenant_id]);
-  res.json({ face_match_threshold: t?.face_match_threshold ?? 0.55 });
+  if (b.bagged_product_id !== undefined) {
+    const pid = b.bagged_product_id || null;
+    if (pid) { const p = await qone('SELECT id FROM products WHERE id=? AND tenant_id=?', [pid, req.ctx.tenant_id]); if (!p) return res.status(400).json({ error: 'invalid product' }); }
+    await qrun('UPDATE tenants SET bagged_product_id=? WHERE id=?', [pid, req.ctx.tenant_id]);
+  }
+  const t = await qone('SELECT face_match_threshold, bagged_product_id FROM tenants WHERE id=?', [req.ctx.tenant_id]);
+  res.json({ face_match_threshold: t?.face_match_threshold ?? 0.55, bagged_product_id: t?.bagged_product_id || null });
 });
 
 // Enrol / update a staff member's face descriptor (128 floats).

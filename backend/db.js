@@ -901,6 +901,11 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_site_messages_tenant ON site_messages(tenant_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_site_messages_sender ON site_messages(sender_id);
   `);
+
+  // ── Phase 8: payroll run kind (REGULAR vs MIDMONTH piece-worker commission) ───
+  await pool.query(`
+    ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'REGULAR';
+  `);
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

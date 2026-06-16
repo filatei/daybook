@@ -186,11 +186,87 @@ function RunsTab() {
               {open.status === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={() => setStatus('APPROVED')}>Approve</button>}
               {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/export.csv?tenant=${tenant}`, `payroll_${open.period_from}.csv`)}>⬇ CSV</button>
+              {open.kind === 'MIDMONTH' && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/fido.csv?tenant=${tenant}`, `midmonth_${open.period_from}.csv`)}>⬇ Fido format</button>}
               <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px' }} onClick={() => setOpen(null)}>Close</button>
             </div>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Mid-month: auto piece-worker payroll (1st–15th) from production ───────────
+const thisMonth = () => today().slice(0, 7);
+function MidMonthTab({ onSaved }) {
+  const { tenant, toast } = useStore();
+  const role = useRole();
+  const isGM = role && atLeast(role, 'GENERAL_MANAGER');
+  const [month, setMonth] = useState(thisMonth());
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const preview = useCallback(async () => {
+    setLoading(true); setData(null);
+    try { setData(await api(scoped(`/payroll/midmonth/preview?month=${month}`))); }
+    catch (e) { toast(e.message || 'Could not preview', 'err'); }
+    setLoading(false);
+  }, [tenant, month]);
+  useEffect(() => { preview(); }, [preview]);
+
+  const generate = async () => {
+    setBusy(true);
+    try { const r = await api(scoped('/payroll/midmonth/generate'), { method: 'POST', body: { month } }); toast(`Mid-month draft saved (${r.count} staff) ✓`, 'ok'); onSaved && onSaved(); }
+    catch (e) { toast(e.message || 'Generate failed', 'err'); }
+    setBusy(false);
+  };
+
+  const Section = ({ title, rows, qtyLabel }) => (
+    <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid var(--line)', background: '#f8fafc' }}>
+        <strong>{title} ({rows.length})</strong>
+        <strong>{ngn(rows.reduce((a, l) => a + l.commission, 0))}</strong>
+      </div>
+      {rows.length === 0 ? <div style={{ padding: 14, fontSize: 13, color: 'var(--muted)' }}>None with production this period</div>
+        : rows.map((l) => (
+          <div key={l.staff_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8 }}>
+              {l.full_name}<span style={{ color: 'var(--muted)' }}> · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
+            </span>
+            <strong>{ngn(l.commission)}</strong>
+          </div>
+        ))}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12 }}>
+        <div style={{ flex: 1 }}>
+          <label className="fl">Month (pays 1st–15th)</label>
+          <input type="month" className="input" value={month} max={thisMonth()} onChange={(e) => setMonth(e.target.value)} />
+        </div>
+        <button className="btn" style={{ width: 'auto', padding: '10px 16px' }} onClick={generate} disabled={busy || loading || !data || !data.count}>
+          {busy ? <span className="spin" /> : '💾'} Save draft
+        </button>
+      </div>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 0, marginBottom: 12 }}>
+        Built automatically from bags loaded/bagged × each worker's rate — no Excel upload. Save the draft, then approve & mark paid under <strong>Saved</strong>, and download the Fido-format CSV there.
+      </p>
+
+      {loading ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
+        : !data ? null
+          : (
+            <>
+              <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
+                <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{data.count} staff · {data.from} → {data.to}</span>
+                <span style={{ fontWeight: 800, fontSize: 18 }}>{ngn(data.total)}</span>
+              </div>
+              <Section title="Baggers" rows={data.baggers} qtyLabel="bagged" />
+              <Section title="Loaders" rows={data.loaders} qtyLabel="loaded" />
+            </>
+          )}
     </div>
   );
 }
@@ -268,12 +344,14 @@ export default function Payroll() {
       <div className="section-title" style={{ marginTop: 0 }}>Payroll</div>
       <div className="seg" style={{ marginBottom: 14, overflowX: 'auto', flexWrap: 'nowrap' }}>
         <button className={`seg-b${tab === 'run' ? ' on' : ''}`} onClick={() => setTab('run')}>🧮 Run</button>
+        <button className={`seg-b${tab === 'mid' ? ' on' : ''}`} onClick={() => setTab('mid')}>📆 Mid-month</button>
         <button className={`seg-b${tab === 'runs' ? ' on' : ''}`} onClick={() => setTab('runs')}>🧾 Saved</button>
         <button className={`seg-b${tab === 'setup' ? ' on' : ''}`} onClick={() => setTab('setup')}>⚙️ Rates</button>
         <button className={`seg-b${tab === 'history' ? ' on' : ''}`} onClick={() => setTab('history')}>📜 History</button>
       </div>
 
       {tab === 'run' ? <RunTab sites={sites} onSaved={() => setTab('runs')} />
+        : tab === 'mid' ? <MidMonthTab onSaved={() => setTab('runs')} />
         : tab === 'runs' ? <RunsTab />
           : tab === 'setup' ? <SetupTab sites={sites} />
             : !summary || !(summary.byMonth || []).length ? (

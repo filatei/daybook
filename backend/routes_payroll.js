@@ -490,4 +490,128 @@ router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
   res.send(out.join('\r\n'));
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// MID-MONTH PAYROLL — piece-worker (bagger/loader) commission for the 1st–15th.
+// Auto-generated from production × rate, replacing the manual Fido Excel upload.
+// ═══════════════════════════════════════════════════════════════════════════════
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const excelSerial = (d) => Math.floor((Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) - Date.UTC(1899, 11, 30)) / 86400000);
+function splitName(full) {
+  const parts = String(full || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { first: '', middle: '', last: '' };
+  if (parts.length === 1) return { first: parts[0], middle: '', last: '' };
+  if (parts.length === 2) return { first: parts[0], middle: '', last: parts[1] };
+  return { first: parts[0], last: parts[parts.length - 1], middle: parts.slice(1, -1).join(' ') };
+}
+function midRange(month) {
+  const m = /^\d{4}-\d{2}$/.test(month || '') ? month : new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' }).slice(0, 7);
+  return { month: m, from: `${m}-01`, to: `${m}-15` };
+}
+
+// Piece-worker commission lines for a period (baggers & loaders with production).
+async function computePieceLines(tenant_id, from, to, site) {
+  const sWhere = ['s.tenant_id=?', "s.status='ACTIVE'",
+    "(UPPER(COALESCE(s.staff_type,'')) IN ('BAGGER','LOADER') OR UPPER(COALESCE(s.pay_type,''))='PIECE')"], sArgs = [tenant_id];
+  if (site) { sWhere.push('s.site_id=?'); sArgs.push(site); }
+  const staff = await qall(`SELECT s.id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
+      s.rate_loaded, s.rate_bagged, s.bank_name, s.bank_account, st.name site_name
+    FROM staff s LEFT JOIN sites st ON st.id=s.site_id WHERE ${sWhere.join(' AND ')} ORDER BY st.name, s.full_name`, sArgs);
+  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
+    FROM production WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
+  const by = {}; for (const p of prod) by[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  const lines = [];
+  for (const s of staff) {
+    const pb = by[s.id] || { l: 0, g: 0 };
+    const loadComm = pb.l * (s.rate_loaded || 0);
+    const bagComm = pb.g * (s.rate_bagged || 0);
+    const commission = r2(loadComm + bagComm);
+    if (commission <= 0) continue;
+    // Designation: explicit staff_type, else whichever production dominates.
+    const designation = (s.staff_type === 'LOADER' || s.staff_type === 'BAGGER') ? s.staff_type : (pb.l >= pb.g ? 'LOADER' : 'BAGGER');
+    const nm = splitName(s.full_name);
+    lines.push({
+      staff_id: s.id, ext_id: s.ext_people_id || '', ...nm, full_name: s.full_name,
+      location: s.site_name || '', account: [s.bank_name, s.bank_account].filter(Boolean).join('-'),
+      bags_loaded: pb.l, bags_bagged: pb.g, qty: designation === 'LOADER' ? pb.l : pb.g,
+      commission, designation,
+    });
+  }
+  return lines;
+}
+
+router.get('/midmonth/preview', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const { month, from, to } = midRange(req.query.month);
+  const site = siteBound(c) ? c.site_id : (req.query.site || null);
+  const lines = await computePieceLines(c.tenant_id, from, to, site);
+  const baggers = lines.filter((l) => l.designation === 'BAGGER');
+  const loaders = lines.filter((l) => l.designation === 'LOADER');
+  res.json({
+    month, from, to,
+    baggers, loaders,
+    total_baggers: r2(baggers.reduce((a, l) => a + l.commission, 0)),
+    total_loaders: r2(loaders.reduce((a, l) => a + l.commission, 0)),
+    total: r2(lines.reduce((a, l) => a + l.commission, 0)),
+    count: lines.length,
+  });
+});
+
+// Generate (or refresh) the mid-month DRAFT run for the 1st–15th piece workers.
+async function generateMidMonth(tenant_id, month, userId, site = null) {
+  const { from, to } = midRange(month);
+  const lines = await computePieceLines(tenant_id, from, to, site);
+  let runId;
+  await withTransaction(async () => {
+    const existing = await qone("SELECT id FROM pay_runs WHERE tenant_id=? AND kind='MIDMONTH' AND period_from=? AND period_to=? AND status='DRAFT' AND COALESCE(site_id,'')=COALESCE(?, '')", [tenant_id, from, to, site]);
+    runId = existing ? existing.id : uuid();
+    if (existing) await qrun('DELETE FROM pay_run_lines WHERE run_id=?', [runId]);
+    else await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,created_by) VALUES (?,?,?,?,?, 'DRAFT', 'MIDMONTH', ?)`, [runId, tenant_id, site, from, to, userId || null]);
+    let tot = 0;
+    for (const l of lines) {
+      tot += l.commission;
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), runId, tenant_id, l.staff_id, l.full_name, l.designation, 0, l.bags_loaded, l.bags_bagged, l.commission, 0, l.commission]);
+    }
+    await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=0, total_net=? WHERE id=?', [r2(tot), r2(tot), runId]);
+  });
+  return { runId, count: lines.length };
+}
+router.post('/midmonth/generate', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const { month } = midRange((req.body || {}).month);
+  const site = siteBound(c) ? c.site_id : ((req.body || {}).site || null);
+  const out = await generateMidMonth(c.tenant_id, month, req.user.id, site);
+  res.status(201).json(out);
+});
+
+// Fido-format export (BAGGERS then LOADERS) for a saved mid-month run.
+router.get('/runs2/:id/fido.csv', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  if (!run) return res.status(404).end();
+  const lines = await qall(`SELECT pl.*, s.ext_people_id, s.full_name, s.bank_name, s.bank_account, st.name site_name
+    FROM pay_run_lines pl LEFT JOIN staff s ON s.id=pl.staff_id LEFT JOIN sites st ON st.id=s.site_id
+    WHERE pl.run_id=? ORDER BY st.name, s.full_name`, [run.id]);
+  const ps = excelSerial(run.period_from), pe = excelSerial(run.period_to);
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const rows = [];
+  const section = (title, desig, header, mapRow) => {
+    rows.push([title]); rows.push(header);
+    let n = 0;
+    for (const l of lines.filter((x) => (x.pay_type || '').toUpperCase() === desig)) rows.push(mapRow(l, ++n));
+    rows.push([]);
+  };
+  section('BAGGERS', 'BAGGER',
+    ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'QTY', 'ACCOUNT NUMBER', 'COMMISSION', 'PAY START DATE', 'PAY END DATE', 'DESIGNATION'],
+    (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', l.bags_bagged, [l.bank_name, l.bank_account].filter(Boolean).join('-'), l.gross, ps, pe, 'BAGGER']; });
+  section('LOADERS', 'LOADER',
+    ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'ACCOUNT NUMBER', 'BAGS LOADED', 'NET PAY (COMMISSION)', 'PAY START DATE', 'PAY END DATE', 'DESIGNATION'],
+    (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', [l.bank_name, l.bank_account].filter(Boolean).join('-'), l.bags_loaded, l.gross, ps, pe, 'LOADER']; });
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="midmonth-payroll-${run.period_from}.csv"`);
+  res.send(rows.map((r) => r.map(q).join(',')).join('\r\n'));
+});
+
 module.exports = router;
+module.exports.generateMidMonth = generateMidMonth;

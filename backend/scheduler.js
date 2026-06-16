@@ -139,9 +139,34 @@ function runEtl(label = 'scheduled') {
   p.on('error', (e) => console.error('[etl] spawn failed:', e.message));
 }
 
+// Auto-generate the mid-month (1st–15th) piece-worker payroll draft for every
+// active tenant, so accountants no longer compile/upload the Fido Excel by hand.
+async function midMonthAll() {
+  const payroll = require('./routes_payroll');
+  if (typeof payroll.generateMidMonth !== 'function') return { runs: 0 };
+  const month = new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' }).slice(0, 7);
+  const tenants = await qall("SELECT id FROM tenants WHERE status='ACTIVE'");
+  let runs = 0;
+  for (const t of tenants) {
+    try { const o = await payroll.generateMidMonth(t.id, month, null, null); if (o && o.count) runs++; }
+    catch (e) { console.error('[midmonth]', t.id, e.message); }
+  }
+  console.log(`[midmonth] generated drafts for ${runs} tenant(s) — ${month}`);
+  return { runs, month };
+}
+
 function start() {
   const cron = require('node-cron');
   const tz = process.env.SYNC_TZ || 'Africa/Lagos';
+
+  // Mid-month payroll auto-draft (opt-in) — runs on the 15th.
+  if (process.env.PAYROLL_MIDMONTH_ENABLED === '1') {
+    const mcron = process.env.PAYROLL_MIDMONTH_CRON || '0 6 15 * *';
+    if (cron.validate(mcron)) {
+      cron.schedule(mcron, () => midMonthAll().catch((e) => console.error('[midmonth] failed:', e.message)), { timezone: tz });
+      console.log(`[midmonth] mid-month payroll draft scheduled '${mcron}' (${tz})`);
+    } else { console.error('[midmonth] invalid PAYROLL_MIDMONTH_CRON:', mcron); }
+  }
 
   // Scheduled ETL (opt-in) — keeps ALL Fido data (not just live sales) current.
   if (process.env.ETL_ENABLED === '1') {
@@ -178,4 +203,4 @@ function start() {
   console.log(`[sync] nightly POS sync scheduled '${expr}' (${tz})${process.env.SYNC_EMAIL === '1' ? ' + email' : ''}`);
 }
 
-module.exports = { syncDay, enforceTrials, start };
+module.exports = { syncDay, enforceTrials, midMonthAll, start };

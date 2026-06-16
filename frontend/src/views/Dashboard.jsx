@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
-import { useStore } from '../store.jsx';
+import { useStore, useBackHandler } from '../store.jsx';
 import { useRealtime } from '../hooks/useRealtime.js';
 import { OrdersListModal, OrderDetailModal, BankBreakdownModal } from '../components/OrderViews.jsx';
 
@@ -51,6 +51,10 @@ export default function Dashboard() {
   const [drill, setDrill] = useState(null);     // { title, query } orders-list modal
   const [detailId, setDetailId] = useState(null); // single order detail (from live line)
   const [bankDrill, setBankDrill] = useState(null); // { query } transfer/POS breakdown
+  // Hardware Back steps up one drill level instead of leaving the screen/app.
+  useBackHandler(!!drill, () => setDrill(null));
+  useBackHandler(!!bankDrill, () => setBankDrill(null));
+  useBackHandler(!!detailId, () => setDetailId(null));   // deepest → declared last → closed first
 
   // Live sales feed (streamed from the still-running fido POS, pre-cutover).
   const [live, setLive] = useState({ total: 0, count: 0, feed: [] });

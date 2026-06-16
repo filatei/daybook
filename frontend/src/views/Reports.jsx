@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
-import { useStore, useRole, atLeast } from '../store.jsx';
+import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import ReceiptPreview from '../components/ReceiptPreview.jsx';
 
@@ -253,6 +253,11 @@ export default function Reports() {
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ site: '', from: '', to: '' });
   const [genOpen, setGenOpen] = useState(false);
+  // Hardware Back steps up one level (close detail → close drill list) not exit.
+  useBackHandler(genOpen, () => setGenOpen(false));
+  useBackHandler(!!drill, () => setDrill(null));
+  useBackHandler(!!viewOrder, () => { setViewOrder(null); setReadOnly(false); });
+  useBackHandler(askDelete, () => setAskDelete(false));   // deepest sub-step first
 
   const load = useCallback(async () => {
     setLoading(true);

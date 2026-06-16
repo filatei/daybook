@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
-import { useStore } from '../store.jsx';
+import { useStore, useBackHandler } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
 
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
@@ -213,6 +213,7 @@ function PayablesView({ onOpenExpense }) {
   const [rows, setRows] = useState(null);
   const [vendor, setVendor] = useState(null);   // drilled vendor → their unpaid expenses
   const [items, setItems] = useState(null);
+  useBackHandler(!!vendor, () => setVendor(null));   // Back closes the vendor drill
   useEffect(() => { api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([])); }, [tenant]);
   const openVendor = async (v) => {
     setVendor(v); setItems(null);

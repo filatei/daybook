@@ -57,6 +57,17 @@ export function StoreProvider({ children }) {
   const modalRef = useRef(null);
   const guardRef = useRef(false);   // current modal asks "discard changes?" on Back
   const dirtyRef = useRef(false);   // …only when the form was actually edited
+  const backRef = useRef([]);       // stack of in-view "go up one level" handlers
+  const backId = useRef(0);
+
+  // A drill-down view registers a handler for each open sub-level (site list →
+  // order list → order). Back invokes the topmost so it steps UP one level
+  // instead of jumping to another tab or — worst of all — exiting the app.
+  const registerBack = useCallback((fn) => {
+    const id = ++backId.current;
+    backRef.current.push({ id, fn });
+    return () => { backRef.current = backRef.current.filter((b) => b.id !== id); };
+  }, []);
 
   const go = useCallback((tab) => {
     if (tabRef.current !== tab) { histRef.current.push(tab); tabRef.current = tab; }
@@ -75,18 +86,25 @@ export function StoreProvider({ children }) {
 
   useEffect(() => {
     const buffer = () => { try { window.history.pushState({ db: true }, ''); } catch { /* ignore */ } };
-    buffer();   // arm the spare entry on first load
+    // Keep TWO spare entries so even if a re-arm push is throttled/dropped by the
+    // browser, there is still an entry between us and the document — Back can
+    // never pop past the app and exit it.
+    buffer(); buffer();
     const onPop = () => {
       if (modalRef.current) {                       // 1) Back closes an open modal first
         if (guardRef.current && dirtyRef.current && !window.confirm('Discard your unsaved changes?')) { buffer(); return; }
         modalRef.current = null; guardRef.current = false; dirtyRef.current = false; dispatch({ type: 'MODAL', modal: null });
-      } else {                                       // 2) …then steps back a screen (or dashboard)
+      } else if (backRef.current.length) {          // 2) …then steps UP one in-view drill level
+        const top = backRef.current[backRef.current.length - 1];
+        try { top.fn(); } catch { /* ignore */ }
+        // the view's effect cleanup unregisters as its sub-level state clears
+      } else {                                       // 3) …then steps back a screen (or dashboard)
         const h = histRef.current;
         if (h.length > 1) h.pop();
         const prev = h[h.length - 1] || 'dashboard';
         tabRef.current = prev; dispatch({ type: 'SET_TAB', tab: prev });
       }
-      buffer();   // always keep a buffer so the app is never exited by Back
+      buffer();   // always re-arm so the app is never exited by Back
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -102,11 +120,24 @@ export function StoreProvider({ children }) {
   }, []);
 
   const setSites = useCallback((sites) => dispatch({ type: 'SET_SITES', sites }), []);
-  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, setDirty, logout };
+  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, setDirty, registerBack, logout };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 export const useStore = () => useContext(Ctx);
+
+// Register an in-view "go up one level" handler that the hardware/gesture Back
+// button will invoke while `active` is true (e.g. an open drill-down or detail).
+// Back then steps up one level instead of changing tab or exiting the app.
+export function useBackHandler(active, handler) {
+  const { registerBack } = useStore();
+  const ref = useRef(handler);
+  ref.current = handler;
+  useEffect(() => {
+    if (!active || !registerBack) return undefined;
+    return registerBack(() => { if (ref.current) ref.current(); });
+  }, [active, registerBack]);
+}
 
 // Role helpers — privilege ladder (low → high). Mirrors backend ROLE_RANK.
 // Snr Accountant ranks EQUAL to General Manager (same access level).

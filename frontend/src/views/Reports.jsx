@@ -302,7 +302,9 @@ export default function Reports() {
   const [drill, setDrill] = useState(null);           // orders drill-down list (or null = closed)
   const [drillLoading, setDrillLoading] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [filters, setFilters] = useState({ site: '', from: '', to: '' });
+  // Default the report to today (start + end). User can widen the range or
+  // clear both dates / tap "All time" for the lifetime totals.
+  const [filters, setFilters] = useState({ site: '', from: today(), to: today() });
   const [genOpen, setGenOpen] = useState(false);
   // Hardware Back steps up one level (close detail → close drill list) not exit.
   useBackHandler(genOpen, () => setGenOpen(false));
@@ -424,6 +426,12 @@ export default function Reports() {
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         )}
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button className={`btn btn-ghost btn-sm${filters.from === today() && filters.to === today() ? ' on' : ''}`} style={{ width: 'auto', padding: '0 12px' }}
+            onClick={() => setFilters((p) => ({ ...p, from: today(), to: today() }))}>Today</button>
+          <button className={`btn btn-ghost btn-sm${!filters.from && !filters.to ? ' on' : ''}`} style={{ width: 'auto', padding: '0 12px' }}
+            onClick={() => setFilters((p) => ({ ...p, from: '', to: '' }))}>All time</button>
+        </div>
       </div>
 
       {/* End-of-day: auto-generate a daily report from the app's data */}
@@ -437,7 +445,9 @@ export default function Reports() {
       {pos && pos.totals.orders > 0 && (
         <div className="card" style={{ marginBottom: 14 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-            <strong>POS sales{filters.from || filters.to ? '' : ' · all time'}</strong>
+            <strong>POS sales · {(!filters.from && !filters.to) ? 'all time'
+              : (filters.from && filters.to && filters.from === filters.to) ? (filters.from === today() ? 'today' : filters.from)
+              : `${filters.from || '…'} → ${filters.to || '…'}`}</strong>
             <span style={{ fontWeight: 800 }}>{ngn(pos.totals.sales)}</span>
           </div>
           <div className="stat-grid" style={{ marginBottom: pos.bySite.length > 1 ? 8 : 0 }}>

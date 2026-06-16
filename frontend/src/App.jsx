@@ -23,6 +23,7 @@ import Products from './views/Products.jsx';
 import SiteMessages from './views/SiteMessages.jsx';
 import Badges from './views/Badges.jsx';
 import Inventory from './views/Inventory.jsx';
+import Profit from './views/Profit.jsx';
 import Activity from './views/Activity.jsx';
 
 function Inner() {
@@ -111,6 +112,7 @@ function Inner() {
         {tab === 'messages'   && <SiteMessages />}
         {tab === 'badges'     && <Badges />}
         {tab === 'inventory'  && <Inventory />}
+        {tab === 'profit'     && <Profit />}
         {tab === 'activity'   && <Activity />}
       </main>
       <Modal />

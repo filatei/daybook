@@ -19,6 +19,7 @@ export default function More() {
     { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: isSec && !!active },
     { id: 'documents',  icon: '📁', label: 'Documents',  desc: 'Incident reports & daily logs',           show: isSec },
     { id: 'inventory',  icon: '📦', label: 'Inventory',  desc: 'Stock items, receive/issue, low-stock',     show: isSec },
+    { id: 'profit',     icon: '📈', label: 'Profit & Loss', desc: 'Revenue − expenses by site & period',      show: isMgr },
     { id: 'reconcile',  icon: '🏦', label: 'Reconcile',  desc: 'Transfers, POS & cash deposits',          show: isAcct },
     { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isAcct },
     { id: 'staff',      icon: '👷', label: 'Staff',      desc: 'Clock-in, badge & face, attendance',        show: isSec },

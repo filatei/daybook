@@ -119,7 +119,7 @@ function ReportForm({ report, sites, onSave, onClose }) {
 export default function Reports() {
   const { openModal, closeModal, sites, tenant, tenants, toast } = useStore();
   const role = useRole();
-  const isSM = role && !atLeast(role, 'GENERAL_MANAGER');
+  const isSM = role && !atLeast(role, 'SNR_ACCOUNTANT');   // site-bound = below Snr Accountant
   const isGM = atLeast(role, 'GENERAL_MANAGER');
   const bt = useBTPrinter();
   const activeTenant = (tenants || []).find((t) => String(t.id) === String(tenant));

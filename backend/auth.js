@@ -124,9 +124,10 @@ const ROLE_RANK = {
   GENERAL_MANAGER: 7, ADMIN: 8,
 };
 const atLeast = (role, min) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[min] || 0);
-// A membership is "site-bound" when it has a site and is below General Manager —
-// such users (Manager, Secretary, gate roles) only see/act on their own site.
-const siteBound = (ctx) => !!(ctx && ctx.site_id && !atLeast(ctx.role, 'GENERAL_MANAGER'));
+// A membership is "site-bound" when it has a site and is below Senior Accountant —
+// such users (Manager, Accountant, Secretary, gate roles) only see/act on their own
+// site.  Senior Accountant, General Manager and Admin are cross-site (all sites).
+const siteBound = (ctx) => !!(ctx && ctx.site_id && !atLeast(ctx.role, 'SNR_ACCOUNTANT'));
 
 module.exports = {
   verifyGoogleToken, signSession, requireAuth,

@@ -75,7 +75,7 @@ export default function Terminals() {
   const { tenant, sites, toast } = useStore();
   const role = useRole();
   const canManage = role && atLeast(role, 'SITE_MANAGER');
-  const siteBound = role && !atLeast(role, 'GENERAL_MANAGER');
+  const siteBound = role && !atLeast(role, 'SNR_ACCOUNTANT');
   const [rows, setRows] = useState(null);
   const [form, setForm] = useState(null);   // { row } for edit, {} for new
   const [confirmDel, setConfirmDel] = useState(null);

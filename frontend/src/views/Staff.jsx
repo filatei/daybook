@@ -393,7 +393,7 @@ export default function Staff() {
   const [showAdd, setShowAdd] = useState(false);
   const role = useRole();
   const canManage = role && atLeast(role, 'SECRETARY');
-  const siteBound = role && !atLeast(role, 'GENERAL_MANAGER');
+  const siteBound = role && !atLeast(role, 'SNR_ACCOUNTANT');
 
   const load = useCallback(async () => {
     setLoading(true);

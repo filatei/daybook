@@ -1491,6 +1491,55 @@ router.get('/pos/terminals', requireAuth, async (req, res) => {
   })));
 });
 
+// Full terminal list incl. site + status — for the management screen (Manager+).
+router.get('/pos/terminals/manage', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const where = ['t.tenant_id=?'], args = [req.ctx.tenant_id];
+  if (siteBound(req.ctx)) { where.push('(t.site_id=? OR t.site_id IS NULL)'); args.push(req.ctx.site_id); }
+  res.json(await qall(`SELECT t.*, s.name site_name FROM pos_terminals t LEFT JOIN sites s ON s.id=t.site_id
+    WHERE ${where.join(' AND ')} ORDER BY COALESCE(t.status,'ACTIVE'), t.bank, t.location`, args));
+});
+
+const termLabel = (b) => [String(b.bank || '').trim().toUpperCase(), String(b.location || '').trim().toUpperCase()].filter(Boolean).join(' · ') || String(b.terminal_id || b.sn || 'Terminal').trim();
+// Create / update / deactivate POS terminals — Manager, GM, Accountant+, Admin.
+router.post('/pos/terminals', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const b = req.body || {};
+  if (!String(b.bank || '').trim()) return res.status(400).json({ error: 'bank is required' });
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : (b.site_id || null);
+  if (site_id) { const site = await siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' }); }
+  const id = uuid();
+  await qrun(`INSERT INTO pos_terminals (id,tenant_id,site_id,terminal_id,bank,location,sn,company,label,status)
+    VALUES (?,?,?,?,?,?,?,?,?, 'ACTIVE')`,
+    [id, req.ctx.tenant_id, site_id, String(b.terminal_id || '').trim() || null,
+      String(b.bank).trim().toUpperCase(), String(b.location || '').trim().toUpperCase() || null,
+      String(b.sn || '').trim() || null, null, termLabel(b)]);
+  await audit(req.ctx.tenant_id, req.user.id, 'TERMINAL_ADD', 'pos_terminal', id, { bank: b.bank });
+  res.status(201).json(await qone('SELECT * FROM pos_terminals WHERE id=?', [id]));
+});
+router.patch('/pos/terminals/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const t = await qone('SELECT * FROM pos_terminals WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  if (siteBound(req.ctx) && t.site_id && t.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const b = req.body || {};
+  const bank = b.bank != null ? String(b.bank).trim().toUpperCase() : t.bank;
+  const location = b.location != null ? (String(b.location).trim().toUpperCase() || null) : t.location;
+  const site_id = siteBound(req.ctx) ? t.site_id : (b.site_id !== undefined ? (b.site_id || null) : t.site_id);
+  const status = b.status && ['ACTIVE', 'INACTIVE'].includes(String(b.status).toUpperCase()) ? String(b.status).toUpperCase() : t.status;
+  await qrun(`UPDATE pos_terminals SET bank=?,location=?,terminal_id=?,sn=?,site_id=?,status=?,label=? WHERE id=?`,
+    [bank, location, b.terminal_id != null ? String(b.terminal_id).trim() || null : t.terminal_id,
+      b.sn != null ? String(b.sn).trim() || null : t.sn, site_id, status,
+      termLabel({ bank, location, terminal_id: b.terminal_id ?? t.terminal_id, sn: b.sn ?? t.sn }), t.id]);
+  res.json(await qone('SELECT * FROM pos_terminals WHERE id=?', [t.id]));
+});
+router.delete('/pos/terminals/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const t = await qone('SELECT * FROM pos_terminals WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  if (siteBound(req.ctx) && t.site_id && t.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  // Soft-delete so historical sales keep their terminal label.
+  await qrun("UPDATE pos_terminals SET status='INACTIVE' WHERE id=?", [t.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'TERMINAL_REMOVE', 'pos_terminal', t.id, {});
+  res.json({ ok: true });
+});
+
 // Distinct bank names known to this tenant (terminals + past transfers) — powers
 // the Transfer bank typeahead.  Falls back to a common Nigerian-bank list.
 const COMMON_BANKS = ['ACCESS', 'GTB', 'UBA', 'ZENITH', 'FIRST BANK', 'FCMB', 'FIDELITY', 'STERLING', 'UNION', 'WEMA', 'POLARIS', 'STANBIC', 'ECOBANK', 'KEYSTONE', 'MONIEPOINT', 'OPAY', 'PALMPAY', 'KUDA'];

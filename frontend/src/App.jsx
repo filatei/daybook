@@ -18,6 +18,7 @@ import Reconcile from './views/Reconcile.jsx';
 import More from './views/More.jsx';
 import Payroll from './views/Payroll.jsx';
 import Generators from './views/Generators.jsx';
+import Terminals from './views/Terminals.jsx';
 import Activity from './views/Activity.jsx';
 
 function Inner() {
@@ -101,6 +102,7 @@ function Inner() {
         {tab === 'more'       && <More />}
         {tab === 'payroll'    && <Payroll />}
         {tab === 'generators' && <Generators />}
+        {tab === 'terminals'  && <Terminals />}
         {tab === 'activity'   && <Activity />}
       </main>
       <Modal />

@@ -21,6 +21,7 @@ export default function More() {
     { id: 'payroll',    icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isAcct },
     { id: 'staff',      icon: '👷', label: 'Staff',      desc: 'Clock-in, face enrolment & attendance',    show: isSec },
     { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',       show: isSec },
+    { id: 'terminals',  icon: '💳', label: 'POS Terminals', desc: 'Banks & POS machines for card sales',     show: isMgr },
   ].filter((i) => i.show);
 
   return (

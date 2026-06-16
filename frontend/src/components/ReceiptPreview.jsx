@@ -5,6 +5,7 @@
  */
 import React from 'react';
 import { ngn } from '../api.js';
+import QRCode from './QRCode.jsx';
 
 // ── Code 128 (subset B) symbol width table — 0..106 (106 = stop) ──────────────
 const C128 = [
@@ -95,7 +96,9 @@ export default function ReceiptPreview({ receipt: r }) {
       <Hr />
       <div style={{ textAlign: 'center', fontWeight: 800 }}>TAKE TO LOADING POINT</div>
       <div style={{ textAlign: 'center', marginBottom: 4 }}>Receipt {rno}</div>
-      {r.receipt_no !== 'OFFLINE' && <Barcode value={r.receipt_no} />}
+      {r.receipt_no !== 'OFFLINE' && (
+        <div style={{ width: 120, height: 120, margin: '0 auto' }}><QRCode value={String(r.receipt_no)} size={120} /></div>
+      )}
       <Hr />
     </div>
   );

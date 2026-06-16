@@ -49,6 +49,23 @@ function barcodeCode128(numStr) {
   ]);
 }
 
+/**
+ * Build ESC/POS QR code (GS ( k, model 2) for a receipt-number string.
+ * QR scans omnidirectionally and tolerates smudging better than a 1-D barcode.
+ */
+function qrEscPos(str, moduleSize = 7) {
+  const data = Array.from(String(str)).map((c) => c.charCodeAt(0) & 0xff);
+  const len = data.length + 3;
+  const pL = len & 0xff, pH = (len >> 8) & 0xff;
+  return new Uint8Array([
+    GS, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00,        // model 2
+    GS, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, moduleSize & 0xff, // module size
+    GS, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, 0x31,              // error correction M
+    GS, 0x28, 0x6B, pL, pH, 0x31, 0x50, 0x30, ...data,         // store data
+    GS, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30,              // print
+  ]);
+}
+
 const t = (s) => ENC.encode(s);
 
 // Pad/truncate to fixed column width
@@ -139,7 +156,7 @@ export function buildReceipt(opts) {
   push(CMD_BOLD_OFF, CMD_SIZE_NORM);
   push(t(`Receipt #${rno}\n`));
   push(new Uint8Array([LF]));
-  push(barcodeCode128(String(receipt_no || '')));
+  push(qrEscPos(String(receipt_no || '')));
   push(DIVIDER, NEWLINES, CMD_CUT);
 
   // Combine into a single Uint8Array

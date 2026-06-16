@@ -23,6 +23,7 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.14",
     "pg": "^8.13.0",
+    "qrcode-generator": "^1.4.4",
     "uuid": "^11.0.0",
     "ws": "^8.18.0"
   },

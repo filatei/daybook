@@ -6,7 +6,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, scoped } from '../api.js';
 import { useStore, useRole, atLeast, useActiveTenant } from '../store.jsx';
-import Barcode128 from '../components/Barcode128.jsx';
+import QRCode from '../components/QRCode.jsx';
 import { brandFor, printBadges } from '../badge.js';
 
 export default function Badges() {
@@ -56,19 +56,20 @@ export default function Badges() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 12 }}>
           {list.map((s) => (
             <div key={s.id} style={{ background: '#fff', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--line)', boxShadow: '0 1px 4px rgba(15,23,42,.06)' }}>
-              <div style={{ background: brand.color, color: '#fff', textAlign: 'center', padding: '10px 6px' }}>
-                <img src={brand.logo} alt="" style={{ height: 34, maxWidth: '78%', objectFit: 'contain', filter: 'brightness(0) invert(1)' }} />
-                <div style={{ fontWeight: 800, fontSize: 11, letterSpacing: .4, marginTop: 4 }}>{brand.name}</div>
+              <div style={{ height: 6, background: brand.color }} />
+              <div style={{ textAlign: 'center', padding: '10px 6px 4px' }}>
+                <img src={brand.logo} alt="" style={{ height: 38, maxWidth: '82%', objectFit: 'contain' }} />
+                <div style={{ fontWeight: 800, fontSize: 11, letterSpacing: .4, marginTop: 2, color: brand.color }}>{brand.name}</div>
               </div>
-              <div style={{ textAlign: 'center', padding: '8px 8px 4px' }}>
-                <div style={{ width: 46, height: 46, borderRadius: '50%', background: brand.color, color: '#fff', fontSize: 22, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 6px' }}>{(s.full_name || '?').trim().charAt(0).toUpperCase()}</div>
+              <div style={{ textAlign: 'center', padding: '2px 8px 4px' }}>
+                <div style={{ width: 44, height: 44, borderRadius: '50%', background: brand.color, color: '#fff', fontSize: 21, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 6px' }}>{(s.full_name || '?').trim().charAt(0).toUpperCase()}</div>
                 <div style={{ fontWeight: 800, fontSize: 14, lineHeight: 1.15 }}>{s.full_name}</div>
                 <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>{s.role_title || s.staff_type || 'Staff'}</div>
                 <div style={{ fontSize: 11, color: '#94a3b8' }}>{siteName(s.site_id)}</div>
               </div>
-              <div style={{ padding: '4px 10px 8px', borderTop: '1px dashed var(--line)' }}>
-                <Barcode128 value={s.badge_code} height={40} />
-                <div style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, fontWeight: 700, letterSpacing: 1, textAlign: 'center', marginTop: 2 }}>{s.badge_code}</div>
+              <div style={{ padding: '4px 10px 8px', borderTop: `1px dashed ${brand.color}`, textAlign: 'center' }}>
+                <div style={{ width: 96, height: 96, margin: '4px auto 0' }}><QRCode value={s.badge_code} size={96} /></div>
+                <div style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, fontWeight: 700, letterSpacing: 1, marginTop: 2 }}>{s.badge_code}</div>
               </div>
               <button onClick={() => print([s])} title="Print this badge"
                 style={{ width: '100%', border: 'none', borderTop: '1px solid var(--line)', background: '#f8fafc', color: brand.color, fontWeight: 700, fontSize: 12.5, padding: '8px 0', cursor: 'pointer' }}>

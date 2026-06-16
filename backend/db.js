@@ -596,6 +596,27 @@ async function migrate() {
   // Expenses carry a vendor/payee (distinct from sales customers) + line items.
   await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS vendor TEXT`);
   await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS items_json TEXT`);
+  // Expense tickets get paid incrementally → track amount_paid + status, plus a
+  // payment ledger. Vendor "what we owe" = Σ amount − Σ amount_paid per vendor.
+  await pool.query(`
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS amount_paid DOUBLE PRECISION DEFAULT 0;
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'UNPAID';
+    CREATE TABLE IF NOT EXISTS expense_payments (
+      id         TEXT PRIMARY KEY,
+      tenant_id  TEXT NOT NULL,
+      expense_id TEXT NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+      pay_date   TEXT NOT NULL,
+      amount     DOUBLE PRECISION NOT NULL,
+      method     TEXT,
+      bank       TEXT,
+      memo       TEXT,
+      paid_by    TEXT,
+      ext_id     TEXT,
+      created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_exp_pay_expense ON expense_payments(expense_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_exp_pay_ext ON expense_payments(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+  `);
 
   // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool
   // per tenant (no site), deduped on lower(name).

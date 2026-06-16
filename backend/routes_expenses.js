@@ -49,7 +49,7 @@ router.get('/', requireAuth, async (req, res) => {
   const c = await contextFor(req.user, tid);
   if (!c) return res.status(403).json({ error: 'forbidden' });
 
-  const { site, from, to, category } = req.query;
+  const { site, from, to, category, vendor, unpaid } = req.query;
   const where = ['e.tenant_id=?'], args = [tid];
 
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
@@ -57,9 +57,11 @@ router.get('/', requireAuth, async (req, res) => {
   if (from) { where.push('e.expense_date>=?'); args.push(from); }
   if (to)   { where.push('e.expense_date<=?'); args.push(to); }
   if (category) { where.push('e.category=?'); args.push(category.toUpperCase()); }
+  if (vendor) { where.push('lower(e.vendor)=lower(?)'); args.push(vendor); }
+  if (unpaid === '1') { where.push('e.amount > COALESCE(e.amount_paid,0)'); }
 
   const rows = await qall(
-    `SELECT e.*, s.name site_name, s.code site_code
+    `SELECT e.*, (e.amount - COALESCE(e.amount_paid,0)) AS balance, s.name site_name, s.code site_code
        FROM expenses e LEFT JOIN sites s ON s.id=e.site_id
       WHERE ${where.join(' AND ')}
       ORDER BY e.expense_date DESC, e.created_at DESC LIMIT 500`,
@@ -189,6 +191,72 @@ router.delete('/:id', requireAuth, async (req, res) => {
       [parseFloat(a.expense.amount) || 0, a.expense.tenant_id, a.expense.site_id, a.expense.expense_date]);
   }
   await qrun('DELETE FROM expenses WHERE id=?', [a.expense.id]);
+  res.json({ ok: true });
+});
+
+// ── Expense payments (incremental ticket payments) + vendor payables ──────────
+const payStatus = (amount, paid) => (paid <= 0.001 ? 'UNPAID' : (paid >= (amount - 0.01) ? 'PAID' : 'PART'));
+
+// Vendor payables — how much we still owe each vendor (open expense balances).
+// Defined before /:id routes so "vendors" isn't captured as an :id.
+router.get('/vendors/balances', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });
+  const c = await contextFor(req.user, tid); if (!c) return res.status(403).json({ error: 'forbidden' });
+  const where = ['e.tenant_id=?', "e.vendor IS NOT NULL", "e.vendor<>''"], args = [tid];
+  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
+  const rows = await qall(
+    `SELECT e.vendor,
+        COALESCE(SUM(e.amount),0) billed,
+        COALESCE(SUM(COALESCE(e.amount_paid,0)),0) paid,
+        COALESCE(SUM(e.amount - COALESCE(e.amount_paid,0)),0) owed,
+        SUM(CASE WHEN COALESCE(e.amount_paid,0) < e.amount THEN 1 ELSE 0 END) open_count
+      FROM expenses e WHERE ${where.join(' AND ')}
+      GROUP BY e.vendor
+      HAVING COALESCE(SUM(e.amount - COALESCE(e.amount_paid,0)),0) > 0.01
+      ORDER BY owed DESC`, args);
+  res.json(rows.map((r) => ({ vendor: r.vendor, billed: Number(r.billed), paid: Number(r.paid), owed: Number(r.owed), open_count: Number(r.open_count) })));
+});
+
+router.get('/:id/payments', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  res.json(await qall('SELECT * FROM expense_payments WHERE expense_id=? ORDER BY pay_date DESC, created_at DESC', [req.params.id]));
+});
+
+// Record a (partial) payment against an expense ticket — Secretary/Manager+.
+router.post('/:id/payments', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!atLeast(a.ctx.role, 'SECRETARY')) return res.status(403).json({ error: 'forbidden' });
+  const b = req.body || {};
+  const amount = Math.round((+b.amount || 0) * 100) / 100;
+  if (!(amount > 0)) return res.status(400).json({ error: 'amount required' });
+  const total = +a.expense.amount || 0;
+  const already = +a.expense.amount_paid || 0;
+  const remaining = Math.max(0, Math.round((total - already) * 100) / 100);
+  if (amount > remaining + 0.01) return res.status(400).json({ error: `exceeds balance — ₦${remaining.toLocaleString()} left to pay` });
+  const id = uuid();
+  const pay_date = (b.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  await qrun('INSERT INTO expense_payments (id,tenant_id,expense_id,pay_date,amount,method,bank,memo,paid_by) VALUES (?,?,?,?,?,?,?,?,?)',
+    [id, a.expense.tenant_id, a.expense.id, pay_date, amount, b.method || null, (b.bank || '').toUpperCase() || null, b.memo || null, req.user.id]);
+  const paid = Math.round((already + amount) * 100) / 100;
+  const status = payStatus(total, paid);
+  await qrun('UPDATE expenses SET amount_paid=?, status=? WHERE id=?', [paid, status, a.expense.id]);
+  res.status(201).json({ id, amount_paid: paid, balance: Math.max(0, Math.round((total - paid) * 100) / 100), status });
+});
+
+// Reverse a payment — Manager+.
+router.delete('/payments/:pid', requireAuth, async (req, res) => {
+  const p = await qone('SELECT * FROM expense_payments WHERE id=?', [req.params.pid]);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const c = await contextFor(req.user, p.tenant_id);
+  if (!c || !atLeast(c.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'only a manager can reverse a payment' });
+  await qrun('DELETE FROM expense_payments WHERE id=?', [p.id]);
+  const exp = await qone('SELECT * FROM expenses WHERE id=?', [p.expense_id]);
+  if (exp) {
+    const paid = Math.max(0, Math.round(((+exp.amount_paid || 0) - (+p.amount || 0)) * 100) / 100);
+    await qrun('UPDATE expenses SET amount_paid=?, status=? WHERE id=?', [paid, payStatus(+exp.amount || 0, paid), exp.id]);
+  }
   res.json({ ok: true });
 });
 

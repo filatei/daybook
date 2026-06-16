@@ -54,6 +54,32 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     setSaving(false);
   };
 
+  // ── Incremental payments against this ticket ────────────────────────────────
+  const [paid, setPaid] = useState(+expense?.amount_paid || 0);
+  const [payments, setPayments] = useState([]);
+  const [payForm, setPayForm] = useState(null);   // { amount, date, method, bank, memo }
+  const [paying, setPaying] = useState(false);
+  const billed = +expense?.amount || total;
+  const balance = Math.max(0, Math.round((billed - paid) * 100) / 100);
+  const loadPayments = useCallback(async () => {
+    if (!expense?.id) return;
+    try { setPayments(await api(scoped(`/expenses/${expense.id}/payments`))); } catch { /* ignore */ }
+  }, [expense?.id]);
+  useEffect(() => { loadPayments(); }, [loadPayments]);
+  const recordPayment = async () => {
+    const amt = +payForm.amount || 0;
+    if (!(amt > 0)) return toast('Enter an amount', 'err');
+    setPaying(true);
+    try {
+      const r = await api(scoped(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, date: payForm.date, method: payForm.method || null, bank: payForm.bank || null, memo: payForm.memo || null } });
+      setPaid(r.amount_paid); setPayForm(null); loadPayments(); onSave && onSave();
+      toast(r.status === 'PAID' ? 'Fully paid ✓' : 'Payment recorded ✓', 'ok');
+    } catch (e) { toast(e.message || 'Payment failed', 'err'); }
+    setPaying(false);
+  };
+  const STBADGE = { PAID: { bg: '#dcfce7', fg: '#166534' }, PART: { bg: '#fef3c7', fg: '#92400e' }, UNPAID: { bg: '#fee2e2', fg: '#991b1b' } };
+  const stKey = balance <= 0.01 ? 'PAID' : (paid > 0 ? 'PART' : 'UNPAID');
+
   return (
     <div>
       <div className="grip" />
@@ -108,6 +134,46 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
           {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
       </>}
+
+      {/* Payments — incremental ticket payments + vendor balance */}
+      {expense?.id && (
+        <div style={{ marginTop: 16, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <strong>Payments <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: STBADGE[stKey].bg, color: STBADGE[stKey].fg }}>{stKey}</span></strong>
+            <span style={{ fontSize: 13, color: 'var(--muted)' }}>paid {ngn(paid)} · <strong style={{ color: balance > 0 ? 'var(--err)' : '#166534' }}>owed {ngn(balance)}</strong></span>
+          </div>
+          {payments.map((p) => (
+            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0', borderBottom: '1px solid var(--line)' }}>
+              <span style={{ color: 'var(--muted)' }}>{p.pay_date}{p.bank ? ` · ${p.bank}` : ''}{p.memo ? ` · ${p.memo}` : ''}</span>
+              <strong>{ngn(p.amount)}</strong>
+            </div>
+          ))}
+          {balance > 0.01 && (payForm ? (
+            <div style={{ marginTop: 10, background: 'var(--brand-l)', borderRadius: 10, padding: 10 }}>
+              <div className="grid2">
+                <div><label className="fl">Amount (₦)</label><input className="input" type="number" inputMode="decimal" value={payForm.amount} onChange={(e) => setPayForm((p) => ({ ...p, amount: e.target.value }))} /></div>
+                <div><label className="fl">Date</label><input className="input" type="date" max={today()} value={payForm.date} onChange={(e) => setPayForm((p) => ({ ...p, date: e.target.value }))} /></div>
+              </div>
+              <div className="grid2">
+                <div><label className="fl">Method</label>
+                  <select className="input" value={payForm.method} onChange={(e) => setPayForm((p) => ({ ...p, method: e.target.value }))}>
+                    <option value="">—</option><option>CASH</option><option>TRANSFER</option><option>POS</option><option>CHEQUE</option>
+                  </select></div>
+                <div><label className="fl">Bank (optional)</label><input className="input" value={payForm.bank} onChange={(e) => setPayForm((p) => ({ ...p, bank: e.target.value }))} placeholder="e.g. GTB" /></div>
+              </div>
+              <input className="input" style={{ marginTop: 6 }} value={payForm.memo} onChange={(e) => setPayForm((p) => ({ ...p, memo: e.target.value }))} placeholder="memo (optional)" />
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setPayForm(null)} disabled={paying}>Cancel</button>
+                <button className="btn" style={{ flex: 1 }} onClick={recordPayment} disabled={paying}>{paying ? <span className="spin" /> : 'Record payment'}</button>
+              </div>
+            </div>
+          ) : (
+            <button className="btn btn-sm" style={{ marginTop: 10, width: 'auto', padding: '6px 14px' }}
+              onClick={() => setPayForm({ amount: String(balance), date: today(), method: '', bank: '', memo: '' })}>＋ Record payment</button>
+          ))}
+        </div>
+      )}
+
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn" onClick={save} disabled={saving}>
@@ -120,6 +186,68 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
 
 const CAT_ICONS = { FUEL: '⛽', DIESEL: '⛽', MAINTENANCE: '🔧', UTILITIES: '💡', SUPPLIES: '📦', SALARY: '👷', TRANSPORT: '🚛', OTHER: '💸' };
 const catIcon = (c) => CAT_ICONS[(c || '').toUpperCase()] || '💸';
+const ST = { PAID: { bg: '#dcfce7', fg: '#166534' }, PART: { bg: '#fef3c7', fg: '#92400e' }, UNPAID: { bg: '#fee2e2', fg: '#991b1b' } };
+const stOf = (e) => (Number(e.balance) <= 0.01 ? 'PAID' : (Number(e.amount_paid) > 0 ? 'PART' : 'UNPAID'));
+
+// Vendor payables — how much we owe each vendor; tap to see their open tickets.
+function PayablesView({ onOpenExpense }) {
+  const { tenant } = useStore();
+  const [rows, setRows] = useState(null);
+  const [vendor, setVendor] = useState(null);   // drilled vendor → their unpaid expenses
+  const [items, setItems] = useState(null);
+  useEffect(() => { api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([])); }, [tenant]);
+  const openVendor = async (v) => {
+    setVendor(v); setItems(null);
+    try { setItems(await api(scoped(`/expenses?vendor=${encodeURIComponent(v.vendor)}&unpaid=1`))); } catch { setItems([]); }
+  };
+  const totalOwed = (rows || []).reduce((a, r) => a + r.owed, 0);
+
+  if (rows === null) return <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>;
+  return (
+    <div>
+      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
+        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>We owe {rows.length} vendor{rows.length !== 1 ? 's' : ''}</span>
+        <span style={{ fontWeight: 800, fontSize: 18, color: 'var(--err)' }}>{ngn(totalOwed)}</span>
+      </div>
+      {rows.length === 0 ? <div className="empty"><div className="ic">🏦</div><p>Nothing owed — all vendors settled</p></div> : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {rows.map((r) => (
+            <button key={r.vendor} onClick={() => openVendor(r)}
+              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
+              <div className="av" style={{ borderRadius: 8 }}>{(r.vendor || '?').charAt(0).toUpperCase()}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700 }}>{r.vendor}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>billed {ngn(r.billed)} · paid {ngn(r.paid)} · {r.open_count} open</div>
+              </div>
+              <div style={{ fontWeight: 800, color: 'var(--err)' }}>{ngn(r.owed)} ›</div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {vendor && (
+        <div onClick={() => setVendor(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 440, margin: 0, maxHeight: '86vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+              <strong>{vendor.vendor}</strong><strong style={{ color: 'var(--err)' }}>owe {ngn(vendor.owed)}</strong>
+            </div>
+            {items === null ? <div className="skel" style={{ height: 60 }} /> : items.length === 0 ? <div className="empty"><p>No open tickets</p></div> : items.map((e) => (
+              <button key={e.id} onClick={() => { setVendor(null); onOpenExpense(e); }}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description || e.category}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{e.expense_date} · billed {ngn(e.amount)} · paid {ngn(e.amount_paid)}</div>
+                </div>
+                <strong style={{ color: 'var(--err)', whiteSpace: 'nowrap' }}>{ngn(e.balance)} ›</strong>
+              </button>
+            ))}
+            <button className="btn btn-ghost" style={{ marginTop: 12 }} onClick={() => setVendor(null)}>Close</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Expenses() {
   const { openModal, closeModal, tenant, sites } = useStore();
@@ -127,6 +255,7 @@ export default function Expenses() {
   const [categories, setCategories] = useState(CATS.map((c) => c.toUpperCase()));
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState({ cat: '', from: '', to: '' });
+  const [tab, setTab] = useState('list');   // list | payables
 
   useEffect(() => {
     api(scoped('/expenses/categories')).then((c) => { if (Array.isArray(c) && c.length) setCategories(c); }).catch(() => {});
@@ -154,6 +283,13 @@ export default function Expenses() {
 
   return (
     <div>
+      <div className="seg" style={{ marginBottom: 12 }}>
+        <button className={`seg-b${tab === 'list' ? ' on' : ''}`} onClick={() => setTab('list')}>💸 Expenses</button>
+        <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>
+      </div>
+
+      {tab === 'payables' ? <PayablesView onOpenExpense={openForm} /> : (
+      <>
       {/* Filters */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         <select className="input" style={{ flex: '1 1 120px' }} value={filter.cat}
@@ -185,15 +321,17 @@ export default function Expenses() {
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{e.description || e.category}</div>
+                <div style={{ fontWeight: 700 }}>{e.description || e.category} {Number(e.balance) > 0.01 && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: ST[stOf(e)].bg, color: ST[stOf(e)].fg }}>{stOf(e)}</span>}</div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  {e.expense_date} · {e.category}{e.vendor ? ` · ${e.vendor}` : ''}
+                  {e.expense_date} · {e.category}{e.vendor ? ` · ${e.vendor}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
                 </div>
               </div>
               <div style={{ fontWeight: 800 }}>{ngn(e.amount)}</div>
             </button>
           ))}
         </div>
+      )}
+      </>
       )}
 
       <button className="fab" onClick={() => openForm()}>+</button>

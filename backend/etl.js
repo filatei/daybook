@@ -273,19 +273,35 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
     }));
     // Category: explicit expense category, else the first line item's category.
     const category = clean((e.category || (items[0] && items[0].category) || 'OTHER').toUpperCase().slice(0, 40)) || 'OTHER';
+    // Incremental payments → amount_paid + status; ledger rows migrated below.
+    const payHistory = Array.isArray(e.payHistory) ? e.payHistory : [];
+    const paid = Math.round(payHistory.reduce((a, p) => a + num(p.paidAmount), 0) * 100) / 100;
+    const status = paid <= 0.01 ? 'UNPAID' : (paid >= amount - 0.01 ? 'PAID' : 'PART');
     try {
-      const r = await qrun(
-        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,items_json,amount,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      const row = await qone(
+        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,items_json,amount,amount_paid,status,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
            vendor=COALESCE(EXCLUDED.vendor, expenses.vendor),
            items_json=COALESCE(EXCLUDED.items_json, expenses.items_json),
-           category=EXCLUDED.category`,
+           category=EXCLUDED.category, amount_paid=EXCLUDED.amount_paid, status=EXCLUDED.status
+         RETURNING id`,
         [uuid(), site.tenant_id, site.id, ext_id, expDate, category,
           clean(e.description || e.remarks || e.note || (items[0] && items[0].name)), vendorName,
-          items.length ? JSON.stringify(items) : null, amount,
+          items.length ? JSON.stringify(items) : null, amount, paid, status,
           Math.floor((e.createdAt instanceof Date ? e.createdAt : new Date()).getTime() / 1000)]);
-      if (r.rowCount) stats.inserted++;
+      stats.inserted++;
+      // Migrate each payment in the ticket's history (idempotent on ext_id).
+      const expId = row && row.id;
+      for (let i = 0; i < payHistory.length; i++) {
+        const p = payHistory[i]; const amt = num(p.paidAmount); if (!amt || !expId) continue;
+        const pdate = dateStr(p.paymentDate || p.date) || expDate;
+        await qrun(
+          `INSERT INTO expense_payments (id,tenant_id,expense_id,pay_date,amount,method,bank,memo,paid_by,ext_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
+          [uuid(), site.tenant_id, expId, pdate, amt, null, clean(p.bankAcct) || null, clean(p.memo) || null, clean(p.payer) || null, `${ext_id}:${i}`]).catch(() => {});
+      }
     } catch (e2) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] expenses error:', e2.message.slice(0, 140)); }
     progress('expenses', stats.scanned, total);
   }

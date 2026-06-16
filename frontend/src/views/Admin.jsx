@@ -93,6 +93,55 @@ function MemberForm({ sites = [], onInvite, onClose }) {
   );
 }
 
+// ── Edit an existing member's role / site ─────────────────────────────────────
+const ROLE_OPTIONS = [
+  ['GATEMAN', '— scan & release (exit)'], ['SUPERVISOR', '— scan & mark loaded'],
+  ['SECRETARY', '— one site: front office'], ['ACCOUNTANT', '— + reconcile'],
+  ['SNR_ACCOUNTANT', '— GM-level + payroll'], ['SITE_MANAGER', '— site operations'],
+  ['GENERAL_MANAGER', '— all sites'], ['ADMIN', '— full access'],
+];
+const SITE_ROLES = ['SITE_MANAGER', 'SECRETARY', 'GATEMAN', 'SUPERVISOR'];
+function EditMemberForm({ member, sites = [], onSave, onRemove, onClose }) {
+  const { toast } = useStore();
+  const [role, setRole] = useState(member.role);
+  const [siteId, setSiteId] = useState(member.site_id || '');
+  const [saving, setSaving] = useState(false);
+  const needsSite = role === 'SITE_MANAGER' || role === 'SECRETARY';
+  const save = async () => {
+    if (needsSite && !siteId) return toast('Pick a site for this role', 'err');
+    setSaving(true);
+    try { await onSave(member.id, { role, site_id: SITE_ROLES.includes(role) ? (siteId || null) : null }); onClose(); }
+    catch (e) { toast(e.message, 'err'); }
+    setSaving(false);
+  };
+  return (
+    <div>
+      <div className="grip" />
+      <h3>Edit member</h3>
+      <p className="sub" style={{ marginTop: -4 }}>{member.name || member.email}</p>
+      <label className="fl">Role</label>
+      <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
+        {ROLE_OPTIONS.map(([v, d]) => <option key={v} value={v}>{ROLE_LABELS[v] || v} {d}</option>)}
+      </select>
+      {SITE_ROLES.includes(role) && sites.length > 0 && (
+        <>
+          <label className="fl">Site{needsSite ? ' *' : ' (optional)'}</label>
+          <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+            <option value="">— none —</option>
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </>
+      )}
+      {!SITE_ROLES.includes(role) && <p style={{ fontSize: 12, color: 'var(--muted)' }}>This role is cross-site (no single site).</p>}
+      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <button className="btn btn-ghost" style={{ flex: 1, color: 'var(--err)' }} onClick={() => onRemove(member)} disabled={saving}>Remove</button>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
+        <button className="btn" style={{ flex: 1.3 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Save'}</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Settings (face match strictness) ─────────────────────────────────────────
 function SettingsTab() {
   const { toast, tenant } = useStore();
@@ -108,8 +157,42 @@ function SettingsTab() {
     catch (e) { toast(e.message, 'err'); }
     setSaving(false);
   };
+  // ── Email diagnostics ──────────────────────────────────────────────────────
+  const [emailTo, setEmailTo] = useState('');
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailRes, setEmailRes] = useState(null);
+  const checkEmail = async () => {
+    setEmailBusy(true); setEmailRes(null);
+    try { const h = await api(scoped('/email/health')); setEmailRes({ kind: 'health', ...h }); }
+    catch (e) { setEmailRes({ kind: 'health', ok: false, error: e.message }); }
+    setEmailBusy(false);
+  };
+  const testEmail = async () => {
+    setEmailBusy(true); setEmailRes(null);
+    try { const r = await api(scoped('/email/test'), { method: 'POST', body: { to: emailTo || undefined } }); setEmailRes({ kind: 'test', ...r }); }
+    catch (e) { setEmailRes({ kind: 'test', ok: false, error: e.message }); }
+    setEmailBusy(false);
+  };
+
   if (loading) return <div className="skel" />;
   return (
+    <div>
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="section-title" style={{ marginTop: 0 }}>📧 Email delivery</div>
+      <p className="sub">Invite & report emails go through your SMTP relay. Test it here to see exactly what the server reports.</p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <input className="input" style={{ flex: '1 1 200px' }} value={emailTo} onChange={(e) => setEmailTo(e.target.value)} placeholder="send test to… (default: you)" />
+        <button className="btn btn-sm" style={{ width: 'auto', padding: '8px 14px' }} onClick={testEmail} disabled={emailBusy}>{emailBusy ? <span className="spin" /> : 'Send test'}</button>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '8px 14px' }} onClick={checkEmail} disabled={emailBusy}>Check connection</button>
+      </div>
+      {emailRes && (
+        <div style={{ fontSize: 12.5, background: emailRes.ok ? '#dcfce7' : '#fee2e2', color: emailRes.ok ? '#166534' : '#991b1b', borderRadius: 10, padding: '10px 12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+          {emailRes.kind === 'health'
+            ? (emailRes.ok ? `✓ SMTP reachable\nHost ${emailRes.host}:${emailRes.port} · From ${emailRes.from} · auth ${emailRes.auth ? 'password' : 'IP-relay'}` : `✗ Cannot reach SMTP: ${emailRes.error}`)
+            : (emailRes.ok ? `✓ Server accepted the test to ${emailRes.to}\nFrom: ${emailRes.from}\nAccepted: ${(emailRes.accepted || []).join(', ') || '—'}\nRejected: ${(emailRes.rejected || []).join(', ') || 'none'}\nServer said: ${emailRes.response || '—'}\n\nIf it accepted but you didn't get it, check Spam, and that ${emailRes.from?.match(/@([^>]+)/)?.[1] || 'the From domain'} is an allowed sender on your relay.` : `✗ Send failed: ${emailRes.error}`)}
+        </div>
+      )}
+    </div>
     <div className="card">
       <div className="section-title" style={{ marginTop: 0 }}>Face-match strictness</div>
       <p className="sub">How close a live face must be to the enrolled face to clock in. Lower = stricter (fewer wrong matches, more retries). Higher = more lenient. Default 0.55.</p>
@@ -118,6 +201,7 @@ function SettingsTab() {
         <span>Stricter 0.30</span><strong style={{ color: 'var(--ink)', fontSize: 16 }}>{thr.toFixed(2)}</strong><span>Lenient 0.80</span>
       </div>
       <button className="btn" style={{ marginTop: 14 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : null} Save</button>
+    </div>
     </div>
   );
 }
@@ -260,6 +344,13 @@ export default function Admin() {
     toast(r.added ? `${email} added ✓` : `${email} added — auto-joins when they sign in`, 'ok');
     await loadMembers();
   };
+  const patchMember = async (id, body) => { await api(scoped(`/members/${id}`), { method: 'PATCH', body }); toast('Member updated ✓', 'ok'); await loadMembers(); };
+  const removeMember = async (m) => {
+    if (!window.confirm(`Remove ${m.name || m.email} from this company?`)) return;
+    try { await api(scoped(`/members/${m.id}`), { method: 'DELETE' }); toast('Member removed', 'ok'); closeModal(); await loadMembers(); }
+    catch (e) { toast(e.message || 'Could not remove', 'err'); }
+  };
+  const openEditMember = (m) => openModal(<EditMemberForm member={m} sites={sites} onSave={patchMember} onRemove={removeMember} onClose={closeModal} />);
 
   const activeProducts   = products.filter((p) => p.status !== 'INACTIVE');
   const inactiveProducts = products.filter((p) => p.status === 'INACTIVE');
@@ -307,10 +398,11 @@ export default function Admin() {
                   {members.map((m) => (
                     <div key={m.id || m.user_id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid var(--line)' }}>
                       <div className="av">{(m.name || m.email || '?')[0].toUpperCase()}</div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 700 }}>{m.name || m.email}</div>
-                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{m.email} · {ROLE_LABELS[m.role] || m.role}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 700 }}>{m.name || m.email}{m.status === 'DISABLED' ? ' (disabled)' : ''}</div>
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{m.email} · {ROLE_LABELS[m.role] || m.role}{m.site_id ? ` · ${sites.find((x) => x.id === m.site_id)?.name || 'site'}` : ''}</div>
                       </div>
+                      {isAdmin && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => openEditMember(m)}>Edit</button>}
                     </div>
                   ))}
                 </div>

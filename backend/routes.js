@@ -14,7 +14,7 @@ const {
   verifyGoogleToken, signSession, requireAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, siteBound, GOOGLE_CLIENT_ID,
 } = require('./auth');
-const { sendDailyReport, sendInvite, verifyConnection } = require('./mailer');
+const { sendDailyReport, sendInvite, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
 
 const ROLE_LABELS = {
   GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
@@ -240,6 +240,24 @@ router.get('/members', requireAuth, needTenant('GENERAL_MANAGER'), async (req, r
     [req.ctx.tenant_id]);
   const pending = await qall('SELECT id,email,role,site_id FROM invites WHERE tenant_id=?', [req.ctx.tenant_id]);
   res.json({ members: rows, invites: pending });
+});
+
+// ── Email diagnostics (Admin) — verify SMTP + send a real test message ────────
+router.get('/email/health', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const v = await verifyConnection();
+  res.json({ ...v, from: MAIL_FROM, host: process.env.SMTP_HOST || 'smtp-relay.gmail.com', port: process.env.SMTP_PORT || '587', auth: !!(process.env.SMTP_USER && process.env.SMTP_PASS) });
+});
+router.post('/email/test', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const to = ((req.body || {}).to || req.user.email || '').trim();
+  if (!to) return res.status(400).json({ error: 'recipient required' });
+  try {
+    const r = await sendTest({ to });
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)', [uuid(), req.ctx.tenant_id, to, 'Daybook email test', 'SENT']).catch(() => {});
+    res.json({ ok: true, to, ...r });
+  } catch (e) {
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)', [uuid(), req.ctx.tenant_id, to, 'Daybook email test', 'FAILED', e.message]).catch(() => {});
+    res.status(502).json({ ok: false, to, error: e.message, from: MAIL_FROM });
+  }
 });
 
 router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {

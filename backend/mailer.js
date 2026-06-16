@@ -186,7 +186,18 @@ async function verifyConnection() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
+// Send a real test email and surface the SMTP server's verdict (accepted /
+// rejected / response) so an admin can see exactly where mail goes.
+async function sendTest({ to }) {
+  const info = await getTransporter().sendMail({
+    from: FROM, to,
+    subject: 'Daybook email test ✓',
+    html: '<p>This is a <b>Daybook SMTP test</b>. If you received this, email delivery is working. Check your Spam/Promotions folder if it landed there.</p>',
+  });
+  return { messageId: info.messageId, accepted: info.accepted || [], rejected: info.rejected || [], response: info.response, from: FROM };
+}
+
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, sendInvite, sendMidMonthPayroll, verifyConnection, FROM };
+module.exports = { sendDailyReport, sendInvite, sendMidMonthPayroll, verifyConnection, sendTest, FROM };

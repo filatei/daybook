@@ -123,7 +123,7 @@ function SettingsTab() {
 }
 
 // ── Product form ────────────────────────────────────────────────────────────
-function ProductForm({ product, onSave, onClose }) {
+export function ProductForm({ product, onSave, onClose }) {
   const { toast } = useStore();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({

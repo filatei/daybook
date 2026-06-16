@@ -1153,7 +1153,7 @@ router.get('/products', requireAuth, async (req, res) => {
   }
   res.json(await qall("SELECT * FROM products WHERE tenant_id=? ORDER BY status, name", [s.ctx.tenant_id]));
 });
-router.post('/products', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+router.post('/products', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const b = req.body || {}; if (!b.name) return res.status(400).json({ error: 'name required' });
   const id = uuid();
   try {
@@ -1163,7 +1163,7 @@ router.post('/products', requireAuth, needTenant('GENERAL_MANAGER'), async (req,
   } catch { return res.status(409).json({ error: 'product name already exists' }); }
   res.status(201).json(await qone('SELECT * FROM products WHERE id=?', [id]));
 });
-router.patch('/products/:id', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+router.patch('/products/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const p = await qone('SELECT * FROM products WHERE id=?', [req.params.id]);
   if (!p || p.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   const f = req.body || {};

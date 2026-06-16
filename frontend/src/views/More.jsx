@@ -22,6 +22,7 @@ export default function More() {
     { id: 'staff',      icon: '👷', label: 'Staff',      desc: 'Clock-in, face enrolment & attendance',    show: isSec },
     { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',       show: isSec },
     { id: 'terminals',  icon: '💳', label: 'POS Terminals', desc: 'Banks & POS machines for card sales',     show: isMgr },
+    { id: 'products',   icon: '🛒', label: 'Products',    desc: 'Catalogue & prices used at the till',       show: isMgr },
   ].filter((i) => i.show);
 
   return (

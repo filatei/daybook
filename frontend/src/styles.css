@@ -86,20 +86,23 @@ a { color: var(--brand-d); text-decoration: none; }
   display: grid; place-items: center; border-radius: 12px; background: var(--brand-l, #e0f2fe);
 }
 .nav-tabs {
-  display: flex; overflow-x: auto; gap: 2px;
-  padding: 0 10px 8px; scrollbar-width: none;
+  display: flex; gap: 8px;
+  padding: 0 16px 10px; scrollbar-width: none;
+  max-width: 1100px; width: 100%; margin: 0 auto;   /* spread evenly, centered */
 }
 .nav-tabs::-webkit-scrollbar { display: none; }
 .nav-tabs button {
-  flex: 0 0 auto; background: rgba(255,255,255,.12); border: none;
-  color: rgba(255,255,255,.8); padding: 7px 13px; border-radius: 10px;
-  font-size: 13px; font-weight: 600; cursor: pointer;
-  display: flex; align-items: center; gap: 5px; transition: .15s; white-space: nowrap;
+  flex: 1 1 0; min-width: 0;                         /* fill the width evenly */
+  background: rgba(255,255,255,.12); border: none;
+  color: rgba(255,255,255,.85); padding: 10px 14px; border-radius: 11px;
+  font-size: 14.5px; font-weight: 700; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  transition: .15s; white-space: nowrap;
 }
 .nav-tabs button.active {
-  background: rgba(255,255,255,.95); color: var(--brand-d);
+  background: rgba(255,255,255,.95); color: var(--brand-d); font-weight: 800;
 }
-.nav-tabs button .ic { font-size: 15px; }
+.nav-tabs button .ic { font-size: 17px; }
 
 /* ── Main content ──────────────────────────────────────────────────────────── */
 .main-content {
@@ -386,18 +389,19 @@ tr:hover td { background: #f8fafc; }
   background: #fff; border-top: 1px solid var(--line);
   box-shadow: 0 -2px 12px rgba(15,23,42,.07);
   padding-bottom: env(safe-area-inset-bottom, 0px);
-  overflow-x: auto; scrollbar-width: none;
+  scrollbar-width: none;
 }
 .bottom-nav::-webkit-scrollbar { display: none; }
 .bottom-nav button {
-  flex: 0 0 auto; border: none; background: none;
+  flex: 1 1 0; min-width: 0;            /* fill the bar width evenly */
+  border: none; background: none;
   color: var(--muted); display: flex; flex-direction: column;
-  align-items: center; gap: 2px;
-  padding: 8px 10px 6px; min-width: 56px;
-  font-size: 10px; font-weight: 600; cursor: pointer;
+  align-items: center; gap: 3px;
+  padding: 9px 4px 7px;
+  font-size: 12px; font-weight: 700; cursor: pointer;
   white-space: nowrap; transition: color .15s;
 }
-.bottom-nav button .ic { font-size: 21px; line-height: 1; }
+.bottom-nav button .ic { font-size: 23px; line-height: 1; }
 .bottom-nav button.active { color: var(--brand-d); }
 .bottom-nav button.active .ic { transform: scale(1.12); }
 

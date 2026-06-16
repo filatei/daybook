@@ -19,6 +19,7 @@ import More from './views/More.jsx';
 import Payroll from './views/Payroll.jsx';
 import Generators from './views/Generators.jsx';
 import Terminals from './views/Terminals.jsx';
+import Products from './views/Products.jsx';
 import Activity from './views/Activity.jsx';
 
 function Inner() {
@@ -103,6 +104,7 @@ function Inner() {
         {tab === 'payroll'    && <Payroll />}
         {tab === 'generators' && <Generators />}
         {tab === 'terminals'  && <Terminals />}
+        {tab === 'products'   && <Products />}
         {tab === 'activity'   && <Activity />}
       </main>
       <Modal />

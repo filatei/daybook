@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
 import { setToken, setActiveTenant } from './api.js';
 
 const Ctx = createContext(null);
@@ -47,21 +47,52 @@ export function StoreProvider({ children }) {
     dispatch({ type: 'SET_TENANT', id });
   }, []);
 
-  const go = useCallback((tab) => dispatch({ type: 'SET_TAB', tab }), []);
+  // ── In-app navigation history (so the phone Back button never closes the app) ──
+  // We keep our own stack of visited tabs and a single spare history entry as a
+  // buffer. Every hardware/gesture Back triggers popstate (because the buffer is
+  // always present), which we handle by closing an open modal or stepping back to
+  // the previous screen — falling back to the dashboard — then re-arming the buffer.
+  const tabRef = useRef('dashboard');
+  const histRef = useRef(['dashboard']);
+  const modalRef = useRef(null);
+
+  const go = useCallback((tab) => {
+    if (tabRef.current !== tab) { histRef.current.push(tab); tabRef.current = tab; }
+    dispatch({ type: 'SET_TAB', tab });
+  }, []);
 
   const toast = useCallback((msg, kind = 'info', ms = 3200) => {
     dispatch({ type: 'TOAST', toast: { msg, kind } });
     setTimeout(() => dispatch({ type: 'TOAST', toast: null }), ms);
   }, []);
 
-  const openModal = useCallback((node) => dispatch({ type: 'MODAL', modal: node }), []);
-  const closeModal = useCallback(() => dispatch({ type: 'MODAL', modal: null }), []);
+  const openModal = useCallback((node) => { modalRef.current = node; dispatch({ type: 'MODAL', modal: node }); }, []);
+  const closeModal = useCallback(() => { modalRef.current = null; dispatch({ type: 'MODAL', modal: null }); }, []);
+
+  useEffect(() => {
+    const buffer = () => { try { window.history.pushState({ db: true }, ''); } catch { /* ignore */ } };
+    buffer();   // arm the spare entry on first load
+    const onPop = () => {
+      if (modalRef.current) {                       // 1) Back closes an open modal first
+        modalRef.current = null; dispatch({ type: 'MODAL', modal: null });
+      } else {                                       // 2) …then steps back a screen (or dashboard)
+        const h = histRef.current;
+        if (h.length > 1) h.pop();
+        const prev = h[h.length - 1] || 'dashboard';
+        tabRef.current = prev; dispatch({ type: 'SET_TAB', tab: prev });
+      }
+      buffer();   // always keep a buffer so the app is never exited by Back
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   const logout = useCallback(() => {
     localStorage.removeItem('daybook_token');
     localStorage.removeItem('daybook_tenant');
     setToken(null);
     setActiveTenant(null);
+    histRef.current = ['dashboard']; tabRef.current = 'dashboard'; modalRef.current = null;
     dispatch({ type: 'LOGOUT' });
   }, []);
 

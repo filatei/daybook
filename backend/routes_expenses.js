@@ -162,8 +162,8 @@ router.post('/', requireAuth, async (req, res) => {
       [uuid(), tid, vendor]).catch(() => {});
   }
   await qrun(
-    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,vendor,items_json,amount,recorded_by)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,vendor,items_json,amount,recorded_by,wf_state)
+     VALUES (?,?,?,?,?,?,?,?,?,?,'DRAFT')`,
     [id, tid, site_id, expense_date, category, b.description || null, vendor,
       items.length ? JSON.stringify(items) : null, amount, req.user.id]);
 
@@ -302,11 +302,11 @@ router.get('/:id/attachments', requireAuth, async (req, res) => {
   res.json(rows.map((r) => ({ ...r, has_file: !!r.file_name })));
 });
 
-// Add a note and/or a receipt file (one entry). Secretary/Manager+.
+// Add a note and/or a receipt file (one entry). Anyone with access to the expense.
 router.post('/:id/attachments', requireAuth, upload.single('file'), async (req, res) => {
+  // Anyone with access to the expense may attach receipts/notes (record-keeping).
   const a = await expenseAccess(req, req.params.id);
   if (!a) { if (req.file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename)); } catch {} } return res.status(404).json({ error: 'not found' }); }
-  if (!atLeast(a.ctx.role, 'SECRETARY')) { if (req.file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename)); } catch {} } return res.status(403).json({ error: 'forbidden' }); }
   const note = (req.body && req.body.note ? String(req.body.note) : '').trim() || null;
   if (!req.file && !note) return res.status(400).json({ error: 'attach a receipt or write a note' });
   const id = uuid();
@@ -337,6 +337,57 @@ router.delete('/:id/attachments/:aid', requireAuth, async (req, res) => {
   if (att.stored_name) { try { fs.unlinkSync(path.join(UPLOAD_DIR, att.stored_name)); } catch {} }
   await qrun('DELETE FROM expense_attachments WHERE id=?', [att.id]);
   res.json({ ok: true });
+});
+
+// ── Ticket lifecycle (Fido) — DRAFT→REVIEWED→APPROVED→PAID→DELIVERED / DECLINED ──
+// allow(ctx, expense, uid) decides who may run each transition.
+const isCreator = (e, uid) => e.recorded_by === uid;
+const FLOW = {
+  // Creator OR a manager validates a draft into review.
+  validate: { from: ['DRAFT'], to: 'REVIEWED', allow: (c, e, uid) => isCreator(e, uid) || atLeast(c.role, 'SITE_MANAGER') },
+  // Admins approve or decline a reviewed ticket.
+  approve:  { from: ['REVIEWED'], to: 'APPROVED', allow: (c) => atLeast(c.role, 'ADMIN') },
+  decline:  { from: ['REVIEWED'], to: 'DECLINED', allow: (c) => atLeast(c.role, 'ADMIN') },
+  // Managers / Accountants / GM / Snr Acct / Admin pay (then attach the receipt).
+  pay:      { from: ['APPROVED'], to: 'PAID', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
+  // Mark the cash handed to the receiver.
+  deliver:  { from: ['APPROVED', 'PAID'], to: 'DELIVERED', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
+  // Send a ticket back to draft to fix it.
+  reset:    { from: ['REVIEWED', 'APPROVED', 'PAID', 'DELIVERED', 'DECLINED'], to: 'DRAFT', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
+};
+
+// Which transitions a given role may run from the ticket's current state.
+function allowedActions(state, ctx, expense, uid) {
+  return Object.entries(FLOW)
+    .filter(([, f]) => f.from.includes(state) && f.allow(ctx, expense, uid))
+    .map(([k]) => k);
+}
+
+router.post('/:id/transition', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const action = String((req.body && req.body.action) || '').toLowerCase();
+  const f = FLOW[action];
+  if (!f) return res.status(400).json({ error: 'unknown action' });
+  const cur = a.expense.wf_state || 'DRAFT';
+  if (!f.from.includes(cur)) return res.status(409).json({ error: `cannot ${action} from ${cur}` });
+  if (!f.allow(a.ctx, a.expense, req.user.id)) return res.status(403).json({ error: `you cannot ${action} this ticket` });
+  const note = (req.body && req.body.note ? String(req.body.note) : '').trim() || null;
+  await qrun('UPDATE expenses SET wf_state=? WHERE id=?', [f.to, a.expense.id]);
+  await qrun(
+    `INSERT INTO expense_wf_log (id,tenant_id,expense_id,action,from_state,to_state,note,actor,actor_name)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+    [uuid(), a.expense.tenant_id, a.expense.id, action, cur, f.to, note, req.user.id, req.user.name || req.user.email || null]);
+  res.json({ wf_state: f.to, actions: allowedActions(f.to, a.ctx, { ...a.expense, wf_state: f.to }, req.user.id) });
+});
+
+// Lifecycle audit trail + the actions the caller may run right now.
+router.get('/:id/log', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const log = await qall('SELECT action,from_state,to_state,note,actor_name,created_at FROM expense_wf_log WHERE expense_id=? ORDER BY created_at DESC', [req.params.id]);
+  const state = a.expense.wf_state || 'DRAFT';
+  res.json({ wf_state: state, actions: allowedActions(state, a.ctx, a.expense, req.user.id), log });
 });
 
 module.exports = router;

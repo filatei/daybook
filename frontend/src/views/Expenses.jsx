@@ -189,6 +189,24 @@ const catIcon = (c) => CAT_ICONS[(c || '').toUpperCase()] || '💸';
 const ST = { PAID: { bg: '#dcfce7', fg: '#166534' }, PART: { bg: '#fef3c7', fg: '#92400e' }, UNPAID: { bg: '#fee2e2', fg: '#991b1b' } };
 const stOf = (e) => (Number(e.balance) <= 0.01 ? 'PAID' : (Number(e.amount_paid) > 0 ? 'PART' : 'UNPAID'));
 
+// Lifecycle (Fido): DRAFT→REVIEWED→APPROVED→PAID→DELIVERED, plus DECLINED.
+const WF = {
+  DRAFT:     { bg: '#e2e8f0', fg: '#334155', label: 'DRAFT' },
+  REVIEWED:  { bg: '#dbeafe', fg: '#1e40af', label: 'REVIEWED' },
+  APPROVED:  { bg: '#ede9fe', fg: '#5b21b6', label: 'APPROVED' },
+  PAID:      { bg: '#dcfce7', fg: '#166534', label: 'PAID' },
+  DELIVERED: { bg: '#bbf7d0', fg: '#14532d', label: 'DELIVERED' },
+  DECLINED:  { bg: '#fee2e2', fg: '#991b1b', label: 'DECLINED' },
+};
+const WF_ACTION = {
+  validate: { label: '✓ Validate', kind: '' },
+  approve:  { label: '✓ Approve', kind: '' },
+  decline:  { label: '✗ Decline', kind: 'danger' },
+  pay:      { label: '💵 Pay', kind: '' },
+  deliver:  { label: '📦 Deliver', kind: '' },
+  reset:    { label: '↺ Reset', kind: 'ghost' },
+};
+
 // Vendor payables — how much we owe each vendor; tap to see their open tickets.
 function PayablesView({ onOpenExpense }) {
   const { tenant } = useStore();
@@ -250,13 +268,17 @@ function PayablesView({ onOpenExpense }) {
 }
 
 // View-first detail: read the ticket, attach receipts/notes, then choose to edit.
-function ExpenseDetail({ expense, sites, onEdit, onClose }) {
+function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const { toast } = useStore();
   const [pays, setPays] = useState([]);
   const [atts, setAtts] = useState([]);
   const [note, setNote] = useState('');
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [wf, setWf] = useState(expense.wf_state || 'DRAFT');
+  const [actions, setActions] = useState([]);
+  const [log, setLog] = useState([]);
+  const [acting, setActing] = useState('');
 
   let items = [];
   try { items = expense?.items_json ? JSON.parse(expense.items_json) : []; } catch { items = []; }
@@ -272,7 +294,28 @@ function ExpenseDetail({ expense, sites, onEdit, onClose }) {
   const loadAtts = useCallback(async () => {
     try { setAtts(await api(scoped(`/expenses/${expense.id}/attachments`))); } catch { /* ignore */ }
   }, [expense.id]);
-  useEffect(() => { loadPays(); loadAtts(); }, [loadPays, loadAtts]);
+  const loadLog = useCallback(async () => {
+    try { const r = await api(scoped(`/expenses/${expense.id}/log`)); setWf(r.wf_state); setActions(r.actions || []); setLog(r.log || []); }
+    catch { /* ignore */ }
+  }, [expense.id]);
+  useEffect(() => { loadPays(); loadAtts(); loadLog(); }, [loadPays, loadAtts, loadLog]);
+
+  const runAction = async (action) => {
+    let note2;
+    if (action === 'decline' || action === 'reset') {
+      note2 = window.prompt(`Reason for ${action} (optional):`) || '';
+    }
+    setActing(action);
+    try {
+      const r = await api(scoped(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action, note: note2 } });
+      setWf(r.wf_state); setActions(r.actions || []);
+      loadLog();
+      onChanged && onChanged();
+      const done = { validate: 'Validated ✓', approve: 'Approved ✓', decline: 'Declined', pay: 'Marked paid ✓', deliver: 'Delivered ✓', reset: 'Reset to draft' };
+      toast(done[action] || 'Updated ✓', action === 'decline' ? 'info' : 'ok');
+    } catch (e) { toast(e.message || 'Action failed', 'err'); }
+    setActing('');
+  };
 
   const addAttachment = async () => {
     if (!file && !note.trim()) { toast('Attach a receipt or write a note', 'err'); return; }
@@ -317,8 +360,21 @@ function ExpenseDetail({ expense, sites, onEdit, onClose }) {
           <h3 style={{ margin: 0 }}>{expense.description || expense.category}</h3>
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>{expense.expense_date} · {expense.category}{expense.vendor ? ` · ${expense.vendor}` : ''}{siteName ? ` · ${siteName}` : ''}</div>
         </div>
-        <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 20, background: ST[st].bg, color: ST[st].fg }}>{st}</span>
+        <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 20, background: (WF[wf] || WF.DRAFT).bg, color: (WF[wf] || WF.DRAFT).fg }}>{(WF[wf] || WF.DRAFT).label}</span>
       </div>
+
+      {/* Lifecycle actions — server decides which the current user may run */}
+      {actions.length > 0 && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0 2px' }}>
+          {actions.map((act) => (
+            <button key={act} className={`btn${WF_ACTION[act]?.kind === 'ghost' ? ' btn-ghost' : ''}`}
+              style={{ flex: '1 1 auto', minWidth: 92, ...(WF_ACTION[act]?.kind === 'danger' ? { background: 'var(--err)' } : {}) }}
+              disabled={!!acting} onClick={() => runAction(act)}>
+              {acting === act ? <span className="spin" /> : (WF_ACTION[act]?.label || act)}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 8, margin: '12px 0' }}>
         {[['Billed', billed], ['Paid', paid], ['Owed', balance]].map(([k, v]) => (
@@ -327,6 +383,10 @@ function ExpenseDetail({ expense, sites, onEdit, onClose }) {
             <div style={{ fontWeight: 800, fontSize: 15 }}>{ngn(v)}</div>
           </div>
         ))}
+      </div>
+      {/* payment status chip — distinct from lifecycle */}
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
+        Payment: <span style={{ fontWeight: 700, color: ST[st].fg }}>{st}</span>
       </div>
 
       {items.length > 0 && (
@@ -416,7 +476,7 @@ export default function Expenses() {
   };
   // Clicking a ticket opens a read-only view first; Edit switches to the form.
   const openDetail = (exp) => {
-    openModal(<ExpenseDetail expense={exp} sites={sites} onEdit={() => openForm(exp)} onClose={closeModal} />);
+    openModal(<ExpenseDetail expense={exp} sites={sites} onEdit={() => openForm(exp)} onChanged={load} onClose={closeModal} />);
   };
 
   const total = expenses.reduce((s, e) => s + (+e.amount || 0), 0);
@@ -461,7 +521,7 @@ export default function Expenses() {
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{e.description || e.category} {Number(e.balance) > 0.01 && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: ST[stOf(e)].bg, color: ST[stOf(e)].fg }}>{stOf(e)}</span>}</div>
+                <div style={{ fontWeight: 700 }}>{e.description || e.category} <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: (WF[e.wf_state] || WF.DRAFT).bg, color: (WF[e.wf_state] || WF.DRAFT).fg }}>{(WF[e.wf_state] || WF.DRAFT).label}</span></div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                   {e.expense_date} · {e.category}{e.vendor ? ` · ${e.vendor}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
                 </div>

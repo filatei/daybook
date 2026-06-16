@@ -601,6 +601,24 @@ async function migrate() {
   await pool.query(`
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS amount_paid DOUBLE PRECISION DEFAULT 0;
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'UNPAID';
+    -- Workflow lifecycle (Fido): DRAFT→REVIEWED→APPROVED→PAID→DELIVERED, plus DECLINED.
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS wf_state TEXT;`);
+  // One-time backfill: seed lifecycle from payment status for migrated tickets.
+  await pool.query(`UPDATE expenses SET wf_state = CASE WHEN status='PAID' THEN 'PAID' ELSE 'DRAFT' END WHERE wf_state IS NULL`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS expense_wf_log (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      expense_id  TEXT NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+      action      TEXT,
+      from_state  TEXT,
+      to_state    TEXT,
+      note        TEXT,
+      actor       TEXT,
+      actor_name  TEXT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_exp_wf ON expense_wf_log(expense_id);
     CREATE TABLE IF NOT EXISTS expense_payments (
       id         TEXT PRIMARY KEY,
       tenant_id  TEXT NOT NULL,

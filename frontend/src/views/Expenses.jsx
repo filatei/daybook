@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { api, scoped, ngn, today } from '../api.js';
+import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
 
@@ -249,6 +249,142 @@ function PayablesView({ onOpenExpense }) {
   );
 }
 
+// View-first detail: read the ticket, attach receipts/notes, then choose to edit.
+function ExpenseDetail({ expense, sites, onEdit, onClose }) {
+  const { toast } = useStore();
+  const [pays, setPays] = useState([]);
+  const [atts, setAtts] = useState([]);
+  const [note, setNote] = useState('');
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  let items = [];
+  try { items = expense?.items_json ? JSON.parse(expense.items_json) : []; } catch { items = []; }
+  const billed = +expense?.amount || 0;
+  const paid = +expense?.amount_paid || 0;
+  const balance = Math.max(0, Math.round((billed - paid) * 100) / 100);
+  const st = stOf({ balance, amount_paid: paid });
+  const siteName = (sites || []).find((s) => s.id === expense?.site_id)?.name;
+
+  const loadPays = useCallback(async () => {
+    try { setPays(await api(scoped(`/expenses/${expense.id}/payments`))); } catch { /* ignore */ }
+  }, [expense.id]);
+  const loadAtts = useCallback(async () => {
+    try { setAtts(await api(scoped(`/expenses/${expense.id}/attachments`))); } catch { /* ignore */ }
+  }, [expense.id]);
+  useEffect(() => { loadPays(); loadAtts(); }, [loadPays, loadAtts]);
+
+  const addAttachment = async () => {
+    if (!file && !note.trim()) { toast('Attach a receipt or write a note', 'err'); return; }
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      if (file) fd.append('file', file);
+      if (note.trim()) fd.append('note', note.trim());
+      await api(scoped(`/expenses/${expense.id}/attachments`), { method: 'POST', form: fd });
+      setNote(''); setFile(null);
+      const inp = document.getElementById('exp-att-file'); if (inp) inp.value = '';
+      loadAtts();
+      toast('Receipt saved ✓');
+    } catch (e) { toast(e.message || 'Upload failed', 'err'); }
+    setBusy(false);
+  };
+  const openReceipt = async (a, download) => {
+    try {
+      const res = await fetch(`/api/expenses/${expense.id}/attachments/${a.id}/file${download ? '?download=1&' : '?'}tenant=${expense.tenant_id || ''}`,
+        { headers: { Authorization: 'Bearer ' + getToken() } });
+      if (!res.ok) throw new Error();
+      const url = URL.createObjectURL(await res.blob());
+      if (download) { const x = document.createElement('a'); x.href = url; x.download = a.file_name || 'receipt'; x.click(); }
+      else window.open(url, '_blank');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch { toast('Could not open receipt', 'err'); }
+  };
+  const delAttachment = async (a) => {
+    if (!window.confirm('Remove this receipt/note?')) return;
+    try { await api(scoped(`/expenses/${expense.id}/attachments/${a.id}`), { method: 'DELETE' }); loadAtts(); }
+    catch (e) { toast(e.message || 'Could not remove', 'err'); }
+  };
+
+  const fileIcon = (m) => (m || '').startsWith('image/') ? '🖼️' : (m || '').includes('pdf') ? '📄' : m ? '📎' : '📝';
+
+  return (
+    <div>
+      <div className="grip" />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+        <div className="av" style={{ fontSize: 24 }}>{catIcon(expense.category)}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ margin: 0 }}>{expense.description || expense.category}</h3>
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>{expense.expense_date} · {expense.category}{expense.vendor ? ` · ${expense.vendor}` : ''}{siteName ? ` · ${siteName}` : ''}</div>
+        </div>
+        <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 9px', borderRadius: 20, background: ST[st].bg, color: ST[st].fg }}>{st}</span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, margin: '12px 0' }}>
+        {[['Billed', billed], ['Paid', paid], ['Owed', balance]].map(([k, v]) => (
+          <div key={k} style={{ flex: 1, background: 'var(--bg)', borderRadius: 10, padding: '8px 10px', textAlign: 'center' }}>
+            <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase' }}>{k}</div>
+            <div style={{ fontWeight: 800, fontSize: 15 }}>{ngn(v)}</div>
+          </div>
+        ))}
+      </div>
+
+      {items.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 4 }}>Line items</div>
+          {items.map((it, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
+              <span>{it.name}{it.qty ? ` ×${it.qty}` : ''}</span><span>{ngn(it.amount || (it.qty * it.price) || 0)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pays.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 4 }}>Payments</div>
+          {pays.map((p) => (
+            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
+              <span>{p.pay_date} · {p.method || '—'}{p.bank ? ` · ${p.bank}` : ''}</span><span style={{ fontWeight: 700 }}>{ngn(p.amount)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Footer: receipts & notes — kept on the server for dispute records */}
+      <div style={{ borderTop: '2px solid var(--line)', marginTop: 12, paddingTop: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8 }}>🧾 Receipts & notes <span style={{ color: 'var(--muted)', fontWeight: 600 }}>({atts.length})</span></div>
+        {atts.map((a) => (
+          <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+            <span style={{ fontSize: 18 }}>{fileIcon(a.mime)}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {a.file_name && <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.file_name}</div>}
+              {a.note && <div style={{ fontSize: 12, color: 'var(--muted)' }}>{a.note}</div>}
+            </div>
+            {a.has_file && <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => openReceipt(a, false)}>View</button>}
+            {a.has_file && <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => openReceipt(a, true)}>⬇</button>}
+            <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 12, color: 'var(--err)' }} onClick={() => delAttachment(a)}>×</button>
+          </div>
+        ))}
+        {atts.length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>No receipts yet — attach one below.</div>}
+
+        <input id="exp-att-file" type="file" accept="image/*,.pdf,.xls,.xlsx,.doc,.docx,.txt"
+          onChange={(e) => setFile(e.target.files[0] || null)} style={{ fontSize: 12, marginTop: 8, width: '100%' }} />
+        <textarea className="input" rows={2} placeholder="Note (e.g. paid Flexplast in cash, ref…)"
+          value={note} onChange={(e) => setNote(e.target.value)} style={{ marginTop: 6, resize: 'vertical' }} />
+        <button className="btn" style={{ width: '100%', marginTop: 6 }} onClick={addAttachment} disabled={busy}>
+          {busy ? <span className="spin" /> : '＋ Attach receipt / note'}
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
+        <button className="btn" style={{ flex: 1 }} onClick={onEdit}>✏️ Edit / pay</button>
+      </div>
+    </div>
+  );
+}
+
 export default function Expenses() {
   const { openModal, closeModal, tenant, sites } = useStore();
   const [expenses, setExpenses] = useState([]);
@@ -278,6 +414,10 @@ export default function Expenses() {
   const openForm = (exp = null) => {
     openModal(<ExpenseForm expense={exp} sites={sites} categories={categories} onSave={load} onClose={closeModal} />, { guard: true });
   };
+  // Clicking a ticket opens a read-only view first; Edit switches to the form.
+  const openDetail = (exp) => {
+    openModal(<ExpenseDetail expense={exp} sites={sites} onEdit={() => openForm(exp)} onClose={closeModal} />);
+  };
 
   const total = expenses.reduce((s, e) => s + (+e.amount || 0), 0);
 
@@ -288,7 +428,7 @@ export default function Expenses() {
         <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>
       </div>
 
-      {tab === 'payables' ? <PayablesView onOpenExpense={openForm} /> : (
+      {tab === 'payables' ? <PayablesView onOpenExpense={openDetail} /> : (
       <>
       {/* Filters */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
@@ -317,7 +457,7 @@ export default function Expenses() {
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {expenses.map((e) => (
-            <button key={e.id} onClick={() => openForm(e)}
+            <button key={e.id} onClick={() => openDetail(e)}
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>

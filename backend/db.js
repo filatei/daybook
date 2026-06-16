@@ -616,6 +616,21 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_exp_pay_expense ON expense_payments(expense_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_exp_pay_ext ON expense_payments(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
+
+    -- Receipts/notes attached to an expense ticket (files on disk + a note each).
+    CREATE TABLE IF NOT EXISTS expense_attachments (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      expense_id  TEXT NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+      note        TEXT,
+      file_name   TEXT,
+      stored_name TEXT,
+      mime        TEXT,
+      size        INTEGER,
+      uploaded_by TEXT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_exp_att ON expense_attachments(expense_id);
   `);
 
   // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool

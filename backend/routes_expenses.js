@@ -10,11 +10,27 @@
 'use strict';
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
 const { requireAuth, contextFor, accessibleTenants, requestedTenant, atLeast, siteBound } = require('./auth');
 
 const router = express.Router();
+
+// Receipt uploads → same Linode disk store as documents.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../data/uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const ATT_OK = new Set(['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.xls', '.xlsx', '.doc', '.docx', '.txt']);
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_q, _f, cb) => cb(null, UPLOAD_DIR),
+    filename: (_q, f, cb) => cb(null, `${Date.now()}-${uuid().slice(0, 8)}${path.extname(f.originalname).toLowerCase()}`),
+  }),
+  limits: { fileSize: parseInt(process.env.MAX_UPLOAD_MB || '25', 10) * 1024 * 1024 },
+  fileFilter: (_q, f, cb) => { const ok = ATT_OK.has(path.extname(f.originalname).toLowerCase()); cb(ok ? null : new Error('File type not allowed'), ok); },
+});
 
 const EXPENSE_CATS = ['DIESEL', 'SALARY', 'MAINTENANCE', 'TRANSPORT', 'UTILITIES', 'SUPPLIES', 'OTHER'];
 
@@ -275,6 +291,51 @@ router.delete('/payments/:pid', requireAuth, async (req, res) => {
     const paid = Math.max(0, Math.round(((+exp.amount_paid || 0) - (+p.amount || 0)) * 100) / 100);
     await qrun('UPDATE expenses SET amount_paid=?, status=? WHERE id=?', [paid, payStatus(+exp.amount || 0, paid), exp.id]);
   }
+  res.json({ ok: true });
+});
+
+// ── Receipts & notes on an expense ticket (kept on disk for dispute records) ──
+router.get('/:id/attachments', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const rows = await qall('SELECT id,note,file_name,mime,size,uploaded_by,created_at FROM expense_attachments WHERE expense_id=? ORDER BY created_at DESC', [req.params.id]);
+  res.json(rows.map((r) => ({ ...r, has_file: !!r.file_name })));
+});
+
+// Add a note and/or a receipt file (one entry). Secretary/Manager+.
+router.post('/:id/attachments', requireAuth, upload.single('file'), async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) { if (req.file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename)); } catch {} } return res.status(404).json({ error: 'not found' }); }
+  if (!atLeast(a.ctx.role, 'SECRETARY')) { if (req.file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename)); } catch {} } return res.status(403).json({ error: 'forbidden' }); }
+  const note = (req.body && req.body.note ? String(req.body.note) : '').trim() || null;
+  if (!req.file && !note) return res.status(400).json({ error: 'attach a receipt or write a note' });
+  const id = uuid();
+  await qrun('INSERT INTO expense_attachments (id,tenant_id,expense_id,note,file_name,stored_name,mime,size,uploaded_by) VALUES (?,?,?,?,?,?,?,?,?)',
+    [id, a.expense.tenant_id, a.expense.id, note,
+      req.file ? req.file.originalname : null, req.file ? req.file.filename : null, req.file ? req.file.mimetype : null, req.file ? req.file.size : null, req.user.id]);
+  res.status(201).json({ id });
+});
+
+// Stream/download a receipt file.
+router.get('/:id/attachments/:aid/file', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).end();
+  const att = await qone('SELECT * FROM expense_attachments WHERE id=? AND expense_id=?', [req.params.aid, req.params.id]);
+  if (!att || !att.stored_name) return res.status(404).end();
+  const p = path.join(UPLOAD_DIR, att.stored_name);
+  if (!fs.existsSync(p)) return res.status(404).end();
+  if (req.query.download === '1') return res.download(p, att.file_name || 'receipt');
+  res.sendFile(p);
+});
+
+router.delete('/:id/attachments/:aid', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!atLeast(a.ctx.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'only a manager can remove a receipt' });
+  const att = await qone('SELECT * FROM expense_attachments WHERE id=? AND expense_id=?', [req.params.aid, req.params.id]);
+  if (!att) return res.status(404).json({ error: 'not found' });
+  if (att.stored_name) { try { fs.unlinkSync(path.join(UPLOAD_DIR, att.stored_name)); } catch {} }
+  await qrun('DELETE FROM expense_attachments WHERE id=?', [att.id]);
   res.json({ ok: true });
 });
 

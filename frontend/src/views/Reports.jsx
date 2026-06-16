@@ -116,6 +116,123 @@ function ReportForm({ report, sites, onSave, onClose }) {
   );
 }
 
+// Auto-generate a daily report from the day's data — sales by cash/POS/transfer,
+// incentive, production per loader/bagger — then add incidents and submit.
+function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
+  const { toast } = useStore();
+  const [date, setDate] = useState(today());
+  const [siteId, setSiteId] = useState(sites[0]?.id || '');
+  const [gen, setGen] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [incidents, setIncidents] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const generate = async () => {
+    setLoading(true); setGen(null);
+    try {
+      const qs = new URLSearchParams({ date });
+      if (!siteBound && siteId) qs.set('site', siteId);
+      setGen(await api(scoped(`/reports/generate?${qs}`)));
+    } catch (e) { toast(e.message || 'Could not generate', 'err'); }
+    setLoading(false);
+  };
+
+  const save = async (submit) => {
+    if (!gen) return;
+    setSaving(true);
+    try {
+      await api(scoped('/reports'), { method: 'POST', body: { ...gen.prefill, notes: incidents.trim() || null, submit } });
+      toast(submit ? 'Report submitted ✓' : 'Saved as draft', 'ok');
+      onSaved(); onClose();
+    } catch (e) { toast(e.message || 'Save failed', 'err'); }
+    setSaving(false);
+  };
+
+  const s = gen?.summary;
+  const Stat = ({ k, v, accent }) => (
+    <div className="stat" style={accent ? { background: '#fffbeb' } : undefined}>
+      <div className="k" style={accent ? { color: '#92400e' } : undefined}>{k}</div>
+      <div className="v" style={{ fontSize: 18, ...(accent ? { color: '#92400e' } : {}) }}>{v}</div>
+    </div>
+  );
+
+  return (
+    <div onClick={() => !saving && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 460, margin: 0, maxHeight: '92vh', overflowY: 'auto' }}>
+        <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 4 }}>Generate daily report</div>
+        <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>Auto-built from the day's sales, production and expenses. Add incidents, then submit.</p>
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+          <div style={{ flex: 1 }}>
+            <label className="fl">Date</label>
+            <input type="date" className="input" value={date} max={today()} onChange={(e) => { setDate(e.target.value); setGen(null); }} />
+          </div>
+          {!siteBound && sites.length > 0 && (
+            <div style={{ flex: 1 }}>
+              <label className="fl">Site</label>
+              <select className="input" value={siteId} onChange={(e) => { setSiteId(e.target.value); setGen(null); }}>
+                {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+        <button className="btn" onClick={generate} disabled={loading} style={{ marginBottom: 12 }}>
+          {loading ? <span className="spin" /> : '✨ '}{gen ? 'Regenerate' : 'Generate'}
+        </button>
+
+        {gen && s && (
+          <>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{gen.site_name} · {gen.report_date}</div>
+            <div className="stat-grid" style={{ marginBottom: 8 }}>
+              <Stat k="Total Sales" v={ngn(s.totalSales)} />
+              <Stat k="Orders" v={(s.orders || 0).toLocaleString()} />
+              <Stat k="Cash" v={ngn(s.cash)} />
+              <Stat k="POS / Card" v={ngn(s.pos)} />
+              <Stat k="Transfer" v={ngn(s.transfer)} />
+              {s.incentive > 0 && <Stat k="🎁 Incentive (bonus)" v={ngn(s.incentive)} accent />}
+            </div>
+
+            {(s.totalLoaded > 0 || s.totalBagged > 0) && (
+              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — loaded {s.totalLoaded.toLocaleString()} · bagged {s.totalBagged.toLocaleString()}</div>
+                {s.loaders.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>Loaders</div>}
+                {s.loaders.map((l, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+                    <span>{l.name}</span><span style={{ fontWeight: 600 }}>{l.loaded.toLocaleString()} loaded</span>
+                  </div>
+                ))}
+                {s.baggers.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Baggers</div>}
+                {s.baggers.map((b, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+                    <span>{b.name}</span><span style={{ fontWeight: 600 }}>{b.bagged.toLocaleString()} bagged</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {(s.diesel > 0 || s.expenses > 0) && (
+              <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--muted)', margin: '8px 2px' }}>
+                <span>Diesel: <strong style={{ color: 'var(--ink)' }}>{ngn(s.diesel)}</strong></span>
+                <span>Other expenses: <strong style={{ color: 'var(--ink)' }}>{ngn(s.expenses)}</strong></span>
+              </div>
+            )}
+
+            <label className="fl">Incidents / notes</label>
+            <textarea className="input" rows={3} value={incidents} onChange={(e) => setIncidents(e.target.value)}
+              placeholder="Anything notable today — incidents, breakdowns, shortages…" />
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => save(false)} disabled={saving}>Save draft</button>
+              <button className="btn" style={{ flex: 1 }} onClick={() => save(true)} disabled={saving}>{saving ? <span className="spin" /> : 'Submit'}</button>
+            </div>
+          </>
+        )}
+        {!gen && <button className="btn btn-ghost" onClick={onClose}>Cancel</button>}
+      </div>
+    </div>
+  );
+}
+
 export default function Reports() {
   const { openModal, closeModal, sites, tenant, tenants, toast } = useStore();
   const role = useRole();
@@ -135,6 +252,7 @@ export default function Reports() {
   const [drillLoading, setDrillLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ site: '', from: '', to: '' });
+  const [genOpen, setGenOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -251,6 +369,9 @@ export default function Reports() {
         )}
       </div>
 
+      {/* End-of-day: auto-generate a daily report from the app's data */}
+      <button className="btn" style={{ marginBottom: 14 }} onClick={() => setGenOpen(true)}>✨ Generate daily report</button>
+
       {/* POS sales summary (imported Fido history + live in-app sales) */}
       {pos && pos.totals.orders > 0 && (
         <div className="card" style={{ marginBottom: 14 }}>
@@ -328,6 +449,8 @@ export default function Reports() {
       )}
 
       <button className="fab" onClick={() => openForm()}>+</button>
+
+      {genOpen && <GenerateReportModal sites={sites} siteBound={isSM} onSaved={load} onClose={() => setGenOpen(false)} />}
 
       {/* Orders drill-down — list every order for the range + site */}
       {drill !== null && (

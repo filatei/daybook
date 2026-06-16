@@ -481,6 +481,82 @@ router.post('/reports', requireAuth, needTenant('SECRETARY'), async (req, res) =
   res.status(existing ? 200 : 201).json(reportView(await qone('SELECT * FROM daily_reports WHERE id=?', [id])));
 });
 
+// Auto-assemble a daily report from the data the app already has: POS sales
+// (cash / POS / transfer / incentive), per-site totals, production (bags loaded
+// & bagged per loader/bagger), and expenses. Returns a prefilled report body the
+// user reviews, adds incidents to, and submits.
+const classifyMethod = (m) => {
+  const x = String(m || '').toUpperCase();
+  if (x === 'INCENTIVE') return 'incentive';
+  if (x.includes('CASH')) return 'cash';
+  if (x.includes('POS') || x.includes('CARD')) return 'pos';
+  return 'transfer';
+};
+router.get('/reports/generate', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : req.query.site;
+  if (!site_id) return res.status(400).json({ error: 'pick a site to generate its daily report' });
+  const site = await siteById(site_id);
+  if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
+
+  // ── Sales by payment bucket (cash / POS / transfer) + incentive ──────────────
+  let cash = 0, pos = 0, transfer = 0, incentive = 0, orders = 0;
+  if (await posEnabled(req.ctx.tenant_id)) {
+    try {
+      const sum = await sales.getSales(site.code, date);   // already excludes incentive from total/cash
+      incentive = sum.incentive || 0;
+      orders = sum.orders || 0;
+      for (const p of (sum.payments || [])) {
+        const k = classifyMethod(p.method); if (k === 'incentive') continue;
+        if (k === 'cash') cash += p.amount; else if (k === 'pos') pos += p.amount; else transfer += p.amount;
+      }
+    } catch { /* fall through to pos_sales */ }
+  }
+  if (!orders && !cash && !pos && !transfer) {
+    const rows = await qall("SELECT payment_method, COALESCE(SUM(total),0) amt, COUNT(*) n FROM pos_sales WHERE tenant_id=? AND site_id=? AND sale_date=? GROUP BY payment_method", [req.ctx.tenant_id, site_id, date]);
+    for (const r of rows) {
+      const k = classifyMethod(r.payment_method); const amt = Number(r.amt);
+      if (k === 'incentive') { incentive += amt; continue; }
+      orders += Number(r.n);
+      if (k === 'cash') cash += amt; else if (k === 'pos') pos += amt; else transfer += amt;
+    }
+  }
+  const totalSales = cash + pos + transfer;
+
+  // ── Production: bags loaded / bagged per staff at this site for the day ───────
+  const prod = await qall(
+    `SELECT st.full_name name, st.staff_type, COALESCE(p.bags_loaded,0) loaded, COALESCE(p.bags_bagged,0) bagged
+       FROM production p JOIN staff st ON st.id=p.staff_id
+      WHERE p.tenant_id=? AND p.site_id=? AND p.work_date=? ORDER BY st.full_name`,
+    [req.ctx.tenant_id, site_id, date]);
+  const loaders = prod.filter((r) => Number(r.loaded) > 0).map((r) => ({ name: r.name, loaded: Number(r.loaded) }));
+  const baggers = prod.filter((r) => Number(r.bagged) > 0).map((r) => ({ name: r.name, bagged: Number(r.bagged) }));
+  const totalLoaded = loaders.reduce((a, r) => a + r.loaded, 0);
+  const totalBagged = baggers.reduce((a, r) => a + r.bagged, 0);
+
+  // ── Expenses (and diesel split out) for the day ──────────────────────────────
+  const exp = await qone("SELECT COALESCE(SUM(amount),0) total, COALESCE(SUM(CASE WHEN category='DIESEL' THEN amount ELSE 0 END),0) diesel FROM expenses WHERE tenant_id=? AND site_id=? AND expense_date=?", [req.ctx.tenant_id, site_id, date]);
+  const diesel = Number(exp.diesel) || 0;
+  const otherExp = (Number(exp.total) || 0) - diesel;
+
+  const production = { totalLoaded, totalBagged, loaders, baggers, incentive };
+  res.json({
+    report_date: date, site_id, site_name: site.name,
+    summary: { cash, pos, transfer, incentive, totalSales, orders, totalLoaded, totalBagged, loaders, baggers, diesel, expenses: otherExp },
+    // Prefilled body matching POST /reports (total_sales derives from sales lines).
+    prefill: {
+      report_date: date, site_id,
+      total_cash: cash, total_deposit: pos + transfer, diesel, expenses: otherExp,
+      sales: [
+        { label: 'Cash', amount: cash },
+        { label: 'POS / Card', amount: pos },
+        { label: 'Transfer', amount: transfer },
+      ].filter((l) => l.amount > 0 || true),
+      production,
+    },
+  });
+});
+
 router.post('/reports/:id/email', requireAuth, async (req, res) => {
   const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });

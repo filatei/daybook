@@ -33,10 +33,15 @@ router.get('/items', requireAuth, async (req, res) => {
     ? '(SELECT COALESCE(SUM(qty),0) FROM stock_moves m WHERE m.item_id=si.id AND m.site_id=?)'
     : '(SELECT COALESCE(SUM(qty),0) FROM stock_moves m WHERE m.item_id=si.id)';
   const args = siteBound(c) ? [c.site_id, c.tenant_id] : [c.tenant_id];
+  // last_cost = most recent receive unit cost (for stock valuation).
+  const lastCost = "(SELECT m2.unit_cost FROM stock_moves m2 WHERE m2.item_id=si.id AND m2.unit_cost>0 ORDER BY m2.move_date DESC, m2.created_at DESC LIMIT 1)";
   const rows = await qall(
-    `SELECT si.*, ${onHand} AS on_hand FROM stock_items si
+    `SELECT si.*, ${onHand} AS on_hand, ${lastCost} AS last_cost FROM stock_items si
       WHERE si.tenant_id=? AND COALESCE(si.status,'ACTIVE')<>'INACTIVE' ORDER BY si.name`, args);
-  res.json(rows.map((r) => ({ ...r, on_hand: Number(r.on_hand), low: r.reorder_level > 0 && Number(r.on_hand) <= Number(r.reorder_level) })));
+  res.json(rows.map((r) => {
+    const on_hand = Number(r.on_hand), last_cost = Number(r.last_cost) || 0;
+    return { ...r, on_hand, last_cost, value: Math.round(on_hand * last_cost * 100) / 100, low: r.reorder_level > 0 && on_hand <= Number(r.reorder_level) };
+  }));
 });
 
 router.get('/items/suggest', requireAuth, async (req, res) => {

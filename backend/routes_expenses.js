@@ -77,9 +77,27 @@ router.get('/summary', requireAuth, async (req, res) => {
   if (!c) return res.status(403).json({ error: 'forbidden' });
 
   const { from, to, site } = req.query;
-  const where = ['e.tenant_id=?'], args = [tid];
-  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
-  else if (site) { where.push('e.site_id=?'); args.push(site); }
+  const sw = ['e.tenant_id=?'], sargs = [tid];
+  if (siteBound(c)) { sw.push('e.site_id=?'); sargs.push(c.site_id); }
+  else if (site) { sw.push('e.site_id=?'); sargs.push(site); }
+
+  // Cash basis = expense PAYMENTS made in the period (when money left). Accrual
+  // (default) = expense tickets dated in the period (when the cost was incurred).
+  if (req.query.basis === 'cash') {
+    const where = [...sw], args = [...sargs];
+    if (from) { where.push('p.pay_date>=?'); args.push(from); }
+    if (to)   { where.push('p.pay_date<=?'); args.push(to); }
+    const F = `FROM expense_payments p JOIN expenses e ON e.id=p.expense_id WHERE ${where.join(' AND ')}`;
+    const [totals, byCategory, bySite, byDay] = await Promise.all([
+      qone(`SELECT COALESCE(SUM(p.amount),0) total, COUNT(*) count ${F}`, args),
+      qall(`SELECT e.category, COALESCE(SUM(p.amount),0) total ${F} GROUP BY e.category ORDER BY total DESC`, args),
+      qall(`SELECT s.name site, COALESCE(SUM(p.amount),0) total ${F.replace('JOIN expenses e ON e.id=p.expense_id', 'JOIN expenses e ON e.id=p.expense_id JOIN sites s ON s.id=e.site_id')} GROUP BY s.id, s.name ORDER BY total DESC`, args),
+      qall(`SELECT p.pay_date day, COALESCE(SUM(p.amount),0) total ${F} GROUP BY p.pay_date ORDER BY p.pay_date DESC LIMIT 30`, args),
+    ]);
+    return res.json({ basis: 'cash', totals: { ...totals, count: parseInt(totals.count, 10) }, byCategory, bySite, byDay: byDay.reverse() });
+  }
+
+  const where = [...sw], args = [...sargs];
   if (from) { where.push('e.expense_date>=?'); args.push(from); }
   if (to)   { where.push('e.expense_date<=?'); args.push(to); }
   const W = 'WHERE ' + where.join(' AND ');
@@ -90,7 +108,7 @@ router.get('/summary', requireAuth, async (req, res) => {
     qall(`SELECT s.name site, COALESCE(SUM(e.amount),0) total FROM expenses e JOIN sites s ON s.id=e.site_id ${W} GROUP BY s.id, s.name ORDER BY total DESC`, args),
     qall(`SELECT expense_date day, COALESCE(SUM(amount),0) total FROM expenses e ${W} GROUP BY expense_date ORDER BY expense_date DESC LIMIT 30`, args),
   ]);
-  res.json({ totals: { ...totals, count: parseInt(totals.count, 10) }, byCategory, bySite, byDay: byDay.reverse() });
+  res.json({ basis: 'accrual', totals: { ...totals, count: parseInt(totals.count, 10) }, byCategory, bySite, byDay: byDay.reverse() });
 });
 
 // ── GET /expenses/categories — categories actually used (incl. migrated Fido) + defaults

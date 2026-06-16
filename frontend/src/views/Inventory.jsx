@@ -173,6 +173,7 @@ export default function Inventory() {
     return !s || (i.name || '').toLowerCase().includes(s) || (i.category || '').toLowerCase().includes(s);
   }), [items, q, tab]);
   const lowCount = (items || []).filter((i) => i.low).length;
+  const totalValue = (items || []).reduce((a, i) => a + (Number(i.value) || 0), 0);
 
   const openItem = (it) => openModal(<ItemDetail item={it} sites={sites} siteBound={siteBound} canManage={canManage} onChanged={load} onClose={closeModal} />);
   const openNew = () => openModal(<ItemForm onSaved={load} onClose={closeModal} />);
@@ -187,6 +188,12 @@ export default function Inventory() {
         <button className={`seg-b${tab === 'all' ? ' on' : ''}`} onClick={() => setTab('all')}>📦 All items</button>
         <button className={`seg-b${tab === 'low' ? ' on' : ''}`} onClick={() => setTab('low')}>⚠️ Low stock{lowCount ? ` (${lowCount})` : ''}</button>
       </div>
+      {items && items.length > 0 && totalValue > 0 && (
+        <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', marginBottom: 12 }}>
+          <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Stock value{tab === 'low' ? ' (low items)' : ''}</span>
+          <strong style={{ fontSize: 18 }}>{ngn(shown.reduce((a, i) => a + (Number(i.value) || 0), 0))}</strong>
+        </div>
+      )}
       {items && items.length > 0 && (
         <input className="input" style={{ marginBottom: 12 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder="🔍 Search items…" />
       )}
@@ -204,8 +211,8 @@ export default function Inventory() {
                     <div style={{ fontSize: 12, color: 'var(--muted)' }}>{i.category ? `${i.category} · ` : ''}{i.unit || 'unit'}{i.reorder_level > 0 ? ` · reorder ≤ ${fmtNum(i.reorder_level)}` : ''}</div>
                   </div>
                   <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    <div style={{ fontWeight: 800, color: i.low ? 'var(--err)' : 'var(--ink)' }}>{fmtNum(i.on_hand)}</div>
-                    <div style={{ fontSize: 11, color: 'var(--muted)' }}>{i.unit || ''} ›</div>
+                    <div style={{ fontWeight: 800, color: i.low ? 'var(--err)' : 'var(--ink)' }}>{fmtNum(i.on_hand)} <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--muted)' }}>{i.unit || ''}</span></div>
+                    <div style={{ fontSize: 11, color: 'var(--muted)' }}>{Number(i.value) > 0 ? `${ngn(i.value)} ` : ''}›</div>
                   </div>
                 </button>
               ))}

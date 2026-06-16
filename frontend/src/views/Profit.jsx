@@ -20,6 +20,7 @@ export default function Profit() {
   const crossSite = role && atLeast(role, 'SNR_ACCOUNTANT');
   const [rangeIdx, setRangeIdx] = useState(2);   // default This month
   const [site, setSite] = useState('');
+  const [basis, setBasis] = useState('accrual');  // accrual | cash
   const [pos, setPos] = useState(null);
   const [exp, setExp] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -28,15 +29,16 @@ export default function Profit() {
     setLoading(true);
     const from = daysAgo(RANGES[rangeIdx].days), to = today();
     const q = new URLSearchParams({ from, to }); if (site) q.set('site', site);
+    const eq = new URLSearchParams(q); if (basis === 'cash') eq.set('basis', 'cash');
     try {
       const [p, e] = await Promise.all([
         api(scoped(`/pos/range?${q}`)).catch(() => null),
-        api(scoped(`/expenses/summary?${q}`)).catch(() => null),
+        api(scoped(`/expenses/summary?${eq}`)).catch(() => null),
       ]);
       setPos(p); setExp(e);
     } catch { setPos(null); setExp(null); }
     setLoading(false);
-  }, [tenant, rangeIdx, site]);
+  }, [tenant, rangeIdx, site, basis]);
   useEffect(() => { load(); }, [load]);
 
   const revenue = pos?.totals?.sales || 0;
@@ -61,11 +63,17 @@ export default function Profit() {
       <div className="seg" style={{ marginBottom: 10 }}>
         {RANGES.map((r, i) => <button key={r.label} className={`seg-b${rangeIdx === i ? ' on' : ''}`} onClick={() => setRangeIdx(i)}>{r.label}</button>)}
       </div>
-      {crossSite && sites.length > 1 && (
-        <select className="input" style={{ marginBottom: 12 }} value={site} onChange={(e) => setSite(e.target.value)}>
-          <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-      )}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+        {crossSite && sites.length > 1 && (
+          <select className="input" style={{ flex: '1 1 140px' }} value={site} onChange={(e) => setSite(e.target.value)}>
+            <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        )}
+        <div className="seg" style={{ flex: '1 1 200px' }}>
+          <button className={`seg-b${basis === 'accrual' ? ' on' : ''}`} onClick={() => setBasis('accrual')} title="Costs when incurred (ticket date)">Accrual</button>
+          <button className={`seg-b${basis === 'cash' ? ' on' : ''}`} onClick={() => setBasis('cash')} title="Costs when actually paid">Cash</button>
+        </div>
+      </div>
 
       {loading ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} style={{ height: 64 }} />)}</> : (
         <>
@@ -77,7 +85,7 @@ export default function Profit() {
 
           <div className="stat-grid" style={{ marginBottom: 12 }}>
             <div className="stat accent"><div className="k">Revenue (sales)</div><div className="v">{ngn(revenue)}</div></div>
-            <div className="stat"><div className="k">Expenses</div><div className="v">{ngn(costs)}</div></div>
+            <div className="stat"><div className="k">{basis === 'cash' ? 'Expenses paid' : 'Expenses'}</div><div className="v">{ngn(costs)}</div></div>
           </div>
 
           {/* Revenue → expenses → profit waterfall */}
@@ -116,7 +124,7 @@ export default function Profit() {
             </div>
           )}
 
-          <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 10 }}>Revenue = POS sales (excl. incentive). Expenses = all expense tickets in the period (the full amount, whether or not paid yet). Salaries appear here when booked as expenses.</p>
+          <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 10 }}>Revenue = POS sales (excl. incentive). {basis === 'cash' ? 'Cash basis: expenses = payments actually made in the period.' : 'Accrual basis: expenses = expense tickets dated in the period (full amount, whether paid yet or not).'} Salaries appear here when booked as expenses.</p>
         </>
       )}
     </div>

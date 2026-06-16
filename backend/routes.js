@@ -278,16 +278,16 @@ router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
         [uuid(), existing.id, req.ctx.tenant_id, role, memberSite]);
     } catch { return res.status(409).json({ error: 'this user is already a member' }); }
     await audit(req.ctx.tenant_id, req.user.id, 'ADD_MEMBER', 'membership', existing.id, { email, role });
-    emailInvite(req.ctx.tenant_id, req.user.id, lower, role);   // notify (fire-and-forget)
-    return res.status(201).json({ added: true, email });
+    const sent = await emailInvite(req.ctx.tenant_id, req.user.id, lower, role);   // await → report status
+    return res.status(201).json({ added: true, email, emailed: !!(sent && sent.ok), email_error: sent && sent.ok ? undefined : (sent && sent.error) });
   }
   try {
     await qrun('INSERT INTO invites (id,tenant_id,email,role,site_id,invited_by) VALUES (?,?,?,?,?,?) ON CONFLICT (tenant_id,email) DO NOTHING',
       [uuid(), req.ctx.tenant_id, lower, role, memberSite, req.user.id]);
   } catch { return res.status(409).json({ error: 'already invited' }); }
   await audit(req.ctx.tenant_id, req.user.id, 'INVITE', 'invite', lower, { role });
-  emailInvite(req.ctx.tenant_id, req.user.id, lower, role);   // notify (fire-and-forget)
-  res.status(201).json({ invited: true, email: lower });
+  const sent = await emailInvite(req.ctx.tenant_id, req.user.id, lower, role);
+  res.status(201).json({ invited: true, email: lower, emailed: !!(sent && sent.ok), email_error: sent && sent.ok ? undefined : (sent && sent.error) });
 });
 
 // My activity & sent messages — powers the avatar "Activity" panel.

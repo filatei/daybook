@@ -341,7 +341,9 @@ export default function Admin() {
 
   const inviteMember = async (email, inviteRole, site_id) => {
     const r = await api(scoped('/members'), { method: 'POST', body: { email, role: inviteRole, site_id } });
-    toast(r.added ? `${email} added ✓` : `${email} added — auto-joins when they sign in`, 'ok');
+    const base = r.added ? `${email} added` : `${email} invited — joins when they sign in`;
+    if (r.emailed) toast(`${base} · email sent ✓`, 'ok');
+    else toast(`${base}, but the email didn't send${r.email_error ? ': ' + r.email_error : ''} — test SMTP in Settings`, 'err', 6000);
     await loadMembers();
   };
   const patchMember = async (id, body) => { await api(scoped(`/members/${id}`), { method: 'PATCH', body }); toast('Member updated ✓', 'ok'); await loadMembers(); };

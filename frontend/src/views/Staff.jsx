@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { api, scoped, today, getToken } from '../api.js';
-import { useStore, useRole, atLeast } from '../store.jsx';
+import { useStore, useRole, atLeast, useActiveTenant } from '../store.jsx';
 import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/useFaceLiveness.js';
+import { brandFor, printBadges } from '../badge.js';
 import BarcodeScanner from '../components/BarcodeScanner.jsx';
 
 // ── Badge clock-in/out — scan a staff badge to toggle attendance ──────────────
@@ -459,6 +460,8 @@ export default function Staff() {
   const [siteFilter, setSiteFilter] = useState('');
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState('clock');   // clock | report
+  const active = useActiveTenant();
+  const printBadge = (s) => printBadges([s], brandFor(active), (id) => sites.find((x) => x.id === id)?.name || '');
   const [showAdd, setShowAdd] = useState(false);
   const role = useRole();
   const canManage = role && atLeast(role, 'SECRETARY');
@@ -563,6 +566,10 @@ export default function Staff() {
                     style={{ border: 'none', background: s.face_enrolled ? '#f1f5f9' : '#dcfce7', color: s.face_enrolled ? 'var(--muted)' : '#166534', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}>
                     {s.face_enrolled ? '🙂 Re-enrol' : '📸 Enrol'}
                   </button>
+                )}
+                {canManage && s.badge_code && (
+                  <button onClick={() => printBadge(s)} title="Print this staff's badge"
+                    style={{ border: 'none', background: '#eff6ff', color: '#1e40af', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>🪪</button>
                 )}
                 <button onClick={() => openClock(s)} title="Clock in / out" style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: st.color, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
                   <span style={{ fontSize: 18 }}>{st.icon}</span>

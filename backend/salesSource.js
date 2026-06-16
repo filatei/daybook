@@ -254,9 +254,11 @@ async function incentiveTotal({ from, to, site, sites }) {
   const db = await getDb();
   const start = new Date(`${from}T00:00:00.000${TZ()}`);
   const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
-  const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS }, ...IS_INCENTIVE };
-  if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
-  else if (site) match.site = siteRegex(site);
+  const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
+  // IS_INCENTIVE is itself an $or — combine with the sites $or via $and so the
+  // incentive filter is never clobbered (otherwise it sums ALL sales).
+  if (Array.isArray(sites) && sites.length) match.$and = [{ $or: IS_INCENTIVE.$or }, { $or: sites.map((c) => ({ site: siteRegex(c) })) }];
+  else { Object.assign(match, IS_INCENTIVE); if (site) match.site = siteRegex(site); }
   const [r] = await db.collection('fidoorders').aggregate([
     { $match: match }, { $group: { _id: null, amount: { $sum: num('$txn_amount') }, orders: { $sum: 1 } } },
   ]).toArray();

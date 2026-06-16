@@ -416,6 +416,30 @@ router.delete('/reports/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Auto-email a submitted daily report (Fido & Fiafia only) to its creator and
+// dailyreports@torama.money. Fire-and-forget; logs success/failure to email_log.
+const REPORTS_INBOX = process.env.REPORTS_INBOX || 'dailyreports@torama.money';
+async function emailReportOnSubmit(tenant_id, reportId, site, user) {
+  try {
+    const tenant = await tenantById(tenant_id);
+    const isFidoFiafia = !!tenant && (tenant.pos_source || ['fido', 'fiafia'].includes(String(tenant.slug || '').toLowerCase()));
+    if (!isFidoFiafia) return;
+    const report = await qone('SELECT * FROM daily_reports WHERE id=?', [reportId]);
+    if (!report) return;
+    const to = [...new Set([user && user.email, REPORTS_INBOX].filter(Boolean))];
+    if (!to.length) return;
+    const docs = (await qall('SELECT * FROM documents WHERE report_id=?', [reportId]))
+      .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));
+    const sent = await sendDailyReport({ tenant, site, report, to, attachments: docs });
+    await qrun('UPDATE daily_reports SET emailed_at=? WHERE id=?', [nowS(), reportId]).catch(() => {});
+    await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)',
+      [uuid(), tenant_id, reportId, to.join(','), sent.subject, 'SENT']);
+  } catch (e) {
+    await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?,?)',
+      [uuid(), tenant_id, reportId, REPORTS_INBOX, 'Daily report', 'FAILED', e.message]).catch(() => {});
+  }
+}
+
 router.post('/reports', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   const b = req.body || {};
   const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site_id;
@@ -447,6 +471,8 @@ router.post('/reports', requireAuth, needTenant('SECRETARY'), async (req, res) =
     const uids = (await tenantUserIds(req.ctx.tenant_id, 'GENERAL_MANAGER')).filter((u) => u !== req.user.id);
     await notify(req.ctx.tenant_id, uids,
       { type: 'report', title: `Report submitted — ${site.name}`, body: `${b.report_date} · sales ₦${(totals.total_sales || 0).toLocaleString()}`, link: 'reports' });
+    // Fido & Fiafia: email the submitted report to the creator + dailyreports@torama.money.
+    emailReportOnSubmit(req.ctx.tenant_id, id, site, req.user).catch(() => {});
   }
   res.status(existing ? 200 : 201).json(reportView(await qone('SELECT * FROM daily_reports WHERE id=?', [id])));
 });

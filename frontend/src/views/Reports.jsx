@@ -121,11 +121,12 @@ function ReportForm({ report, sites, onSave, onClose }) {
 function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
   const { toast } = useStore();
   const [date, setDate] = useState(today());
-  const [siteId, setSiteId] = useState(sites[0]?.id || '');
+  const [siteId, setSiteId] = useState(siteBound ? '' : 'ALL');   // default to the global roll-up
   const [gen, setGen] = useState(null);
   const [loading, setLoading] = useState(false);
   const [incidents, setIncidents] = useState('');
   const [saving, setSaving] = useState(false);
+  const [emailing, setEmailing] = useState(false);
 
   const generate = async () => {
     setLoading(true); setGen(null);
@@ -135,6 +136,15 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
       setGen(await api(scoped(`/reports/generate?${qs}`)));
     } catch (e) { toast(e.message || 'Could not generate', 'err'); }
     setLoading(false);
+  };
+
+  const emailReport = async () => {
+    setEmailing(true);
+    try {
+      const r = await api(scoped('/reports/generate/email'), { method: 'POST', body: { date, site: siteId, incidents: incidents.trim() } });
+      toast(`Report emailed ✓ → ${(r.to || []).join(', ')}`, 'ok');
+    } catch (e) { toast(e.message || 'Email failed', 'err'); }
+    setEmailing(false);
   };
 
   const save = async (submit) => {
@@ -171,6 +181,7 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
             <div style={{ flex: 1 }}>
               <label className="fl">Site</label>
               <select className="input" value={siteId} onChange={(e) => { setSiteId(e.target.value); setGen(null); }}>
+                <option value="ALL">🌍 All sites</option>
                 {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
               </select>
             </div>
@@ -217,14 +228,35 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
               </div>
             )}
 
+            {/* Sales distribution by site — the global roll-up */}
+            {gen.scope === 'ALL' && (gen.bySite || []).some((r) => r.totalSales > 0 || r.incentive > 0) && (
+              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales distribution</div>
+                {(gen.bySite || []).filter((r) => r.totalSales > 0 || r.incentive > 0).sort((a, b) => b.totalSales - a.totalSales).map((r) => (
+                  <div key={r.site_id || r.site_name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderTop: '1px solid var(--line)' }}>
+                    <span>{r.site_name}</span>
+                    <span style={{ fontWeight: 600 }}>{ngn(r.totalSales)}{r.incentive > 0 ? ` · 🎁${ngn(r.incentive)}` : ''}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <label className="fl">Incidents / notes</label>
             <textarea className="input" rows={3} value={incidents} onChange={(e) => setIncidents(e.target.value)}
               placeholder="Anything notable today — incidents, breakdowns, shortages…" />
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => save(false)} disabled={saving}>Save draft</button>
-              <button className="btn" style={{ flex: 1 }} onClick={() => save(true)} disabled={saving}>{saving ? <span className="spin" /> : 'Submit'}</button>
-            </div>
+            {gen.scope === 'ALL' ? (
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
+                <button className="btn" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <span className="spin" /> : '✉️ Email report'}</button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => save(false)} disabled={saving}>Save draft</button>
+                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <span className="spin" /> : '✉️ Email'}</button>
+                <button className="btn" style={{ flex: '1 1 100%' }} onClick={() => save(true)} disabled={saving}>{saving ? <span className="spin" /> : 'Submit'}</button>
+              </div>
+            )}
           </>
         )}
         {!gen && <button className="btn btn-ghost" onClick={onClose}>Cancel</button>}

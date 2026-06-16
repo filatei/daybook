@@ -218,6 +218,60 @@ async function sendExpenseNotice({ to, tenantName, brand = '#2563eb', expense = 
   return { messageId: info.messageId, subject, to };
 }
 
+/**
+ * Email a generated daily report (single site OR the all-sites roll-up).
+ * @param opts { tenant, date, report:{scope,site_name,summary,bySite}, incidents, to }
+ */
+async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
+  const brand = (tenant && tenant.brand_color) || '#2563eb';
+  const name = (tenant && tenant.name) || 'Company';
+  const s = report.summary || {};
+  const isAll = report.scope === 'ALL';
+  const subject = `Daily report — ${name} · ${isAll ? 'All sites' : report.site_name} · ${date}`;
+  const balance = (s.totalSales || 0) - (s.diesel || 0);
+  const row = (k, v, bold) => `<tr><td style="padding:5px 10px;border-bottom:1px solid #eee">${esc(k)}</td><td style="padding:5px 10px;border-bottom:1px solid #eee;text-align:right;${bold ? 'font-weight:800' : ''}">${v}</td></tr>`;
+  const dist = (report.bySite || []).filter((r) => (r.totalSales || 0) > 0 || (r.incentive || 0) > 0)
+    .sort((a, b) => (b.totalSales || 0) - (a.totalSales || 0))
+    .map((r) => `<tr>
+      <td style="padding:5px 10px;border-bottom:1px solid #f0f0f0">${esc(r.site_name)}</td>
+      <td style="padding:5px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${ngn(r.totalSales)}</td>
+      <td style="padding:5px 10px;border-bottom:1px solid #f0f0f0;text-align:right;color:#64748b">${ngn(r.cash)}</td>
+      <td style="padding:5px 10px;border-bottom:1px solid #f0f0f0;text-align:right;color:#64748b">${ngn(r.pos + r.transfer)}</td>
+    </tr>`).join('');
+  const html = `
+  <div style="font-family:Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;color:#1f2937">
+    <div style="background:${brand};color:#fff;padding:20px 24px;border-radius:10px 10px 0 0">
+      <div style="font-size:13px;letter-spacing:2px;opacity:.85">DAYBOOK · DAILY REPORT</div>
+      <div style="font-size:22px;font-weight:800">${esc(isAll ? 'All sites' : report.site_name)}</div>
+      <div style="opacity:.9;margin-top:2px">${esc(name)} · ${esc(date)}</div>
+    </div>
+    <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 10px 10px;padding:22px">
+      <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:14px">
+        ${row('Total sales', ngn(s.totalSales), true)}
+        ${row('Cash', ngn(s.cash))}
+        ${row('POS / Card', ngn(s.pos))}
+        ${row('Transfer', ngn(s.transfer))}
+        ${s.incentive ? row('Incentive (bonus)', ngn(s.incentive)) : ''}
+        ${row('Diesel', '(' + ngn(s.diesel) + ')')}
+        ${row('Other expenses', '(' + ngn(s.expenses) + ')')}
+        ${row('Balance (sales − diesel)', ngn(balance), true)}
+        ${row('Orders', (s.orders || 0).toLocaleString())}
+        ${(s.totalLoaded || s.totalBagged) ? row('Production — loaded / bagged', `${(s.totalLoaded || 0).toLocaleString()} / ${(s.totalBagged || 0).toLocaleString()}`) : ''}
+      </table>
+      ${dist ? `<div style="font-weight:800;margin:6px 0">Sales distribution</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Site</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sales</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Cash</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Transfer/POS</th></tr></thead>
+        <tbody>${dist}</tbody>
+      </table>` : ''}
+      ${incidents ? `<div style="font-weight:800;margin:6px 0">Incidents / notes</div>
+        <div style="white-space:pre-wrap;font-size:13px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:10px 12px">${esc(incidents)}</div>` : ''}
+      <p style="color:#9ca3af;font-size:12px;margin-top:18px">Auto-generated from Daybook sales, production and expenses for ${esc(date)}.</p>
+    </div>
+  </div>`;
+  const info = await getTransporter().sendMail({ from: FROM, to, subject, html });
+  return { messageId: info.messageId, subject, to };
+}
+
 async function verifyConnection() {
   try { await getTransporter().verify(); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
@@ -237,4 +291,4 @@ async function sendTest({ to }) {
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, verifyConnection, sendTest, FROM };
+module.exports = { sendDailyReport, sendGeneratedReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, verifyConnection, sendTest, FROM };

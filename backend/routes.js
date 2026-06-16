@@ -14,7 +14,7 @@ const {
   verifyGoogleToken, signSession, requireAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, siteBound, GOOGLE_CLIENT_ID,
 } = require('./auth');
-const { sendDailyReport, sendInvite, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
+const { sendDailyReport, sendGeneratedReport, sendInvite, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
 
 const ROLE_LABELS = {
   GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
@@ -426,7 +426,9 @@ router.get('/reports', requireAuth, async (req, res) => {
   res.json((await qall(sql, args)).map(reportView));
 });
 
-router.get('/reports/:id', requireAuth, async (req, res) => {
+router.get('/reports/:id', requireAuth, async (req, res, next) => {
+  // '/reports/generate' is a real route registered later — don't treat it as an id.
+  if (req.params.id === 'generate') return next();
   const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, r.tenant_id);
@@ -517,28 +519,21 @@ const classifyMethod = (m) => {
   if (x.includes('POS') || x.includes('CARD')) return 'pos';
   return 'transfer';
 };
-router.get('/reports/generate', requireAuth, needTenant('SECRETARY'), async (req, res) => {
-  const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
-  const site_id = siteBound(req.ctx) ? req.ctx.site_id : req.query.site;
-  if (!site_id) return res.status(400).json({ error: 'pick a site to generate its daily report' });
-  const site = await siteById(site_id);
-  if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
-
-  // ── Sales by payment bucket (cash / POS / transfer) + incentive ──────────────
+// One site's sales split into cash / POS / transfer / incentive for a day.
+async function siteSalesBuckets(ctx, site, date) {
   let cash = 0, pos = 0, transfer = 0, incentive = 0, orders = 0;
-  if (await posEnabled(req.ctx.tenant_id)) {
+  if (await posEnabled(ctx.tenant_id)) {
     try {
-      const sum = await sales.getSales(site.code, date);   // already excludes incentive from total/cash
-      incentive = sum.incentive || 0;
-      orders = sum.orders || 0;
+      const sum = await sales.getSales(site.code, date);   // excludes incentive from total/cash
+      incentive = sum.incentive || 0; orders = sum.orders || 0;
       for (const p of (sum.payments || [])) {
         const k = classifyMethod(p.method); if (k === 'incentive') continue;
         if (k === 'cash') cash += p.amount; else if (k === 'pos') pos += p.amount; else transfer += p.amount;
       }
-    } catch { /* fall through to pos_sales */ }
+    } catch { /* fall through */ }
   }
   if (!orders && !cash && !pos && !transfer) {
-    const rows = await qall("SELECT payment_method, COALESCE(SUM(total),0) amt, COUNT(*) n FROM pos_sales WHERE tenant_id=? AND site_id=? AND sale_date=? GROUP BY payment_method", [req.ctx.tenant_id, site_id, date]);
+    const rows = await qall("SELECT payment_method, COALESCE(SUM(total),0) amt, COUNT(*) n FROM pos_sales WHERE tenant_id=? AND site_id=? AND sale_date=? GROUP BY payment_method", [ctx.tenant_id, site.id, date]);
     for (const r of rows) {
       const k = classifyMethod(r.payment_method); const amt = Number(r.amt);
       if (k === 'incentive') { incentive += amt; continue; }
@@ -546,40 +541,95 @@ router.get('/reports/generate', requireAuth, needTenant('SECRETARY'), async (req
       if (k === 'cash') cash += amt; else if (k === 'pos') pos += amt; else transfer += amt;
     }
   }
-  const totalSales = cash + pos + transfer;
+  return { cash, pos, transfer, incentive, orders, totalSales: cash + pos + transfer };
+}
 
-  // ── Production: bags loaded / bagged per staff at this site for the day ───────
+// Production + expenses for one site/day.
+async function siteProdExp(ctx, site, date) {
   const prod = await qall(
-    `SELECT st.full_name name, st.staff_type, COALESCE(p.bags_loaded,0) loaded, COALESCE(p.bags_bagged,0) bagged
+    `SELECT st.full_name name, COALESCE(p.bags_loaded,0) loaded, COALESCE(p.bags_bagged,0) bagged
        FROM production p JOIN staff st ON st.id=p.staff_id
       WHERE p.tenant_id=? AND p.site_id=? AND p.work_date=? ORDER BY st.full_name`,
-    [req.ctx.tenant_id, site_id, date]);
+    [ctx.tenant_id, site.id, date]);
   const loaders = prod.filter((r) => Number(r.loaded) > 0).map((r) => ({ name: r.name, loaded: Number(r.loaded) }));
   const baggers = prod.filter((r) => Number(r.bagged) > 0).map((r) => ({ name: r.name, bagged: Number(r.bagged) }));
   const totalLoaded = loaders.reduce((a, r) => a + r.loaded, 0);
   const totalBagged = baggers.reduce((a, r) => a + r.bagged, 0);
-
-  // ── Expenses (and diesel split out) for the day ──────────────────────────────
-  const exp = await qone("SELECT COALESCE(SUM(amount),0) total, COALESCE(SUM(CASE WHEN category='DIESEL' THEN amount ELSE 0 END),0) diesel FROM expenses WHERE tenant_id=? AND site_id=? AND expense_date=?", [req.ctx.tenant_id, site_id, date]);
+  const exp = await qone("SELECT COALESCE(SUM(amount),0) total, COALESCE(SUM(CASE WHEN category='DIESEL' THEN amount ELSE 0 END),0) diesel FROM expenses WHERE tenant_id=? AND site_id=? AND expense_date=?", [ctx.tenant_id, site.id, date]);
   const diesel = Number(exp.diesel) || 0;
-  const otherExp = (Number(exp.total) || 0) - diesel;
+  return { loaders, baggers, totalLoaded, totalBagged, diesel, expenses: (Number(exp.total) || 0) - diesel };
+}
 
-  const production = { totalLoaded, totalBagged, loaders, baggers, incentive };
-  res.json({
-    report_date: date, site_id, site_name: site.name,
-    summary: { cash, pos, transfer, incentive, totalSales, orders, totalLoaded, totalBagged, loaders, baggers, diesel, expenses: otherExp },
-    // Prefilled body matching POST /reports (total_sales derives from sales lines).
-    prefill: {
-      report_date: date, site_id,
-      total_cash: cash, total_deposit: pos + transfer, diesel, expenses: otherExp,
-      sales: [
-        { label: 'Cash', amount: cash },
-        { label: 'POS / Card', amount: pos },
-        { label: 'Transfer', amount: transfer },
-      ].filter((l) => l.amount > 0 || true),
-      production,
+// Build the full generated report (one site, or all sites aggregated).
+async function buildGeneratedReport(ctx, date, siteArg) {
+  const wantAll = !siteBound(ctx) && (!siteArg || String(siteArg).toUpperCase() === 'ALL');
+  let sites;
+  if (siteBound(ctx)) { const s = await siteById(ctx.site_id); sites = s ? [s] : []; }
+  else if (wantAll) sites = await qall('SELECT * FROM sites WHERE tenant_id=? ORDER BY name', [ctx.tenant_id]);
+  else { const s = await siteById(siteArg); if (!s || s.tenant_id !== ctx.tenant_id) return { error: 'invalid site' }; sites = [s]; }
+  if (!sites.length) return { error: 'no sites to report on' };
+
+  const bySite = [];
+  const tot = { cash: 0, pos: 0, transfer: 0, incentive: 0, orders: 0, totalLoaded: 0, totalBagged: 0, diesel: 0, expenses: 0 };
+  for (const site of sites) {
+    const b = await siteSalesBuckets(ctx, site, date);
+    const pe = await siteProdExp(ctx, site, date);
+    bySite.push({ site_id: site.id, site_name: site.name, code: site.code,
+      cash: b.cash, pos: b.pos, transfer: b.transfer, incentive: b.incentive, orders: b.orders, totalSales: b.totalSales,
+      totalLoaded: pe.totalLoaded, totalBagged: pe.totalBagged, diesel: pe.diesel, expenses: pe.expenses,
+      loaders: pe.loaders, baggers: pe.baggers });
+    tot.cash += b.cash; tot.pos += b.pos; tot.transfer += b.transfer; tot.incentive += b.incentive; tot.orders += b.orders;
+    tot.totalLoaded += pe.totalLoaded; tot.totalBagged += pe.totalBagged; tot.diesel += pe.diesel; tot.expenses += pe.expenses;
+  }
+  const totalSales = tot.cash + tot.pos + tot.transfer;
+  const single = !wantAll && bySite.length === 1 ? bySite[0] : null;
+  return {
+    report_date: date, scope: wantAll ? 'ALL' : 'SITE',
+    site_id: single ? single.site_id : null,
+    site_name: single ? single.site_name : 'All sites',
+    summary: {
+      cash: tot.cash, pos: tot.pos, transfer: tot.transfer, incentive: tot.incentive, totalSales,
+      orders: tot.orders, totalLoaded: tot.totalLoaded, totalBagged: tot.totalBagged,
+      diesel: tot.diesel, expenses: tot.expenses,
+      loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
     },
-  });
+    bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
+    // Single-site reports are saveable/submittable; the all-sites roll-up is view/email only.
+    prefill: single ? {
+      report_date: date, site_id: single.site_id,
+      total_cash: single.cash, total_deposit: single.pos + single.transfer, diesel: single.diesel, expenses: single.expenses,
+      sales: [{ label: 'Cash', amount: single.cash }, { label: 'POS / Card', amount: single.pos }, { label: 'Transfer', amount: single.transfer }],
+      production: { totalLoaded: single.totalLoaded, totalBagged: single.totalBagged, loaders: single.loaders, baggers: single.baggers, incentive: single.incentive },
+    } : null,
+  };
+}
+
+router.get('/reports/generate', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const out = await buildGeneratedReport(req.ctx, date, req.query.site);
+  if (out.error) return res.status(400).json({ error: out.error });
+  res.json(out);
+});
+
+// Email the generated report (single site or the all-sites roll-up) to the
+// creator + dailyreports inbox, without needing a saved daily_reports row.
+router.post('/reports/generate/email', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const out = await buildGeneratedReport(req.ctx, date, b.site);
+  if (out.error) return res.status(400).json({ error: out.error });
+  const tenant = await tenantById(req.ctx.tenant_id);
+  const to = [...new Set([req.user.email, REPORTS_INBOX].filter(Boolean))];
+  try {
+    const sent = await sendGeneratedReport({ tenant, date, report: out, incidents: (b.incidents || '').trim(), to });
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, to.join(','), sent.subject, 'SENT']).catch(() => {});
+    res.json({ ok: true, to });
+  } catch (e) {
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, to.join(','), `Daily report ${date}`, 'FAILED', e.message]).catch(() => {});
+    res.status(502).json({ error: 'email failed: ' + e.message });
+  }
 });
 
 router.post('/reports/:id/email', requireAuth, async (req, res) => {

@@ -560,6 +560,36 @@ async function siteProdExp(ctx, site, date) {
   return { loaders, baggers, totalLoaded, totalBagged, diesel, expenses: (Number(exp.total) || 0) - diesel };
 }
 
+// Derive the finished-bag day report for one site/day from production + FG logs
+// and POS bag sales (the bagged product). Manual adjustments (leakage, staff
+// water, extra) aren't tracked, so available = opening + produced − sold.
+async function bagDayReport(ctx, siteId, date) {
+  const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [ctx.tenant_id]);
+  const baggedId = t && t.bagged_product_id;
+  if (!baggedId) return null;
+  const pr = await qone('SELECT name, unit FROM products WHERE id=?', [baggedId]);
+  if (!pr) return null;
+  // produced = logged fg_production + auto bags_bagged
+  const fg = await qone("SELECT COALESCE(SUM(qty),0) total, COALESCE(SUM(CASE WHEN prod_date=? THEN qty ELSE 0 END),0) today FROM fg_production WHERE tenant_id=? AND site_id=? AND product_id=?", [date, ctx.tenant_id, siteId, baggedId]);
+  const bg = await qone("SELECT COALESCE(SUM(bags_bagged),0) total, COALESCE(SUM(CASE WHEN work_date=? THEN bags_bagged ELSE 0 END),0) today FROM production WHERE tenant_id=? AND site_id=?", [date, ctx.tenant_id, siteId]);
+  const producedTotal = Number(fg.total) + Number(bg.total);
+  const producedToday = Number(fg.today) + Number(bg.today);
+  // sold = bag-product qty in POS line items
+  let soldTotal = 0, soldToday = 0;
+  try {
+    const r = await qone(
+      `SELECT COALESCE(SUM((elem->>'qty')::numeric),0) total,
+              COALESCE(SUM(CASE WHEN p.sale_date=? THEN (elem->>'qty')::numeric ELSE 0 END),0) today
+         FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
+        WHERE p.tenant_id=? AND p.site_id=? AND p.items_json IS NOT NULL AND left(p.items_json,1)='[' AND lower(elem->>'name')=lower(?)`,
+      [date, ctx.tenant_id, siteId, pr.name]);
+    soldTotal = Number(r.total) || 0; soldToday = Number(r.today) || 0;
+  } catch { /* malformed json */ }
+  const opening = Math.round(((producedTotal - producedToday) - (soldTotal - soldToday)) * 100) / 100;
+  const available = Math.round((producedTotal - soldTotal) * 100) / 100;
+  return { product: pr.name, opening, produced: producedToday, total: Math.round((opening + producedToday) * 100) / 100, sold: soldToday, available };
+}
+
 // Build the full generated report (one site, or all sites aggregated).
 async function buildGeneratedReport(ctx, date, siteArg) {
   const wantAll = !siteBound(ctx) && (!siteArg || String(siteArg).toUpperCase() === 'ALL');
@@ -583,6 +613,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
   }
   const totalSales = tot.cash + tot.pos + tot.transfer;
   const single = !wantAll && bySite.length === 1 ? bySite[0] : null;
+  const bagReport = single ? await bagDayReport(ctx, single.site_id, date) : null;
   return {
     report_date: date, scope: wantAll ? 'ALL' : 'SITE',
     site_id: single ? single.site_id : null,
@@ -592,6 +623,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       orders: tot.orders, totalLoaded: tot.totalLoaded, totalBagged: tot.totalBagged,
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
+      bagReport,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
     // Single-site reports are saveable/submittable; the all-sites roll-up is view/email only.

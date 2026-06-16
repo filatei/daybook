@@ -221,6 +221,18 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
               </div>
             )}
 
+            {s.bagReport && (
+              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — {s.bagReport.product || 'bags'}</div>
+                {[['Opening', s.bagReport.opening], ['Production', s.bagReport.produced], ['Total', s.bagReport.total], ['Sales', s.bagReport.sold], ['Available', s.bagReport.available]].map(([k, v], i) => (
+                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0', ...(k === 'Total' || k === 'Available' ? { fontWeight: 700 } : {}) }}>
+                    <span style={{ color: 'var(--muted)' }}>{k}</span><span>{(v || 0).toLocaleString()}</span>
+                  </div>
+                ))}
+                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>Available = opening + production − sales. Add leakage/staff water under incidents if needed.</div>
+              </div>
+            )}
+
             {(s.diesel > 0 || s.expenses > 0) && (
               <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--muted)', margin: '8px 2px' }}>
                 <span>Diesel: <strong style={{ color: 'var(--ink)' }}>{ngn(s.diesel)}</strong></span>

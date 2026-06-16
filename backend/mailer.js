@@ -258,6 +258,14 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
         ${row('Orders', (s.orders || 0).toLocaleString())}
         ${(s.totalLoaded || s.totalBagged) ? row('Production — loaded / bagged', `${(s.totalLoaded || 0).toLocaleString()} / ${(s.totalBagged || 0).toLocaleString()}`) : ''}
       </table>
+      ${s.bagReport ? `<div style="font-weight:800;margin:6px 0">Production — ${esc(s.bagReport.product || 'bags')}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        ${row('Opening', (s.bagReport.opening || 0).toLocaleString())}
+        ${row('Production', (s.bagReport.produced || 0).toLocaleString())}
+        ${row('Total', (s.bagReport.total || 0).toLocaleString(), true)}
+        ${row('Sales', (s.bagReport.sold || 0).toLocaleString())}
+        ${row('Available', (s.bagReport.available || 0).toLocaleString(), true)}
+      </table>` : ''}
       ${dist ? `<div style="font-weight:800;margin:6px 0">Sales distribution</div>
       <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
         <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Site</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sales</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Cash</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Transfer/POS</th></tr></thead>

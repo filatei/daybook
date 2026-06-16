@@ -378,13 +378,19 @@ async function computeLines(tenant_id, from, to, site) {
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id=? AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [tenant_id, to]);
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
+  // Calendar days in the pay period — denominator for monthly proration.
+  const periodDays = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1);
   return staff.map((s) => {
     const days = daysBy[s.id] || 0;
     const pb = prodBy[s.id] || { l: 0, g: 0 };
-    const piece = (s.pay_type || '').toUpperCase() === 'PIECE';
-    const gross = piece ? (pb.l * (s.rate_loaded || 0) + pb.g * (s.rate_bagged || 0)) : (days * (s.daily_rate || 0));
+    const pt = (s.pay_type || '').toUpperCase();
+    let gross;
+    if (pt === 'PIECE') gross = pb.l * (s.rate_loaded || 0) + pb.g * (s.rate_bagged || 0);
+    // Monthly staff earn a FIXED salary, prorated by attendance over the period.
+    else if (pt === 'MONTHLY') gross = (s.daily_rate || 0) * (days / periodDays);
+    else gross = days * (s.daily_rate || 0);   // daily wage
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
-      days_present: days, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
+      days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
       advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
   }).filter((l) => l.gross > 0 || l.days_present > 0 || l.bags_loaded > 0 || l.bags_bagged > 0 || l.advance > 0);
 }
@@ -557,7 +563,7 @@ router.get('/midmonth/preview', requireAuth, async (req, res) => {
 });
 
 // Generate (or refresh) the mid-month DRAFT run for the 1st–15th piece workers.
-async function generateMidMonth(tenant_id, month, userId, site = null) {
+async function generateMidMonth(tenant_id, month, userId, site = null, opts = {}) {
   const { from, to } = midRange(month);
   const lines = await computePieceLines(tenant_id, from, to, site);
   let runId;
@@ -575,21 +581,20 @@ async function generateMidMonth(tenant_id, month, userId, site = null) {
     }
     await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=0, total_net=? WHERE id=?', [r2(tot), r2(tot), runId]);
   });
+  // Email the draft + Fido CSV to Accountants/Snr Accountants/GM/Admin.
+  if (opts.email && lines.length) emailMidMonth(tenant_id, runId).catch(() => {});
   return { runId, count: lines.length };
 }
 router.post('/midmonth/generate', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const { month } = midRange((req.body || {}).month);
   const site = siteBound(c) ? c.site_id : ((req.body || {}).site || null);
-  const out = await generateMidMonth(c.tenant_id, month, req.user.id, site);
+  const out = await generateMidMonth(c.tenant_id, month, req.user.id, site, { email: (req.body || {}).email !== false });
   res.status(201).json(out);
 });
 
-// Fido-format export (BAGGERS then LOADERS) for a saved mid-month run.
-router.get('/runs2/:id/fido.csv', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
-  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
-  if (!run) return res.status(404).end();
+// Build the Fido-format CSV (BAGGERS then LOADERS) for a saved mid-month run.
+async function fidoCsv(tenant_id, run) {
   const lines = await qall(`SELECT pl.*, s.ext_people_id, s.full_name, s.bank_name, s.bank_account, st.name site_name
     FROM pay_run_lines pl LEFT JOIN staff s ON s.id=pl.staff_id LEFT JOIN sites st ON st.id=s.site_id
     WHERE pl.run_id=? ORDER BY st.name, s.full_name`, [run.id]);
@@ -608,10 +613,41 @@ router.get('/runs2/:id/fido.csv', requireAuth, async (req, res) => {
   section('LOADERS', 'LOADER',
     ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'ACCOUNT NUMBER', 'BAGS LOADED', 'NET PAY (COMMISSION)', 'PAY START DATE', 'PAY END DATE', 'DESIGNATION'],
     (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', [l.bank_name, l.bank_account].filter(Boolean).join('-'), l.bags_loaded, l.gross, ps, pe, 'LOADER']; });
+  return rows.map((r) => r.map(q).join(',')).join('\r\n');
+}
+router.get('/runs2/:id/fido.csv', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  if (!run) return res.status(404).end();
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="midmonth-payroll-${run.period_from}.csv"`);
-  res.send(rows.map((r) => r.map(q).join(',')).join('\r\n'));
+  res.send(await fidoCsv(c.tenant_id, run));
 });
+
+// Email the mid-month draft + Fido CSV to Accountants, Snr Accountants, GMs, Admins.
+async function emailMidMonth(tenant_id, runId) {
+  try {
+    const tenant = await qone('SELECT * FROM tenants WHERE id=?', [tenant_id]);
+    const run = await qone('SELECT * FROM pay_runs WHERE id=?', [runId]);
+    if (!tenant || !run) return;
+    const members = await qall(`SELECT DISTINCT u.email, m.role FROM memberships m JOIN users u ON u.id=m.user_id
+      WHERE m.tenant_id=? AND u.email IS NOT NULL AND u.email<>''`, [tenant_id]);
+    const to = [...new Set(members.filter((m) => atLeast(m.role, 'ACCOUNTANT')).map((m) => m.email))];
+    if (!to.length) return;
+    const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=?', [runId]);
+    const baggers = lines.filter((l) => (l.pay_type || '').toUpperCase() === 'BAGGER');
+    const loaders = lines.filter((l) => (l.pay_type || '').toUpperCase() === 'LOADER');
+    const sum = (a) => r2(a.reduce((s, l) => s + (Number(l.gross) || 0), 0));
+    const summary = { count: lines.length, baggers, loaders, total_baggers: sum(baggers), total_loaders: sum(loaders), total: sum(lines) };
+    const csv = await fidoCsv(tenant_id, run);
+    const mailer = require('./mailer');
+    const sent = await mailer.sendMidMonthPayroll({ tenant, from: run.period_from, to: run.period_to, summary, to, csv });
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)', [uuid(), tenant_id, to.join(','), sent.subject, 'SENT']).catch(() => {});
+  } catch (e) {
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)', [uuid(), tenant_id, '', 'Mid-month payroll', 'FAILED', e.message]).catch(() => {});
+  }
+}
 
 module.exports = router;
 module.exports.generateMidMonth = generateMidMonth;
+module.exports.emailMidMonth = emailMidMonth;

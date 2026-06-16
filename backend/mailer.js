@@ -143,6 +143,44 @@ async function sendInvite({ to, tenantName, roleLabel, inviterName, brand = '#0e
   return { messageId: info.messageId, subject, to };
 }
 
+/**
+ * Mid-month payroll draft email to accountants / GM / admin.
+ * @param opts { tenant, from, to, summary:{count,total,total_baggers,total_loaders,baggers,loaders}, to:[emails], csv:string }
+ */
+async function sendMidMonthPayroll({ tenant, from, to, summary, to: recipients, csv }) {
+  const brand = (tenant && tenant.brand_color) || '#2563eb';
+  const name = (tenant && tenant.name) || 'Company';
+  const s = summary || {};
+  const subject = `Mid-month payroll draft — ${name} (${from} to ${to})`;
+  const row = (label, n, amt) => `<tr><td style="padding:6px 10px;border-bottom:1px solid #eee">${esc(label)}</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right">${n}</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right;font-weight:700">${ngn(amt)}</td></tr>`;
+  const html = `
+  <div style="font-family:Segoe UI,Arial,sans-serif;max-width:600px;margin:auto;color:#1f2937">
+    <div style="background:${brand};color:#fff;padding:22px 24px;border-radius:10px 10px 0 0">
+      <div style="font-size:13px;letter-spacing:2px;opacity:.85">DAYBOOK · PAYROLL</div>
+      <div style="font-size:22px;font-weight:800">Mid-month payroll draft</div>
+      <div style="opacity:.9;margin-top:4px">${esc(name)} · ${esc(from)} to ${esc(to)}</div>
+    </div>
+    <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 10px 10px;padding:24px">
+      <p>A mid-month (piece-worker) payroll draft has been generated automatically from production. Review, approve and mark it paid in Daybook.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px;margin:14px 0">
+        <thead><tr><th style="text-align:left;padding:6px 10px;color:#6b7280">Group</th><th style="text-align:right;padding:6px 10px;color:#6b7280">Staff</th><th style="text-align:right;padding:6px 10px;color:#6b7280">Amount</th></tr></thead>
+        <tbody>
+          ${row('Baggers', (s.baggers || []).length, s.total_baggers)}
+          ${row('Loaders', (s.loaders || []).length, s.total_loaders)}
+          <tr><td style="padding:8px 10px;font-weight:800">Total</td><td style="padding:8px 10px;text-align:right;font-weight:800">${s.count || 0}</td><td style="padding:8px 10px;text-align:right;font-weight:800;color:${brand}">${ngn(s.total)}</td></tr>
+        </tbody>
+      </table>
+      <p style="text-align:center;margin:24px 0">
+        <a href="${PUBLIC_URL}" style="background:${brand};color:#fff;text-decoration:none;font-weight:700;padding:12px 26px;border-radius:10px;display:inline-block">Open Daybook → Payroll</a>
+      </p>
+      <p style="color:#6b7280;font-size:13px">The Fido-format CSV is attached for the bank/payment run.</p>
+    </div>
+  </div>`;
+  const attachments = csv ? [{ filename: `midmonth-payroll-${from}.csv`, content: csv }] : [];
+  const info = await getTransporter().sendMail({ from: FROM, to: recipients, subject, html, attachments });
+  return { messageId: info.messageId, subject, to: recipients };
+}
+
 async function verifyConnection() {
   try { await getTransporter().verify(); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
@@ -151,4 +189,4 @@ async function verifyConnection() {
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, sendInvite, verifyConnection, FROM };
+module.exports = { sendDailyReport, sendInvite, sendMidMonthPayroll, verifyConnection, FROM };

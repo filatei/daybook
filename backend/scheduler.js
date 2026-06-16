@@ -148,7 +148,7 @@ async function midMonthAll() {
   const tenants = await qall("SELECT id FROM tenants WHERE status='ACTIVE'");
   let runs = 0;
   for (const t of tenants) {
-    try { const o = await payroll.generateMidMonth(t.id, month, null, null); if (o && o.count) runs++; }
+    try { const o = await payroll.generateMidMonth(t.id, month, null, null, { email: true }); if (o && o.count) runs++; }
     catch (e) { console.error('[midmonth]', t.id, e.message); }
   }
   console.log(`[midmonth] generated drafts for ${runs} tenant(s) — ${month}`);

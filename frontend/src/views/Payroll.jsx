@@ -306,6 +306,7 @@ function SetupTab({ sites }) {
             <strong>{r.full_name}</strong>
             <select className="input" style={{ width: 'auto', padding: '4px 8px' }} value={r.pay_type || 'DAILY'} onChange={(e) => setVal(i, 'pay_type', e.target.value)}>
               <option value="DAILY">Daily (regular)</option>
+              <option value="MONTHLY">Monthly (fixed salary)</option>
               <option value="PIECE">Piece (loader/bagger)</option>
             </select>
           </div>
@@ -314,6 +315,8 @@ function SetupTab({ sites }) {
               <div><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={r.rate_loaded ?? 0} onChange={(e) => setVal(i, 'rate_loaded', e.target.value)} /></div>
               <div><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={r.rate_bagged ?? 0} onChange={(e) => setVal(i, 'rate_bagged', e.target.value)} /></div>
             </div>
+          ) : r.pay_type === 'MONTHLY' ? (
+            <div><label className="fl">Monthly salary (₦) — prorated by attendance</label><input type="number" className="input" value={r.daily_rate ?? 0} onChange={(e) => setVal(i, 'daily_rate', e.target.value)} /></div>
           ) : (
             <div><label className="fl">₦ / day present</label><input type="number" className="input" value={r.daily_rate ?? 0} onChange={(e) => setVal(i, 'daily_rate', e.target.value)} /></div>
           )}

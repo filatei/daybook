@@ -58,14 +58,29 @@ function BTPill({ status, error, onConnect, onDisconnect }) {
 }
 
 // ── Cart line ─────────────────────────────────────────────────────────────────
-function CartLine({ line, onChange, onRemove }) {
-  const { product, qty } = line;
-  const lineTotal = (product.price || 0) * (parseFloat(qty) || 0);
+function CartLine({ line, onChange, onPrice, onRemove }) {
+  const { product, qty, price } = line;
+  const unit = parseFloat(price);
+  const lineTotal = (isNaN(unit) ? 0 : unit) * (parseFloat(qty) || 0);
+  const edited = price !== '' && Number(price) !== Number(product.price);
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 90px 88px 28px', gap: 8, alignItems: 'center', padding: '9px 0', borderBottom: '1px solid var(--line)' }}>
       <div>
         <div style={{ fontWeight: 700, fontSize: 14 }}>{product.name}</div>
-        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{ngn(product.price)} each</div>
+        {/* Editable unit price — defaults to the product price, cashier may override */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>₦</span>
+          <input
+            type="number" min="0" inputMode="decimal"
+            className="input"
+            style={{ padding: '4px 6px', fontSize: 12.5, width: 78, fontWeight: 700, color: edited ? 'var(--brand-d)' : 'var(--ink)' }}
+            value={price}
+            onChange={(e) => onPrice(product.id, e.target.value)}
+            onFocus={(e) => e.target.select()}
+            title="Tap to change the unit price for this sale"
+          />
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>each{edited ? ' ✎' : ''}</span>
+        </div>
       </div>
       <input
         type="number" min="0" inputMode="numeric"
@@ -234,8 +249,9 @@ export default function Sell() {
   };
 
   // Derived
+  const lineUnit    = (c) => { const p = parseFloat(c.price); return isNaN(p) ? (c.product.price || 0) : p; };
   const cartLines   = cart.filter((c) => parseFloat(c.qty) > 0);
-  const subtotal    = cartLines.reduce((s, c) => s + (c.product.price || 0) * (parseFloat(c.qty) || 0), 0);
+  const subtotal    = cartLines.reduce((s, c) => s + lineUnit(c) * (parseFloat(c.qty) || 0), 0);
   // Tendered defaults to the order total; the cashier can still type a different amount.
   useEffect(() => {
     if (payMethod === 'CASH' && !tenderedEdited) setTendered(subtotal ? String(subtotal) : '');
@@ -257,7 +273,7 @@ export default function Sell() {
         next[idx] = { ...next[idx], qty: String(parseFloat(next[idx].qty || 0) + 1) };
         return next;
       }
-      return [...prev, { product, qty: '1' }];
+      return [...prev, { product, qty: '1', price: String(product.price ?? '') }];
     });
   };
 
@@ -267,6 +283,11 @@ export default function Sell() {
       return;
     }
     setCart((p) => p.map((c) => c.product.id === productId ? { ...c, qty: val } : c));
+  };
+
+  // Override the unit price for this sale (defaults to the product's price).
+  const updatePrice = (productId, val) => {
+    setCart((p) => p.map((c) => c.product.id === productId ? { ...c, price: val } : c));
   };
 
   const removeItem = (productId) => {
@@ -286,7 +307,7 @@ export default function Sell() {
     const items = cartLines.map((c) => ({
       product_id: c.product.id,
       qty:        parseFloat(c.qty),
-      price:      c.product.price,
+      price:      lineUnit(c),
     }));
     const body = {
       items,
@@ -339,14 +360,14 @@ export default function Sell() {
         // give the cashier an optimistic receipt so selling never blocks.
         queueSale(tenant, body);
         setPending(outboxCount());
-        const items_json = JSON.stringify(cartLines.map((c) => ({ product_id: c.product.id, name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })));
+        const items_json = JSON.stringify(cartLines.map((c) => ({ product_id: c.product.id, name: c.product.name, qty: +c.qty, price: lineUnit(c), amount: +c.qty * lineUnit(c) })));
         setLastSale({ pending: true, receipt_no: null, total: subtotal, items_json });
         const now = new Date();
         const rdata = {
           company: activeTenant?.name || 'FIDO WATER', site_name: siteName(activeTenant?.site_id), receipt_no: 'OFFLINE',
           date_str: now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
           time_str: now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
-          items: cartLines.map((c) => ({ name: c.product.name, qty: +c.qty, price: c.product.price, amount: +c.qty * c.product.price })),
+          items: cartLines.map((c) => ({ name: c.product.name, qty: +c.qty, price: lineUnit(c), amount: +c.qty * lineUnit(c) })),
           total: subtotal, payment_method: payMethod,
           amount_paid: payMethod === 'CASH' ? tenderedAmt : subtotal,
           change: payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0,
@@ -511,7 +532,7 @@ export default function Sell() {
 
           {/* Line items */}
           {cart.map((line) => (
-            <CartLine key={line.product.id} line={line} onChange={updateQty} onRemove={removeItem} />
+            <CartLine key={line.product.id} line={line} onChange={updateQty} onPrice={updatePrice} onRemove={removeItem} />
           ))}
 
           {/* Total */}

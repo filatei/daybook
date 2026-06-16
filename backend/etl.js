@@ -398,8 +398,8 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
     }));
 
     const createdAt = Math.floor((order.createdAt instanceof Date ? order.createdAt : new Date()).getTime() / 1000);
-    const bank = isCash ? null : (clean(order.acquirer || order.card_bank || order.bank || order.transfer_from_bank).toUpperCase() || null);
-    const terminal = isCash ? null : (clean(order.terminal_location).toUpperCase() || null);
+    const bank = isCash ? null : ((clean(order.acquirer || order.card_bank || order.bank || order.transfer_from_bank) || '').toUpperCase() || null);
+    const terminal = isCash ? null : ((clean(order.terminal_location) || '').toUpperCase() || null);
 
     try {
       // On re-run, backfill bank/terminal onto already-imported rows (only when
@@ -599,7 +599,7 @@ async function etlTerminals(mongoDB, { nameMap, norm }, defaultTenantId) {
     const site = resolveSiteByName(nameMap, norm, location) || resolveSiteByName(nameMap, norm, t.company);
     const tenantId = site ? site.tenant_id : defaultTenantId;
     if (!tenantId) { stats.skipped++; continue; }
-    const bank = clean(t.bank).toUpperCase() || null;
+    const bank = (clean(t.bank) || '').toUpperCase() || null;
     const label = [bank, location].filter(Boolean).join(' · ') || clean(t.terminal_id) || clean(t.sn) || 'Terminal';
     try {
       const r = await qrun(
@@ -609,7 +609,7 @@ async function etlTerminals(mongoDB, { nameMap, norm }, defaultTenantId) {
            bank=EXCLUDED.bank, location=EXCLUDED.location, sn=EXCLUDED.sn,
            company=EXCLUDED.company, label=EXCLUDED.label, site_id=COALESCE(EXCLUDED.site_id, pos_terminals.site_id)`,
         [uuid(), tenantId, site ? site.id : null, String(t._id), clean(t.terminal_id) || null,
-          bank, location || null, clean(t.sn) || null, clean(t.company).toUpperCase() || null, label]);
+          bank, location || null, clean(t.sn) || null, (clean(t.company) || '').toUpperCase() || null, label]);
       if (r.rowCount) stats.inserted++; else stats.updated++;
     } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn('\n[ETL] terminals error:', e.message.slice(0, 140)); }
     progress('terminals', stats.scanned, 0);

@@ -273,14 +273,18 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
     }));
     // Category: explicit expense category, else the first line item's category.
     const category = clean((e.category || (items[0] && items[0].category) || 'OTHER').toUpperCase().slice(0, 40)) || 'OTHER';
+    // Imprest vs non-imprest: honour an explicit fido flag, else infer from text.
+    const kind = (e.imprest === true || e.isImprest === true
+      || /IMPREST/i.test(String(e.expenseType || e.type || e.expense_type || ''))
+      || /IMPREST/.test(category)) ? 'IMPREST' : 'NON_IMPREST';
     // Incremental payments → amount_paid + status; ledger rows migrated below.
     const payHistory = Array.isArray(e.payHistory) ? e.payHistory : [];
     const paid = Math.round(payHistory.reduce((a, p) => a + num(p.paidAmount), 0) * 100) / 100;
     const status = paid <= 0.01 ? 'UNPAID' : (paid >= amount - 0.01 ? 'PAID' : 'PART');
     try {
       const row = await qone(
-        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,items_json,amount,amount_paid,status,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,items_json,amount,amount_paid,status,kind,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
            vendor=COALESCE(EXCLUDED.vendor, expenses.vendor),
            items_json=COALESCE(EXCLUDED.items_json, expenses.items_json),
@@ -288,7 +292,7 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
          RETURNING id`,
         [uuid(), site.tenant_id, site.id, ext_id, expDate, category,
           clean(e.description || e.remarks || e.note || (items[0] && items[0].name)), vendorName,
-          items.length ? JSON.stringify(items) : null, amount, paid, status,
+          items.length ? JSON.stringify(items) : null, amount, paid, status, kind,
           Math.floor((e.createdAt instanceof Date ? e.createdAt : new Date()).getTime() / 1000)]);
       stats.inserted++;
       // Migrate each payment in the ticket's history (idempotent on ext_id).

@@ -602,7 +602,10 @@ async function migrate() {
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS amount_paid DOUBLE PRECISION DEFAULT 0;
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'UNPAID';
     -- Workflow lifecycle (Fido): DRAFT→REVIEWED→APPROVED→PAID→DELIVERED, plus DECLINED.
-    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS wf_state TEXT;`);
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS wf_state TEXT;
+    -- Imprest = daily site cash float totalled & transferred to Snr Accountant at
+    -- day end; NON_IMPREST = spend-now expense that can't wait for end of day.
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'NON_IMPREST';`);
   // One-time backfill: seed lifecycle from payment status for migrated tickets.
   await pool.query(`UPDATE expenses SET wf_state = CASE WHEN status='PAID' THEN 'PAID' ELSE 'DRAFT' END WHERE wf_state IS NULL`);
   await pool.query(`

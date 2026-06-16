@@ -23,6 +23,7 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     expense_date: expense?.expense_date || today(),
     site_id: expense?.site_id || sites[0]?.id || '',
     vendor: expense?.vendor || '',
+    kind: expense?.kind || 'NON_IMPREST',
   });
   const set = (k, v) => { setDirty(true); setF((p) => ({ ...p, [k]: v })); };
 
@@ -85,6 +86,11 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     <div>
       <div className="grip" />
       <h3>{expense?.id ? 'Edit Expense' : 'New Expense'}</h3>
+      <label className="fl">Type</label>
+      <div className="seg" style={{ marginBottom: 12 }}>
+        <button type="button" className={`seg-b${f.kind === 'NON_IMPREST' ? ' on' : ''}`} onClick={() => set('kind', 'NON_IMPREST')}>Non-imprest</button>
+        <button type="button" className={`seg-b${f.kind === 'IMPREST' ? ' on' : ''}`} onClick={() => set('kind', 'IMPREST')}>Imprest</button>
+      </div>
       <div className="grid2">
         <div>
           <label className="fl">Date</label>
@@ -359,7 +365,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
         <div className="av" style={{ fontSize: 24 }}>{catIcon(expense.category)}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <h3 style={{ margin: 0 }}>{expense.description || expense.category}</h3>
+          <h3 style={{ margin: 0 }}>{expense.description || expense.category} {expense.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3' }}>IMPREST</span>}</h3>
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>{expense.expense_date} · {expense.category}{expense.vendor ? ` · ${expense.vendor}` : ''}{siteName ? ` · ${siteName}` : ''}</div>
         </div>
         <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 20, background: (WF[wf] || WF.DRAFT).bg, color: (WF[wf] || WF.DRAFT).fg }}>{(WF[wf] || WF.DRAFT).label}</span>
@@ -452,8 +458,9 @@ export default function Expenses() {
   const [expenses, setExpenses] = useState([]);
   const [categories, setCategories] = useState(CATS.map((c) => c.toUpperCase()));
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState({ cat: '', from: '', to: '' });
-  const [tab, setTab] = useState('list');   // list | payables
+  const [filter, setFilter] = useState({ cat: '', from: '', to: '', kind: '' });
+  const [tab, setTab] = useState('list');   // list | cash | payables
+  const [imprest, setImprest] = useState(null);   // per-site imprest summary
 
   useEffect(() => {
     api(scoped('/expenses/categories')).then((c) => { if (Array.isArray(c) && c.length) setCategories(c); }).catch(() => {});
@@ -466,12 +473,22 @@ export default function Expenses() {
       if (filter.cat) p.set('category', filter.cat);
       if (filter.from) p.set('from', filter.from);
       if (filter.to) p.set('to', filter.to);
+      if (filter.kind) p.set('kind', filter.kind);
       setExpenses(await api(scoped(`/expenses?${p}`)));
     } catch { setExpenses([]); }
     setLoading(false);
   }, [tenant, filter]);
 
   useEffect(() => { load(); }, [load]);
+
+  // When viewing imprests, show each site's daily total (→ transfer to Snr Acct).
+  useEffect(() => {
+    if (filter.kind !== 'IMPREST') { setImprest(null); return; }
+    const p = new URLSearchParams();
+    if (filter.from) p.set('from', filter.from);
+    if (filter.to) p.set('to', filter.to);
+    api(scoped(`/expenses/imprest-summary?${p}`)).then(setImprest).catch(() => setImprest(null));
+  }, [tenant, filter.kind, filter.from, filter.to, expenses]);
 
   const openForm = (exp = null) => {
     openModal(<ExpenseForm expense={exp} sites={sites} categories={categories} onSave={load} onClose={closeModal} />, { guard: true });
@@ -495,6 +512,12 @@ export default function Expenses() {
       <>
       {/* Filters */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+        <select className="input" style={{ flex: '1 1 110px' }} value={filter.kind}
+          onChange={(e) => setFilter((p) => ({ ...p, kind: e.target.value }))}>
+          <option value="">All types</option>
+          <option value="IMPREST">Imprest</option>
+          <option value="NON_IMPREST">Non-imprest</option>
+        </select>
         <select className="input" style={{ flex: '1 1 120px' }} value={filter.cat}
           onChange={(e) => setFilter((p) => ({ ...p, cat: e.target.value }))}>
           <option value="">All categories</option>
@@ -505,6 +528,22 @@ export default function Expenses() {
         <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filter.to}
           onChange={(e) => setFilter((p) => ({ ...p, to: e.target.value }))} />
       </div>
+
+      {/* Imprest summary — what each site transfers to the Snr Accountant */}
+      {filter.kind === 'IMPREST' && imprest && imprest.sites && imprest.sites.length > 0 && (
+        <div className="card" style={{ padding: '12px 16px', marginBottom: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 800 }}>Imprest to transfer → Snr Accountant</span>
+            <span style={{ fontWeight: 800, fontSize: 18 }}>{ngn(imprest.grand)}</span>
+          </div>
+          {imprest.sites.map((s) => (
+            <div key={s.site_id || s.site_name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderTop: '1px solid var(--line)' }}>
+              <span style={{ color: 'var(--muted)' }}>{s.site_name || '—'} <span style={{ fontSize: 11 }}>({s.count})</span></span>
+              <span style={{ fontWeight: 700 }}>{ngn(s.total)}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {!loading && expenses.length > 0 && (
         <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
@@ -524,7 +563,7 @@ export default function Expenses() {
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{e.description || e.category} <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: (WF[e.wf_state] || WF.DRAFT).bg, color: (WF[e.wf_state] || WF.DRAFT).fg }}>{(WF[e.wf_state] || WF.DRAFT).label}</span></div>
+                <div style={{ fontWeight: 700 }}>{e.description || e.category} <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: (WF[e.wf_state] || WF.DRAFT).bg, color: (WF[e.wf_state] || WF.DRAFT).fg }}>{(WF[e.wf_state] || WF.DRAFT).label}</span>{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                   {e.expense_date} · {e.category}{e.vendor ? ` · ${e.vendor}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
                 </div>

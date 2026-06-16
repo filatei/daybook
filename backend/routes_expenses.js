@@ -66,7 +66,7 @@ router.get('/', requireAuth, async (req, res) => {
   const c = await contextFor(req.user, tid);
   if (!c) return res.status(403).json({ error: 'forbidden' });
 
-  const { site, from, to, category, vendor, unpaid } = req.query;
+  const { site, from, to, category, vendor, unpaid, kind } = req.query;
   const where = ['e.tenant_id=?'], args = [tid];
 
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
@@ -76,6 +76,7 @@ router.get('/', requireAuth, async (req, res) => {
   if (category) { where.push('e.category=?'); args.push(category.toUpperCase()); }
   if (vendor) { where.push('lower(e.vendor)=lower(?)'); args.push(vendor); }
   if (unpaid === '1') { where.push('e.amount > COALESCE(e.amount_paid,0)'); }
+  if (kind) { where.push('COALESCE(e.kind,?)=?'); args.push('NON_IMPREST', kind.toUpperCase()); }
 
   const rows = await qall(
     `SELECT e.*, (e.amount - COALESCE(e.amount_paid,0)) AS balance, s.name site_name, s.code site_code
@@ -128,6 +129,27 @@ router.get('/summary', requireAuth, async (req, res) => {
   res.json({ basis: 'accrual', totals: { ...totals, count: parseInt(totals.count, 10) }, byCategory, bySite, byDay: byDay.reverse() });
 });
 
+// ── GET /expenses/imprest-summary — per-site daily imprest total (what each site
+// transfers to the Snr Accountant at day end). Defaults to today.
+router.get('/imprest-summary', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req);
+  if (!tid) return res.status(400).json({ error: 'select a workspace' });
+  const c = await contextFor(req.user, tid);
+  if (!c) return res.status(403).json({ error: 'forbidden' });
+  const from = req.query.from || new Date().toISOString().slice(0, 10);
+  const to = req.query.to || from;
+  const where = ["e.tenant_id=?", "COALESCE(e.kind,'NON_IMPREST')='IMPREST'", 'e.expense_date>=?', 'e.expense_date<=?'];
+  const args = [tid, from, to];
+  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
+  const rows = await qall(
+    `SELECT e.site_id, s.name site_name, s.code site_code, COALESCE(SUM(e.amount),0) total, COUNT(*) count
+       FROM expenses e LEFT JOIN sites s ON s.id=e.site_id
+      WHERE ${where.join(' AND ')}
+      GROUP BY e.site_id, s.name, s.code ORDER BY total DESC`, args);
+  const grand = rows.reduce((a, r) => a + Number(r.total || 0), 0);
+  res.json({ from, to, grand, sites: rows.map((r) => ({ ...r, total: Number(r.total), count: parseInt(r.count, 10) })) });
+});
+
 // ── GET /expenses/categories — categories actually used (incl. migrated Fido) + defaults
 router.get('/categories', requireAuth, async (req, res) => {
   const tid = requestedTenant(req);
@@ -162,11 +184,12 @@ router.post('/', requireAuth, async (req, res) => {
     await qrun(`INSERT INTO vendors (id,tenant_id,name) VALUES (?,?,?) ON CONFLICT (tenant_id, lower(name)) DO NOTHING`,
       [uuid(), tid, vendor]).catch(() => {});
   }
+  const kind = (b.kind || '').toString().toUpperCase() === 'IMPREST' ? 'IMPREST' : 'NON_IMPREST';
   await qrun(
-    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,vendor,items_json,amount,recorded_by,wf_state)
-     VALUES (?,?,?,?,?,?,?,?,?,?,'DRAFT')`,
+    `INSERT INTO expenses (id,tenant_id,site_id,expense_date,category,description,vendor,items_json,amount,recorded_by,wf_state,kind)
+     VALUES (?,?,?,?,?,?,?,?,?,?,'DRAFT',?)`,
     [id, tid, site_id, expense_date, category, b.description || null, vendor,
-      items.length ? JSON.stringify(items) : null, amount, req.user.id]);
+      items.length ? JSON.stringify(items) : null, amount, req.user.id, kind]);
 
   // Keep daily_report.expenses in sync (update if report exists for same day/site)
   if (site_id) {
@@ -201,10 +224,11 @@ router.patch('/:id', requireAuth, async (req, res) => {
       [uuid(), a.expense.tenant_id, vendor]).catch(() => {});
   }
   const itemsJson = items === null ? a.expense.items_json : (items.length ? JSON.stringify(items) : null);
+  const kind = b.kind !== undefined ? (String(b.kind).toUpperCase() === 'IMPREST' ? 'IMPREST' : 'NON_IMPREST') : (a.expense.kind || 'NON_IMPREST');
   await qrun(
-    `UPDATE expenses SET category=?,description=?,vendor=?,items_json=?,amount=?,expense_date=? WHERE id=?`,
+    `UPDATE expenses SET category=?,description=?,vendor=?,items_json=?,amount=?,expense_date=?,kind=? WHERE id=?`,
     [(b.category || a.expense.category).toUpperCase(), b.description ?? a.expense.description,
-      vendor, itemsJson, newAmount, b.expense_date ?? a.expense.expense_date, a.expense.id]);
+      vendor, itemsJson, newAmount, b.expense_date ?? a.expense.expense_date, kind, a.expense.id]);
 
   // Sync report if amount changed
   if (diff !== 0 && a.expense.site_id) {

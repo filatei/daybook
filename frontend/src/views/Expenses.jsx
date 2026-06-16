@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useBackHandler } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
+import Cash from './Cash.jsx';
 
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
 
@@ -486,10 +487,11 @@ export default function Expenses() {
     <div>
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={`seg-b${tab === 'list' ? ' on' : ''}`} onClick={() => setTab('list')}>💸 Expenses</button>
+        <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash</button>
         <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>
       </div>
 
-      {tab === 'payables' ? <PayablesView onOpenExpense={openDetail} /> : (
+      {tab === 'cash' ? <Cash /> : tab === 'payables' ? <PayablesView onOpenExpense={openDetail} /> : (
       <>
       {/* Filters */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>

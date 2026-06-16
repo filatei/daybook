@@ -2172,6 +2172,7 @@ router.post('/billing/webhook/lemonsqueezy', (req, res) => {
 
 // ── PHASE 3 FEATURE MODULES ───────────────────────────────────────────────────
 router.use('/expenses',  require('./routes_expenses'));
+router.use('/cash',      require('./routes_cash'));
 router.use('/inventory', require('./routes_inventory'));
 router.use('/logistics', require('./routes_logistics'));
 router.use('/payroll',   require('./routes_payroll'));

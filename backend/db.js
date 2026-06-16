@@ -649,6 +649,43 @@ async function migrate() {
       created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
     );
     CREATE INDEX IF NOT EXISTS idx_exp_att ON expense_attachments(expense_id);
+
+    -- CASH AT HAND — managers/secretaries log cash handed to POS agents that must
+    -- land in the company bank account. Admin reviews (SEEN) + validates at EOD,
+    -- checking total recorded = cash collected. Each entry carries transfer receipts.
+    CREATE TABLE IF NOT EXISTS cash_deposits (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL,
+      site_id       TEXT REFERENCES sites(id),
+      deposit_date  TEXT NOT NULL,
+      amount        DOUBLE PRECISION NOT NULL,
+      depositor     TEXT,
+      payee_account TEXT,
+      memo          TEXT,
+      status        TEXT DEFAULT 'NOT_SEEN',   -- NOT_SEEN | SEEN | VALIDATED
+      seen_by       TEXT,
+      seen_at       BIGINT,
+      validated_by  TEXT,
+      validated_at  BIGINT,
+      created_by    TEXT,
+      created_at    BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_tenant_date ON cash_deposits(tenant_id, deposit_date);
+
+    -- Transfer receipts (images/PDF) attached to a cash entry, kept on disk.
+    CREATE TABLE IF NOT EXISTS cash_attachments (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      cash_id     TEXT NOT NULL REFERENCES cash_deposits(id) ON DELETE CASCADE,
+      note        TEXT,
+      file_name   TEXT,
+      stored_name TEXT,
+      mime        TEXT,
+      size        INTEGER,
+      uploaded_by TEXT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cash_att ON cash_attachments(cash_id);
   `);
 
   // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool

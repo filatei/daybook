@@ -11,7 +11,7 @@
 1. Work top to bottom. Each test has **Steps** → **Expected result** → a box to mark **✅ Pass / ❌ Fail**.
 2. If something fails, write what happened in **Notes** (what you tapped, what you saw). A screenshot helps a lot.
 3. Some tests are role-specific — if your role can't see a feature, write **N/A**.
-4. **Report issues** two ways: (a) note them on this sheet, and (b) in the app go to **More → Help/Feedback** (or send to Torama: filatei@gtsng.com). Include the time it happened.
+4. **Report issues** two ways: (a) note them on this sheet, and (b) in the app go to **More → Help/Feedback** (or send to Torama: filatei@torama.money). Include the time it happened.
 5. The app updates itself — if asked to refresh/reload, do it.
 
 **Roles, lowest → highest:** Gateman/Gate · Supervisor · Secretary · Site Manager · Accountant · Snr Accountant = General Manager · Admin.

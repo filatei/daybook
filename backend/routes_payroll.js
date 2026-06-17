@@ -354,11 +354,24 @@ router.post('/production', requireAuth, async (req, res) => {
   if (!st || st.tenant_id !== c.tenant_id) return res.status(400).json({ error: 'invalid staff' });
   if (siteBound(c) && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
   const date = (b.work_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const loaded = +b.bags_loaded || 0, bagged = +b.bags_bagged || 0;
   await qrun(`INSERT INTO production (id,tenant_id,site_id,staff_id,work_date,bags_loaded,bags_bagged,recorded_by,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?)
     ON CONFLICT (tenant_id,staff_id,work_date) DO UPDATE SET
       bags_loaded=EXCLUDED.bags_loaded, bags_bagged=EXCLUDED.bags_bagged, recorded_by=EXCLUDED.recorded_by, updated_at=EXCLUDED.updated_at`,
-    [uuid(), c.tenant_id, st.site_id, st.id, date, +b.bags_loaded || 0, +b.bags_bagged || 0, req.user.id, nowS()]);
+    [uuid(), c.tenant_id, st.site_id, st.id, date, loaded, bagged, req.user.id, nowS()]);
+
+  // A bagger/loader who bagged/loaded anything is counted present for the day.
+  // Auto-create their attendance clock-in (without clobbering a real one); remove
+  // the auto record if the counts go back to zero.
+  if (loaded + bagged > 0) {
+    await qrun(`INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,source,captured_by)
+      VALUES (?,?,?,?,?,?, 'PRODUCTION', ?) ON CONFLICT (tenant_id,staff_id,work_date) DO NOTHING`,
+      [uuid(), c.tenant_id, st.site_id, st.id, date, nowS(), req.user.id]);
+  } else {
+    await qrun("DELETE FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=? AND source='PRODUCTION'",
+      [c.tenant_id, st.id, date]);
+  }
   res.json({ ok: true });
 });
 

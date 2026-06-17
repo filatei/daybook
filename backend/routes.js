@@ -1333,7 +1333,7 @@ router.get('/attendance', requireAuth, async (req, res) => {
   res.json(rows.map((r) => ({
     id: r.id, staff_id: r.staff_id, staff: r.full_name, site_id: r.site_id, site: r.site_name, work_date: r.work_date,
     clock_in: r.clock_in, clock_out: r.clock_out, has_photo_in: !!r.photo_in, has_photo_out: !!r.photo_out, has_signature: !!r.signature,
-    match_score: r.match_score, in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
+    source: r.source, match_score: r.match_score, in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
   })));
 });
 router.post('/attendance/clock', requireAuth, needTenant('SECRETARY'), async (req, res) => {

@@ -502,6 +502,7 @@ async function migrate() {
     ALTER TABLE staff      ADD COLUMN IF NOT EXISTS face_descriptor TEXT;
     ALTER TABLE staff      ADD COLUMN IF NOT EXISTS face_enrolled_at BIGINT;
     ALTER TABLE attendance ADD COLUMN IF NOT EXISTS match_score DOUBLE PRECISION;
+    ALTER TABLE attendance ADD COLUMN IF NOT EXISTS source TEXT;   -- FACE | BADGE | PRODUCTION (auto)
     ALTER TABLE tenants    ADD COLUMN IF NOT EXISTS face_match_threshold DOUBLE PRECISION DEFAULT 0.55;
   `);
 

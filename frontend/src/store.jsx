@@ -12,7 +12,7 @@ const initial = {
   tab: 'dashboard',
   toast: null,          // { msg, kind }
   modal: null,          // React node or null
-  confirm: null,        // { title, message, confirmText, cancelText, danger } or null
+  confirmDlg: null,     // { title, message, confirmText, cancelText, danger } or null
   online: navigator.onLine,
 };
 
@@ -24,7 +24,7 @@ function reducer(state, action) {
     case 'SET_TAB':     return { ...state, tab: action.tab };
     case 'TOAST':       return { ...state, toast: action.toast };
     case 'MODAL':       return { ...state, modal: action.modal };
-    case 'CONFIRM':     return { ...state, confirm: action.confirm };
+    case 'CONFIRM':     return { ...state, confirmDlg: action.confirm };
     case 'ONLINE':      return { ...state, online: action.online };
     case 'LOGOUT':      return { ...initial, online: state.online };
     default:            return state;

@@ -3,7 +3,7 @@ import { useStore } from '../store.jsx';
 
 // Styled in-app replacement for window.confirm — driven by store.confirm().
 export default function ConfirmDialog() {
-  const { confirm: cfg, resolveConfirm } = useStore();
+  const { confirmDlg: cfg, resolveConfirm } = useStore();
 
   useEffect(() => {
     if (!cfg) return undefined;

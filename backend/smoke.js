@@ -84,6 +84,55 @@ const check = (n, c, x) => { if (c) { pass++; console.log('  ✅ ' + n); } else 
   const mgrAddLower = await api('POST', '/api/members', { token: mgr, body: { tenant_id: fido.id, email: 'gateman@y.test', role: 'GATEMAN', site_id: kpansia.id } });
   check('site manager can add a lower-rank member', mgrAddLower.status === 201 && (mgrAddLower.json.invited || mgrAddLower.json.added), mgrAddLower.json);
 
+  // ── reports/generate must NOT be shadowed by /reports/:id (regression) ──
+  const gen = await api('GET', `/api/reports/generate?tenant=${fido.id}&date=2026-06-12`, { token: su });
+  check('reports/generate works (not treated as :id)', gen.status === 200 && !!gen.json.scope, gen.json);
+  const genSite = await api('GET', `/api/reports/generate?tenant=${fido.id}&date=2026-06-12&site=${kpansia.id}`, { token: su });
+  check('reports/generate single site', genSite.status === 200 && genSite.json.scope === 'SITE' && !!genSite.json.summary, genSite.json);
+  const genAll = await api('GET', `/api/reports/generate?tenant=${fido.id}&date=2026-06-12&site=ALL`, { token: su });
+  check('reports/generate all sites roll-up', genAll.status === 200 && genAll.json.scope === 'ALL' && Array.isArray(genAll.json.bySite), genAll.json);
+
+  // ── day operations capture (save + read back) ──
+  const opsPut = await api('PUT', `/api/reports/ops?tenant=${fido.id}`, { token: su, body: { date: '2026-06-12', site: kpansia.id, data: { water: { ph: '7.2', tds: '40' } } } });
+  check('reports/ops save', !!opsPut.json.ok, opsPut.json);
+  const opsGet = await api('GET', `/api/reports/ops?tenant=${fido.id}&date=2026-06-12&site=${kpansia.id}`, { token: su });
+  check('reports/ops read back', opsGet.json.data && opsGet.json.data.water && opsGet.json.data.water.ph === '7.2', opsGet.json);
+
+  // ── expense lifecycle: create → validate → approve → pay (+ imprest tagging) ──
+  const exp = await api('POST', `/api/expenses?tenant=${fido.id}`, { token: su, body: { site_id: kpansia.id, category: 'DIESEL', description: 'Smoke diesel', kind: 'IMPREST', items: [{ name: 'Diesel', qty: 10, price: 1000 }] } });
+  check('create expense (DRAFT, imprest)', exp.status === 201 && !!exp.json.id && exp.json.wf_state === 'DRAFT' && exp.json.kind === 'IMPREST', exp.json);
+  const eid = exp.json.id;
+  const t1 = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'validate' } });
+  check('expense validate → REVIEWED', t1.json.wf_state === 'REVIEWED', t1.json);
+  const t2 = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'approve' } });
+  check('expense approve → APPROVED', t2.json.wf_state === 'APPROVED', t2.json);
+  const t3 = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'pay' } });
+  check('expense pay → PAID', t3.json.wf_state === 'PAID', t3.json);
+  const badStep = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'validate' } });
+  check('expense bad transition rejected', badStep.status === 409, badStep.json);
+  const imp = await api('GET', `/api/expenses/imprest-summary?tenant=${fido.id}&from=2026-06-12&to=2026-06-12`, { token: su });
+  check('imprest summary shape', Array.isArray(imp.json.sites), imp.json);
+
+  // ── contact us reaches at least one recipient (admins, with inbox fallback) ──
+  const contact = await api('POST', `/api/contact?tenant=${fido.id}`, { token: su, body: { message: 'Smoke contact test' } });
+  check('contact reaches a recipient', contact.status === 201 && contact.json.ok && contact.json.recipients >= 1, contact.json);
+
+  // ── email diagnostics (MAIL_DISABLED → no-op success) ──
+  const eh = await api('GET', `/api/email/health?tenant=${fido.id}`, { token: su });
+  check('email health ok', eh.json.ok === true, eh.json);
+  const et = await api('POST', `/api/email/test?tenant=${fido.id}`, { token: su, body: { to: 'test@x.test' } });
+  check('email test send ok', et.json.ok === true, et.json);
+
+  // ── disabling a member revokes access but keeps their data ──
+  const members = await api('GET', `/api/members?tenant=${fido.id}`, { token: su });
+  const mgrMember = (members.json.members || []).find((m) => m.email === 'mgr@fido.test');
+  check('members list includes the site manager', !!mgrMember, members.json);
+  const disable = await api('PATCH', `/api/members/${mgrMember.id}?tenant=${fido.id}`, { token: su, body: { status: 'DISABLED' } });
+  check('admin disables a member', !!disable.json.ok, disable.json);
+  const mgrAfter = await api('GET', '/api/auth/me', { token: mgr });
+  check('disabled member loses access', (mgrAfter.json.tenants || []).length === 0, mgrAfter.json);
+  await api('PATCH', `/api/members/${mgrMember.id}?tenant=${fido.id}`, { token: su, body: { status: 'ACTIVE' } });   // restore
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('smoke crashed:', e); process.exit(1); });

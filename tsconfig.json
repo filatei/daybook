@@ -1,0 +1,21 @@
+{
+  "//": "Type-check scaffolding. allowJs+checkJs:false means existing .js/.jsx are NOT flagged; only new .ts/.tsx files are type-checked. Convert files to TS incrementally — no big-bang rewrite. Run: npm run typecheck",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "allowJs": true,
+    "checkJs": false,
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["frontend/src"],
+  "exclude": ["node_modules", "dist", "frontend/dist", "frontend/src/public"]
+}

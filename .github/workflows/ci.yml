@@ -45,6 +45,9 @@ jobs:
           node --check backend/routes_expenses.js
           node --check backend/routes_logistics.js
           node --check backend/routes_payroll.js
+      - name: TypeScript check (scaffolding — non-blocking until conversion)
+        continue-on-error: true
+        run: npx tsc --noEmit
       - name: Boot + smoke test
         env:
           JWT_SECRET: ci-test-secret

@@ -209,9 +209,12 @@ function ReportDetail({ report, canEdit, onEdit, onClose }) {
 
   const emailReport = async () => {
     setEmailing(true);
+    toast('Sending report…', 'info');
     try {
       const r = await api(scoped('/reports/generate/email'), { method: 'POST', body: { date: report.report_date, site: report.site_id || 'ALL', incidents: (report.notes || '').trim() } });
-      toast(`Report emailed ✓ → ${(r.to || []).join(', ')}`, 'ok');
+      const who = (r.to || []).join(', ');
+      if (r.queued) toast(`Report queued — sending shortly to ${who}`, 'info');
+      else toast(`Report emailed ✓ → ${who}`, 'ok');
     } catch (e) { toast(e.message || 'Email failed', 'err'); }
     setEmailing(false);
   };
@@ -381,9 +384,12 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
 
   const emailReport = async () => {
     setEmailing(true);
+    toast('Sending report…', 'info');
     try {
       const r = await api(scoped('/reports/generate/email'), { method: 'POST', body: { date, site: siteId, incidents: incidents.trim() } });
-      toast(`Report emailed ✓ → ${(r.to || []).join(', ')}`, 'ok');
+      const who = (r.to || []).join(', ');
+      if (r.queued) toast(`Report queued — sending shortly to ${who}`, 'info');
+      else toast(`Report emailed ✓ → ${who}`, 'ok');
     } catch (e) { toast(e.message || 'Email failed', 'err'); }
     setEmailing(false);
   };

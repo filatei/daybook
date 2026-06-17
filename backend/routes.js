@@ -790,8 +790,8 @@ router.post('/reports/generate/email', requireAuth, needTenant('SECRETARY'), asy
   try {
     const sent = await sendGeneratedReport({ tenant, date, report: out, incidents: (b.incidents || '').trim(), to });
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
-      [uuid(), req.ctx.tenant_id, to.join(','), sent.subject, 'SENT']).catch(() => {});
-    res.json({ ok: true, to });
+      [uuid(), req.ctx.tenant_id, to.join(','), sent.subject, sent.queued ? 'QUEUED' : 'SENT']).catch(() => {});
+    res.json({ ok: true, to, queued: !!sent.queued });
   } catch (e) {
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)',
       [uuid(), req.ctx.tenant_id, to.join(','), `Daily report ${date}`, 'FAILED', e.message]).catch(() => {});

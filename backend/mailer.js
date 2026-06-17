@@ -443,8 +443,11 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
       <p style="color:#9ca3af;font-size:12px;margin-top:18px">Auto-generated from Daybook sales, production and expenses for ${esc(date)}.</p>
     </div>
   </div>`;
-  const info = await deliver({ from: FROM, to, subject, html });
-  return { messageId: info.messageId, subject, to };
+  // No attachments → use the persistent outbox so a relay throttle (421) is
+  // retried for hours instead of failing the request. Returns queued=true when
+  // it couldn't send immediately so the UI can say "queued" rather than "sent".
+  const r = await sendOrQueue({ to: Array.isArray(to) ? to.join(', ') : to, subject, html, tenant_id: tenant && tenant.id, kind: 'report' });
+  return { messageId: r.messageId, queued: r.queued, subject, to };
 }
 
 // Contact-us message → emailed to all admins (reply-to the sender).

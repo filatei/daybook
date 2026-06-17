@@ -91,6 +91,7 @@ app.use((err, _req, res, _next) => {
       console.log(`[Daybook] listening on :${PORT} (${process.env.NODE_ENV || 'development'})`);
       try { require('./scheduler').start(); } catch (e) { console.error('[sync] scheduler not started:', e.message); }
       try { require('./livefeed').start(); } catch (e) { console.error('[livefeed] not started:', e.message); }
+      try { require('./mailer').startOutboxWorker(); } catch (e) { console.error('[mailer] outbox worker not started:', e.message); }
     });
   } catch (e) {
     console.error('[FATAL] startup failed:', e.message);

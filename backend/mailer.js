@@ -71,6 +71,76 @@ async function deliver(opts) {
 const FROM = process.env.SMTP_FROM || 'Daybook <noreply@torama.money>';
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://daybook.torama.money';
 
+// ── Reliable delivery via a persistent outbox ─────────────────────────────────
+// Most email failures here are the Google relay throttling bursts with a 421
+// "try again later". Instead of sending inline (and failing), we queue the email
+// and a background worker drains it ONE at a time, spaced out, retrying with long
+// backoff for hours — so invites/notifications always eventually arrive.
+let _db = null;
+function db() { if (!_db) _db = require('./db'); return _db; }
+const isTransient = (e) => {
+  const code = e && (e.responseCode || 0);
+  return (code >= 400 && code < 500)
+    || ['ETIMEDOUT', 'ECONNECTION', 'ESOCKET', 'ECONNRESET', 'EAI_AGAIN', 'EDNS'].includes(e && e.code)
+    || /try again later|4\.7\.0|421|too many|rate/i.test((e && e.message) || '');
+};
+
+async function enqueueEmail({ to, subject, html, replyTo, tenant_id, kind }) {
+  const { v4: uuid } = require('uuid');
+  const addrs = Array.isArray(to) ? to.join(',') : String(to || '');
+  if (!addrs) return { skipped: true };
+  await db().qrun(
+    `INSERT INTO email_outbox (id,to_addrs,subject,html,reply_to,tenant_id,kind,next_at) VALUES (?,?,?,?,?,?,?,?)`,
+    [uuid(), addrs, subject || null, html || null, replyTo || null, tenant_id || null, kind || null, Math.floor(Date.now() / 1000)]);
+  return { queued: true };
+}
+
+// Try once (with deliver()'s own quick retry); if it still fails transiently,
+// queue it for the background worker. Permanent errors are reported to the caller.
+async function sendOrQueue({ to, subject, html, replyTo, tenant_id, kind, attachments }) {
+  if (MAIL_DISABLED) { await getTransporter().sendMail({ from: FROM, to, subject, html }); return { ok: true, disabled: true }; }
+  try {
+    const info = await getTransporter().sendMail({ from: FROM, to, subject, html, replyTo: replyTo || undefined, attachments });
+    return { ok: true, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, response: info.response };
+  } catch (e) {
+    if (isTransient(e) && !attachments) { await enqueueEmail({ to, subject, html, replyTo, tenant_id, kind }); return { ok: true, queued: true }; }
+    throw e;
+  }
+}
+
+const OUTBOX_BACKOFF = [60, 300, 900, 1800, 3600, 7200, 14400];   // 1m,5m,15m,30m,1h,2h,4h
+let _outboxTimer = null;
+async function drainOutbox() {
+  if (MAIL_DISABLED) return;
+  const { qall, qrun } = db();
+  const now = Math.floor(Date.now() / 1000);
+  let rows;
+  try { rows = await qall(`SELECT * FROM email_outbox WHERE status='PENDING' AND next_at<=? ORDER BY next_at LIMIT 1`, [now]); }
+  catch { return; }   // table not ready yet
+  if (!rows || !rows.length) return;
+  const m = rows[0];
+  try {
+    await getTransporter().sendMail({ from: FROM, to: m.to_addrs.split(','), subject: m.subject, html: m.html, replyTo: m.reply_to || undefined });
+    await qrun(`UPDATE email_outbox SET status='SENT', sent_at=? WHERE id=?`, [now, m.id]);
+    if (m.tenant_id) await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)', [require('uuid').v4(), m.tenant_id, m.to_addrs, m.subject || '', 'SENT']).catch(() => {});
+  } catch (e) {
+    const attempts = (m.attempts || 0) + 1;
+    const transient = isTransient(e);
+    if (transient && attempts < OUTBOX_BACKOFF.length) {
+      await qrun(`UPDATE email_outbox SET attempts=?, next_at=?, last_error=? WHERE id=?`, [attempts, now + OUTBOX_BACKOFF[attempts - 1], (e.message || '').slice(0, 500), m.id]);
+    } else {
+      await qrun(`UPDATE email_outbox SET status='FAILED', attempts=?, last_error=? WHERE id=?`, [attempts, (e.message || '').slice(0, 500), m.id]);
+      if (m.tenant_id) await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)', [require('uuid').v4(), m.tenant_id, m.to_addrs, m.subject || '', 'FAILED', (e.message || '').slice(0, 300)]).catch(() => {});
+    }
+  }
+}
+function startOutboxWorker() {
+  if (_outboxTimer || MAIL_DISABLED) return;
+  const ms = parseInt(process.env.OUTBOX_INTERVAL_MS || '6000', 10);   // ~1 email / 6s → well under relay limits
+  _outboxTimer = setInterval(() => { drainOutbox().catch(() => {}); }, ms);
+  console.log(`[Mailer] outbox worker started — draining every ${ms}ms`);
+}
+
 const ngn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 
 /**
@@ -181,8 +251,8 @@ async function sendInvite({ to, tenantName, roleLabel, inviterName, brand = '#0e
       <p style="color:#9ca3af;font-size:12px">If you weren't expecting this, you can ignore this email.</p>
     </div>
   </div>`;
-  const info = await deliver({ from: FROM, to, subject, html });
-  return { messageId: info.messageId, subject, to };
+  const r = await sendOrQueue({ to, subject, html, kind: 'invite' });
+  return { messageId: r.messageId, queued: r.queued, subject, to };
 }
 
 /**
@@ -256,8 +326,8 @@ async function sendExpenseNotice({ to, tenantName, brand = '#2563eb', expense = 
       </p>
     </div>
   </div>`;
-  const info = await deliver({ from: FROM, to, subject, html });
-  return { messageId: info.messageId, subject, to };
+  const r = await sendOrQueue({ to, subject, html, kind: 'expense' });
+  return { messageId: r.messageId, queued: r.queued, subject, to };
 }
 
 // Render the operator-keyed operations into report HTML (only non-empty groups).
@@ -363,8 +433,8 @@ async function sendContactMessage({ to, tenantName, fromName, fromEmail, subject
       <p style="color:#9ca3af;font-size:12px;margin-top:16px">Reply directly to this email to respond to ${esc(fromName)}.</p>
     </div>
   </div>`;
-  const info = await deliver({ from: FROM, to, replyTo: fromEmail || undefined, subject: `[Daybook] ${subject}`, html });
-  return { messageId: info.messageId, to };
+  const r = await sendOrQueue({ to, replyTo: fromEmail || undefined, subject: `[Daybook] ${subject}`, html, kind: 'contact' });
+  return { messageId: r.messageId, queued: r.queued, to };
 }
 
 async function verifyConnection() {
@@ -386,4 +456,4 @@ async function sendTest({ to }) {
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, sendGeneratedReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, sendContactMessage, verifyConnection, sendTest, FROM };
+module.exports = { sendDailyReport, sendGeneratedReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, sendContactMessage, enqueueEmail, drainOutbox, startOutboxWorker, verifyConnection, sendTest, FROM };

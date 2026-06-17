@@ -725,6 +725,26 @@ async function migrate() {
     ALTER TABLE testplan_results ADD COLUMN IF NOT EXISTS data TEXT;
     ALTER TABLE testplan_results ADD COLUMN IF NOT EXISTS updated_at BIGINT;
     CREATE INDEX IF NOT EXISTS idx_testplan_created ON testplan_results(created_at DESC);
+
+    -- Email outbox: emails are queued and drained slowly by a background worker
+    -- so bursts never trip the SMTP relay's "421 try again later" throttle, and
+    -- transient failures are retried (with long backoff) until they go through.
+    CREATE TABLE IF NOT EXISTS email_outbox (
+      id          TEXT PRIMARY KEY,
+      to_addrs    TEXT NOT NULL,
+      subject     TEXT,
+      html        TEXT,
+      reply_to    TEXT,
+      tenant_id   TEXT,
+      kind        TEXT,
+      attempts    INTEGER DEFAULT 0,
+      status      TEXT DEFAULT 'PENDING',   -- PENDING | SENT | FAILED
+      next_at     BIGINT,
+      last_error  TEXT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      sent_at     BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbox_due ON email_outbox(status, next_at);
   `);
 
   // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool

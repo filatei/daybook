@@ -32,8 +32,8 @@ async function emailInvite(tenant_id, inviterId, email, role) {
       inviterName: inviter?.name || inviter?.email || null, brand: t?.brand_color || '#0ea5e9',
     });
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
-      [uuid(), tenant_id, email, sent.subject, 'SENT']);
-    return { ok: true };
+      [uuid(), tenant_id, email, sent.subject, sent && sent.queued ? 'QUEUED' : 'SENT']);
+    return { ok: true, queued: !!(sent && sent.queued) };
   } catch (e) {
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)',
       [uuid(), tenant_id, email, 'You have been added to Daybook', 'FAILED', e.message]).catch(() => {});

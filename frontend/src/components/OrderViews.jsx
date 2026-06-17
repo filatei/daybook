@@ -3,8 +3,9 @@ import { api, scoped, ngn } from '../api.js';
 
 const fmt = (at) => {
   if (!at) return '';
-  try { return new Date(typeof at === 'number' ? at * 1000 : at).toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); }
-  catch { return ''; }
+  const d = new Date(typeof at === 'number' ? at * 1000 : at);
+  if (Number.isNaN(d.getTime())) return '';   // never render "Invalid Date"
+  return d.toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 };
 
 const Backdrop = ({ onClose, children, z = 120 }) => (

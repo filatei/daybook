@@ -27,9 +27,45 @@ function getTransporter() {
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
   const auth = user && pass ? { user, pass } : undefined;
-  _transporter = nodemailer.createTransport({ host, port, secure, auth });
-  console.log(`[Mailer] SMTP ${host}:${port} | auth: ${auth ? 'credentials' : 'IP-relay (no password)'}`);
+  _transporter = nodemailer.createTransport({
+    host, port, secure, auth,
+    // Pool + rate-limit so we never hammer the relay (the cause of 421 "try again
+    // later"): at most a few messages/second over one reused connection.
+    pool: true,
+    maxConnections: parseInt(process.env.SMTP_MAX_CONN || '1', 10),
+    maxMessages: parseInt(process.env.SMTP_MAX_MSGS || '50', 10),
+    rateDelta: 1000,
+    rateLimit: parseInt(process.env.SMTP_RATE || '4', 10),
+    connectionTimeout: 15000, greetingTimeout: 12000, socketTimeout: 25000,
+  });
+  console.log(`[Mailer] SMTP ${host}:${port} | auth: ${auth ? 'credentials' : 'IP-relay (no password)'} | pooled`);
   return _transporter;
+}
+
+// Send with automatic retry + exponential backoff on TRANSIENT failures
+// (421/4xx throttling, timeouts, dropped connections). Permanent errors (5xx,
+// bad address) fail fast. This is what makes delivery reliable under bursts.
+async function deliver(opts) {
+  if (MAIL_DISABLED) return getTransporter().sendMail(opts);
+  const maxTries = parseInt(process.env.SMTP_RETRIES || '4', 10);
+  let lastErr;
+  for (let attempt = 0; attempt < maxTries; attempt++) {
+    try { return await getTransporter().sendMail(opts); }
+    catch (e) {
+      lastErr = e;
+      const code = e.responseCode || 0;
+      const transient = (code >= 400 && code < 500)
+        || ['ETIMEDOUT', 'ECONNECTION', 'ESOCKET', 'ECONNRESET', 'EAI_AGAIN', 'EDNS'].includes(e.code)
+        || /try again later|4\.7\.0|421|too many|rate/i.test(e.message || '');
+      if (!transient || attempt === maxTries - 1) throw e;
+      try { _transporter && _transporter.close && _transporter.close(); } catch {}
+      _transporter = null;   // force a fresh connection on the next attempt
+      const wait = Math.min(30000, 1000 * 2 ** attempt) + Math.floor(Math.random() * 600);
+      console.warn(`[Mailer] transient send failure (attempt ${attempt + 1}/${maxTries}) — retrying in ${wait}ms: ${e.message}`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
 }
 
 const FROM = process.env.SMTP_FROM || 'Daybook <noreply@torama.money>';
@@ -112,7 +148,7 @@ async function sendDailyReport({ tenant, site, report, to, attachments = [] }) {
     </div>
   </div>`;
 
-  const info = await getTransporter().sendMail({
+  const info = await deliver({
     from: FROM,
     to: to.join(', '),
     subject,
@@ -145,7 +181,7 @@ async function sendInvite({ to, tenantName, roleLabel, inviterName, brand = '#0e
       <p style="color:#9ca3af;font-size:12px">If you weren't expecting this, you can ignore this email.</p>
     </div>
   </div>`;
-  const info = await getTransporter().sendMail({ from: FROM, to, subject, html });
+  const info = await deliver({ from: FROM, to, subject, html });
   return { messageId: info.messageId, subject, to };
 }
 
@@ -183,7 +219,7 @@ async function sendMidMonthPayroll({ tenant, from, to, summary, to: recipients, 
     </div>
   </div>`;
   const attachments = csv ? [{ filename: `midmonth-payroll-${from}.csv`, content: csv }] : [];
-  const info = await getTransporter().sendMail({ from: FROM, to: recipients, subject, html, attachments });
+  const info = await deliver({ from: FROM, to: recipients, subject, html, attachments });
   return { messageId: info.messageId, subject, to: recipients };
 }
 
@@ -220,7 +256,7 @@ async function sendExpenseNotice({ to, tenantName, brand = '#2563eb', expense = 
       </p>
     </div>
   </div>`;
-  const info = await getTransporter().sendMail({ from: FROM, to, subject, html });
+  const info = await deliver({ from: FROM, to, subject, html });
   return { messageId: info.messageId, subject, to };
 }
 
@@ -309,7 +345,7 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
       <p style="color:#9ca3af;font-size:12px;margin-top:18px">Auto-generated from Daybook sales, production and expenses for ${esc(date)}.</p>
     </div>
   </div>`;
-  const info = await getTransporter().sendMail({ from: FROM, to, subject, html });
+  const info = await deliver({ from: FROM, to, subject, html });
   return { messageId: info.messageId, subject, to };
 }
 
@@ -327,7 +363,7 @@ async function sendContactMessage({ to, tenantName, fromName, fromEmail, subject
       <p style="color:#9ca3af;font-size:12px;margin-top:16px">Reply directly to this email to respond to ${esc(fromName)}.</p>
     </div>
   </div>`;
-  const info = await getTransporter().sendMail({ from: FROM, to, replyTo: fromEmail || undefined, subject: `[Daybook] ${subject}`, html });
+  const info = await deliver({ from: FROM, to, replyTo: fromEmail || undefined, subject: `[Daybook] ${subject}`, html });
   return { messageId: info.messageId, to };
 }
 
@@ -339,7 +375,7 @@ async function verifyConnection() {
 // Send a real test email and surface the SMTP server's verdict (accepted /
 // rejected / response) so an admin can see exactly where mail goes.
 async function sendTest({ to }) {
-  const info = await getTransporter().sendMail({
+  const info = await deliver({
     from: FROM, to,
     subject: 'Daybook email test ✓',
     html: '<p>This is a <b>Daybook SMTP test</b>. If you received this, email delivery is working. Check your Spam/Promotions folder if it landed there.</p>',

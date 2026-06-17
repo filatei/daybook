@@ -726,13 +726,15 @@ async function buildGeneratedReport(ctx, date, siteArg) {
     }
     const oRows = await qall('SELECT data FROM ops_daily WHERE tenant_id=? AND ops_date=?', [ctx.tenant_id, date]);
     if (oRows.length) {
-      stockTotals = { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0 };
+      stockTotals = { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0, rolls_used_count: 0, rolls_available_count: 0 };
       for (const o of oRows) {
         const dd = J(o.data, {}) || {}; const pk = dd.packing || {}, rl = dd.rolls || {};
         stockTotals.packing_available += Number(pk.available) || 0;
         stockTotals.packing_used += Number(pk.used_production) || 0;
         stockTotals.rolls_used_kg += Number(rl.used_kg) || 0;
         stockTotals.rolls_available_kg += Number(rl.available_kg) || 0;
+        stockTotals.rolls_used_count += Number(rl.used_count) || 0;
+        stockTotals.rolls_available_count += Number(rl.available_count) || 0;
         stockTotals.sites++;
       }
     }

@@ -5,7 +5,7 @@ import { useStore } from '../store.jsx';
 const EMPTY = () => ({
   bags: { leakage: '', staff_water: '', extra: '', rebagging: '', damage: '' },
   packing: { opening: '', received: '', used_production: '', sales: '', rebagging: '', damage_replacement: '', available: '' },
-  rolls: { opening_kg: '', received_kg: '', used_kg: '', available_kg: '' },
+  rolls: { opening_count: '', opening_kg: '', received_count: '', received_kg: '', used_count: '', used_kg: '', available_count: '', available_kg: '' },
   crates: { c50_available: '', c50_sold: '', c60_available: '', c75_available: '', dispenser_available: '' },
   water: { ph: '', tds: '' },
   power: { nepa_hours: '' },   // hours of NEPA / public-utility power for the day
@@ -117,11 +117,15 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
             <Num group="packing" k="available" label="Available" />
           </Group>
 
-          <Group title="Rolls (kg)">
-            <Num group="rolls" k="opening_kg" label="Opening" />
-            <Num group="rolls" k="received_kg" label="Received" />
-            <Num group="rolls" k="used_kg" label="Used" />
-            <Num group="rolls" k="available_kg" label="Available" />
+          <Group title="Rolls — number & kg">
+            <Num group="rolls" k="opening_count" label="Opening (no.)" />
+            <Num group="rolls" k="opening_kg" label="Opening (kg)" />
+            <Num group="rolls" k="received_count" label="Received (no.)" />
+            <Num group="rolls" k="received_kg" label="Received (kg)" />
+            <Num group="rolls" k="used_count" label="Used (no.)" />
+            <Num group="rolls" k="used_kg" label="Used (kg)" />
+            <Num group="rolls" k="available_count" label="Available (no.)" />
+            <Num group="rolls" k="available_kg" label="Available (kg)" />
           </Group>
 
           <Group title="Crates">

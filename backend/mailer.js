@@ -341,7 +341,11 @@ function opsHtml(ops) {
   let out = '';
   out += kv('Packing bags', ops.packing, [['Opening', 'opening'], ['Received', 'received'], ['Used for production', 'used_production'], ['Sales bags', 'sales'], ['Re-bagging', 'rebagging'], ['Damage replacement', 'damage_replacement'], ['Available', 'available']]);
   out += kv('Bag adjustments', ops.bags, [['Leakage', 'leakage'], ['Staff water', 'staff_water'], ['Extra / bonus', 'extra'], ['Re-bagging', 'rebagging'], ['Damage', 'damage']]);
-  out += kv('Rolls (kg)', ops.rolls, [['Opening', 'opening_kg'], ['Received', 'received_kg'], ['Used', 'used_kg'], ['Available', 'available_kg']]);
+  out += kv('Rolls (number / kg)', ops.rolls, [
+    ['Opening (no.)', 'opening_count'], ['Opening (kg)', 'opening_kg'],
+    ['Received (no.)', 'received_count'], ['Received (kg)', 'received_kg'],
+    ['Used (no.)', 'used_count'], ['Used (kg)', 'used_kg'],
+    ['Available (no.)', 'available_count'], ['Available (kg)', 'available_kg']]);
   out += kv('Crates', ops.crates, [['50cl available', 'c50_available'], ['50cl sold', 'c50_sold'], ['60cl available', 'c60_available'], ['75cl available', 'c75_available'], ['Dispenser available', 'dispenser_available']]);
   out += kv('Water analysis', ops.water, [['PH', 'ph'], ['TDS', 'tds']]);
   out += kv('Public power (NEPA)', ops.power, [['NEPA hours today', 'nepa_hours']]);
@@ -422,8 +426,8 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
       <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
         <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Packing bags used</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.packing_used || 0).toLocaleString()}</td></tr>
         <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Packing bags available</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.packing_available || 0).toLocaleString()}</td></tr>
-        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls used (kg)</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_used_kg || 0).toLocaleString()}</td></tr>
-        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls available (kg)</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_available_kg || 0).toLocaleString()}</td></tr>
+        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls used</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_used_count || 0).toLocaleString()} (${(s.stockTotals.rolls_used_kg || 0).toLocaleString()}kg)</td></tr>
+        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls available</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_available_count || 0).toLocaleString()} (${(s.stockTotals.rolls_available_kg || 0).toLocaleString()}kg)</td></tr>
       </table>` : ''}
       ${opsHtml(s.ops)}
       ${incidents ? `<div style="font-weight:800;margin:6px 0">Incidents / notes</div>

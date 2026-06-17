@@ -271,7 +271,7 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
                 </div>
                 {gen.summary.stockTotals && (
                   <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 6 }}>
-                    Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {(gen.summary.stockTotals.packing_available || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg · avail {(gen.summary.stockTotals.rolls_available_kg || 0).toLocaleString()}kg
+                    Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {(gen.summary.stockTotals.packing_available || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg) · avail {(gen.summary.stockTotals.rolls_available_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_available_kg || 0).toLocaleString()}kg)
                   </div>
                 )}
               </div>

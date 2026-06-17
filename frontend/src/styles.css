@@ -310,7 +310,7 @@ label.fl { display: block; font-size: 13px; font-weight: 600; color: var(--muted
 .ta-item:hover, .ta-item:active, .ta-item.on { background: var(--brand-l); }
 
 /* ── Sales line editor ─────────────────────────────────────────────────────── */
-.line { display: grid; grid-template-columns: 1.4fr .8fr 1fr auto; gap: 7px; align-items: center; margin-bottom: 7px; }
+.line { display: grid; grid-template-columns: 1.5fr 1fr auto; gap: 7px; align-items: center; margin-bottom: 7px; }
 .line .input { padding: 10px; font-size: 14px; }
 .line .x { background: #fee2e2; color: var(--err); border: none; width: 34px; height: 34px; border-radius: 9px; font-size: 16px; cursor: pointer; }
 
@@ -430,4 +430,29 @@ tr:hover td { background: #f8fafc; }
   .main-content { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
   /* FAB sits above bottom nav on mobile */
   .fab { bottom: calc(72px + var(--safe-b)); }
+
+  /* Inputs at ≥16px so iOS Safari never zooms the page on focus */
+  .input, select.input, textarea.input { font-size: 16px; padding: 12px; }
+  .line .input { font-size: 16px; padding: 10px; }
+  label.fl { font-size: 12px; }
+
+  /* Sales-line editor: roomy label, comfortable amount, tap-sized delete */
+  .line { grid-template-columns: 1.5fr 1fr 40px; gap: 6px; }
+  .line .x { width: 40px; height: 40px; }
+
+  /* Two-up field grids stay 2-col but tighten the gutter on narrow phones */
+  .grid2 { gap: 8px; }
+
+  /* Sticky save/submit bar: equal, full-width, thumb-friendly buttons */
+  .cap-bar { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .cap-bar .btn { padding: 13px; font-size: 15px; }
+
+  /* Modal sheet uses the full width with a little breathing room */
+  .modal-box { padding: 18px 14px calc(18px + var(--safe-b)); border-radius: 20px 20px 0 0; }
+}
+
+/* Very narrow phones (≤360px): let the cash/diesel grid stack so number
+   inputs never get crushed below a usable width */
+@media (max-width: 360px) {
+  .grid2 { grid-template-columns: 1fr; }
 }

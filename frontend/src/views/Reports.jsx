@@ -239,9 +239,8 @@ function ReportForm({ report, sites, onSave, onClose }) {
         <div className="line" key={i}>
           <input className="input" placeholder="Label" value={line.label}
             onChange={(e) => setF((p) => { const s = [...p.sales]; s[i] = { ...s[i], label: e.target.value }; return { ...p, sales: s }; })} />
-          <input className="input" type="number" placeholder="0" value={line.amount}
+          <input className="input" type="number" inputMode="decimal" placeholder="0" value={line.amount}
             onChange={(e) => setF((p) => { const s = [...p.sales]; s[i] = { ...s[i], amount: e.target.value }; return { ...p, sales: s }; })} />
-          <span />
           <button className="x" onClick={() => setF((p) => ({ ...p, sales: p.sales.filter((_, j) => j !== i) }))}>✕</button>
         </div>
       ))}
@@ -331,8 +330,9 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
   const s = gen?.summary;
 
   return (
-    <div onClick={() => !saving && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
-      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 460, margin: 0, maxHeight: '92vh', overflowY: 'auto' }}>
+    <div onClick={() => !saving && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 130 }}>
+      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 460, margin: 0, maxHeight: '92vh', overflowY: 'auto', borderRadius: '20px 20px 0 0', paddingBottom: 'calc(16px + var(--safe-b))' }}>
+        <div className="grip" />
         <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 4 }}>Generate daily report</div>
         <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>Auto-built from the day's sales, production and expenses. Add incidents, then submit.</p>
 

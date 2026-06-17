@@ -118,8 +118,8 @@ function Inner() {
         <footer className="app-footer">
           © {new Date().getFullYear()} Torama Technologies ·{' '}
           <a role="button" tabIndex={0} style={{ cursor: 'pointer' }} onClick={() => openModal(<ContactForm onClose={closeModal} />)}>Contact us</a> ·{' '}
-          <a href="https://torama.money/privacy" target="_blank" rel="noopener noreferrer">Privacy</a> ·{' '}
-          <a href="https://torama.money/terms" target="_blank" rel="noopener noreferrer">Terms</a>
+          <a href="/privacy.html" target="_blank" rel="noopener noreferrer">Privacy</a> ·{' '}
+          <a href="/terms.html" target="_blank" rel="noopener noreferrer">Terms</a>
         </footer>
       </main>
       <Modal />
@@ -171,6 +171,7 @@ function LoginScreen({ devLogin }) {
           </button>
         )}
       </div>
+      <div className="login-copyright">© {new Date().getFullYear()} Torama Technologies</div>
     </div>
   );
 }

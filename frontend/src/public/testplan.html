@@ -19,6 +19,15 @@
   .meta{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
   .meta input,.meta select{ width:100%; padding:10px; border-radius:9px; border:1px solid rgba(255,255,255,.5);
         background:rgba(255,255,255,.14); color:#fff; font-size:16px; }
+  .idcell{ background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.22); border-radius:9px; padding:7px 10px; display:flex; flex-direction:column; gap:1px; min-width:0; }
+  .idk{ font-size:10px; letter-spacing:.5px; text-transform:uppercase; color:rgba(255,255,255,.6); }
+  .idv{ font-size:15px; font-weight:700; color:rgba(255,255,255,.92); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .idcell input{ border:none; background:none; color:#fff; font-size:15px; font-weight:700; padding:0; width:100%; }
+  #authgate{ position:fixed; inset:0; z-index:100; background:var(--bg); display:none; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px; }
+  #authgate .card{ background:#fff; border-radius:16px; padding:28px 22px; max-width:360px; box-shadow:0 8px 30px rgba(2,6,23,.14); }
+  #authgate h2{ margin:0 0 8px; }
+  #authgate p{ color:var(--muted); font-size:14px; }
+  #authgate a.btn2{ display:inline-block; margin-top:16px; background:var(--blue2); color:#fff; text-decoration:none; font-weight:800; padding:12px 26px; border-radius:10px; }
   .meta input::placeholder{ color:rgba(255,255,255,.8); }
   .meta select option{ color:#0f172a; }
   .progwrap{ margin-top:12px; }
@@ -84,10 +93,10 @@
     <h1>Daybook — Site Test Plan</h1>
     <div class="sub">Test every Fido feature on live data, in parallel with Fido, for one full day.</div>
     <div class="meta">
-      <input id="m-tester" placeholder="Your name" />
-      <select id="m-site"></select>
-      <select id="m-role"></select>
-      <input id="m-date" type="date" />
+      <div class="idcell"><span class="idk">Name</span><span class="idv" id="i-name">—</span></div>
+      <div class="idcell"><span class="idk">Site</span><span class="idv" id="i-site">—</span></div>
+      <div class="idcell"><span class="idk">Role</span><span class="idv" id="i-role">—</span></div>
+      <div class="idcell"><span class="idk">Date</span><input id="m-date" type="date" /></div>
     </div>
     <div class="progwrap">
       <div class="progbar"><div class="progfill" id="progfill"></div></div>
@@ -95,6 +104,15 @@
     </div>
   </div>
 </header>
+
+<div id="authgate">
+  <div class="card">
+    <div style="font-size:40px">🔒</div>
+    <h2>Sign in to Daybook</h2>
+    <p>The test plan is part of Daybook. Sign in first — your name, site and role are filled in automatically.</p>
+    <a class="btn2" href="/">Open Daybook to sign in</a>
+  </div>
+</div>
 
 <div class="wrap" id="app"></div>
 
@@ -109,8 +127,8 @@
   <div class="foot">
     Saves automatically · © <span id="yr"></span> Torama Technologies ·
     <a href="mailto:support@torama.money">Contact us</a> ·
-    <a href="https://torama.money/privacy" target="_blank" rel="noopener">Privacy</a> ·
-    <a href="https://torama.money/terms" target="_blank" rel="noopener">Terms</a>
+    <a href="/privacy.html" target="_blank" rel="noopener">Privacy</a> ·
+    <a href="/terms.html" target="_blank" rel="noopener">Terms</a>
   </div>
 </div>
 
@@ -240,7 +258,7 @@ function updateSaveBtn(){
   else { b.textContent='✓ Saved'; b.disabled=true; }
 }
 async function doSync(){
-  if(syncing) return;
+  if(syncing || !authed) return;   // never save anonymously — only after sign-in
   const c=counts();
   const payload={ id:S.id, site:S.meta.site||'', tester:S.meta.tester||'', role:S.meta.role||'', date:S.meta.date||'',
     passed:c.passed, failed:c.failed, na:c.na, total:c.total, readiness:S.so.ready||'', summary:summary(), data:JSON.stringify(S) };
@@ -258,13 +276,33 @@ function scheduleSync(){ dirty=true; updateSaveBtn(); clearTimeout(syncT); syncT
 // save() persists locally immediately, then queues a server sync.
 const save = () => { localStorage.setItem(KEY, JSON.stringify(S)); scheduleSync(); };
 
-// meta controls
-const mt=document.getElementById('m-tester'), ms=document.getElementById('m-site'), mr=document.getElementById('m-role'), md=document.getElementById('m-date');
-ms.innerHTML = '<option value="">Site…</option>'+SITES.map(s=>`<option>${s}</option>`).join('');
-mr.innerHTML = '<option value="">Role…</option>'+ROLES.map(r=>`<option>${r}</option>`).join('');
-mt.value=S.meta.tester||''; ms.value=S.meta.site||''; mr.value=S.meta.role||''; md.value=S.meta.date||new Date().toISOString().slice(0,10);
-[["tester",mt],["site",ms],["role",mr],["date",md]].forEach(([k,el])=>el.addEventListener('input',()=>{S.meta[k]=el.value; save();}));
-S.meta.date=md.value; save();
+// Date is editable; Name / Site / Role come from the signed-in Daybook session.
+const md=document.getElementById('m-date');
+md.value=S.meta.date||new Date().toISOString().slice(0,10);
+S.meta.date=md.value;
+md.addEventListener('input',()=>{ S.meta.date=md.value; save(); });
+
+const ROLE_LABELS={GATEMAN:'Gateman / Security',GATE:'Gate',SUPERVISOR:'Supervisor',SECRETARY:'Secretary',SITE_MANAGER:'Manager',ACCOUNTANT:'Accountant',SNR_ACCOUNTANT:'Snr Accountant',GENERAL_MANAGER:'General Manager',ADMIN:'Admin',SUPERADMIN:'Superadmin'};
+let authed=false;
+const _tok=localStorage.getItem('daybook_token'), _ten=localStorage.getItem('daybook_tenant');
+async function initAuth(){
+  if(!_tok){ document.getElementById('authgate').style.display='flex'; return; }
+  let me; try{ const r=await fetch('/api/auth/me',{headers:{Authorization:'Bearer '+_tok}}); if(!r.ok) throw 0; me=await r.json(); }
+  catch{ document.getElementById('authgate').style.display='flex'; return; }
+  const m=(me.tenants||[]).find(t=>String(t.id)===String(_ten))||(me.tenants||[])[0];
+  let siteName=(m&&m.site_id)?'your site':'All sites';
+  if(m&&m.site_id){ try{ const sites=await (await fetch('/api/sites?tenant='+encodeURIComponent(m.id),{headers:{Authorization:'Bearer '+_tok}})).json(); const s=(sites||[]).find(x=>x.id===m.site_id); if(s) siteName=s.name; }catch{} }
+  S.meta.tester=(me.user&&(me.user.name||me.user.email))||'User';
+  S.meta.email=(me.user&&me.user.email)||'';
+  S.meta.site=siteName;
+  S.meta.role=ROLE_LABELS[m&&m.role]||(m&&m.role)||'';
+  document.getElementById('i-name').textContent=S.meta.tester;
+  document.getElementById('i-site').textContent=S.meta.site;
+  document.getElementById('i-role').textContent=S.meta.role||'—';
+  authed=true; localStorage.setItem(KEY,JSON.stringify(S));
+  scheduleSync();   // persist identity + any progress now that we know who this is
+}
+initAuth();
 
 function prog(){
   const done = allIds.filter(id => S.res[id] && S.res[id].st).length;
@@ -352,7 +390,7 @@ updateSaveBtn();
 if(S.meta.tester || Object.keys(S.res).length || Object.keys(S.cc).length) scheduleSync();
 // Best-effort flush if they close the tab mid-edit.
 window.addEventListener('beforeunload',()=>{
-  if(dirty && navigator.sendBeacon){
+  if(authed && dirty && navigator.sendBeacon){
     const c=counts();
     const payload={ id:S.id, site:S.meta.site||'', tester:S.meta.tester||'', role:S.meta.role||'', date:S.meta.date||'',
       passed:c.passed, failed:c.failed, na:c.na, total:c.total, readiness:S.so.ready||'', summary:summary(), data:JSON.stringify(S) };

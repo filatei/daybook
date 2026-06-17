@@ -78,8 +78,11 @@ const check = (n, c, x) => { if (c) { pass++; console.log('  ✅ ' + n); } else 
   check('site manager scoped to fido', mgrMe.json.tenants.length === 1 && mgrMe.json.tenants[0].role === 'SITE_MANAGER', mgrMe.json);
   const mgrSites = await api('GET', `/api/sites?tenant=${fido.id}`, { token: mgr });
   check('site manager sees only their site', mgrSites.json.length === 1 && mgrSites.json[0].code === 'KPANSIA', mgrSites.json);
-  const mgrAdd = await api('POST', '/api/members', { token: mgr, body: { tenant_id: fido.id, email: 'x@y.test', role: 'SITE_MANAGER', site_id: kpansia.id } });
-  check('site manager cannot manage members', mgrAdd.status === 403, mgrAdd.json);
+  // Managers may add members BELOW their rank, but not a peer/higher role.
+  const mgrAddPeer = await api('POST', '/api/members', { token: mgr, body: { tenant_id: fido.id, email: 'peer@y.test', role: 'SITE_MANAGER', site_id: kpansia.id } });
+  check('site manager cannot grant an equal/higher role', mgrAddPeer.status === 403, mgrAddPeer.json);
+  const mgrAddLower = await api('POST', '/api/members', { token: mgr, body: { tenant_id: fido.id, email: 'gateman@y.test', role: 'GATEMAN', site_id: kpansia.id } });
+  check('site manager can add a lower-rank member', mgrAddLower.status === 201 && (mgrAddLower.json.invited || mgrAddLower.json.added), mgrAddLower.json);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

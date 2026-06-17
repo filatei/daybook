@@ -40,7 +40,8 @@ function SiteForm({ site, onSave, onClose }) {
 
 function MemberForm({ sites = [], onInvite, onClose, actorRole = 'ADMIN', lockSiteId = null }) {
   const { toast } = useStore();
-  const can = (r) => atLeast(actorRole, r);   // can't grant a role above your own
+  // Admins can grant any role; everyone else only roles BELOW their own.
+  const can = (r) => atLeast(actorRole, 'ADMIN') || !atLeast(r, actorRole);
   const [email, setEmail] = useState('');
   const [role, setRole] = useState(can('SECRETARY') ? 'SECRETARY' : 'GATEMAN');
   const [siteId, setSiteId] = useState(lockSiteId || sites[0]?.id || '');

@@ -323,8 +323,8 @@ router.post('/members', requireAuth, needTenant('SITE_MANAGER'), async (req, res
   if (!email || !role) return res.status(400).json({ error: 'email and role required' });
   const VALID_ROLES = ['ADMIN', 'GENERAL_MANAGER', 'SITE_MANAGER', 'SNR_ACCOUNTANT', 'ACCOUNTANT', 'SECRETARY', 'SUPERVISOR', 'GATEMAN', 'GATE'];
   if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'invalid role' });
-  // You can't grant a role higher than your own (only Admin can create Admins/GMs).
-  if (!atLeast(req.ctx.role, role)) return res.status(403).json({ error: 'you cannot grant a role higher than your own' });
+  // Non-admins may only add members BELOW their own rank (Admins can grant any role).
+  if (!atLeast(req.ctx.role, 'ADMIN') && atLeast(role, req.ctx.role)) return res.status(403).json({ error: 'you can only add members below your own role' });
   // Site-bound roles keep a site; Manager & Secretary must have one.
   const SITE_BOUND = ['SITE_MANAGER', 'SECRETARY', 'SUPERVISOR', 'GATEMAN', 'GATE'];
   const SITE_REQUIRED = ['SITE_MANAGER', 'SECRETARY'];

@@ -377,9 +377,9 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
   }
 
   // Pre-load customer ext_id → id per tenant
-  const custRows = await qall('SELECT id, tenant_id, ext_id FROM customers WHERE ext_id IS NOT NULL');
-  const custByExt = {};
-  for (const c of custRows) { const k = `${c.tenant_id}:${c.ext_id}`; custByExt[k] = c.id; }
+  const custRows = await qall('SELECT id, tenant_id, ext_id, name FROM customers WHERE ext_id IS NOT NULL');
+  const custByExt = {}, custNameByExt = {};
+  for (const c of custRows) { const k = `${c.tenant_id}:${c.ext_id}`; custByExt[k] = c.id; if (c.name) custNameByExt[k] = c.name; }
 
   // Receipt number counter per tenant (start from current max)
   const tenantMaxReceipt = {};
@@ -409,7 +409,10 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
     const isCash = !incentive && CASH_METHODS.includes(pm);
     const custExtId = order.customer ? String(order.customer) : null;
     const custId = custExtId ? (custByExt[`${site.tenant_id}:${custExtId}`] || null) : null;
-    const custName = clean(order.customerName || order.customer_name);
+    // Real name: the migrated customer record, else the transfer depositor name.
+    // (Fido orders have NO customerName field — customer is an ObjectId ref.)
+    const custName = (custExtId && custNameByExt[`${site.tenant_id}:${custExtId}`])
+      || clean(order.transfer_from_account_name) || null;
 
     // Map fido products[] to items_json
     const rawItems = Array.isArray(order.products) ? order.products : [];
@@ -434,8 +437,10 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
            sale_date,bank,terminal,ext_id,created_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
-           bank     = COALESCE(pos_sales.bank, EXCLUDED.bank),
-           terminal = COALESCE(pos_sales.terminal, EXCLUDED.terminal)
+           bank          = COALESCE(pos_sales.bank, EXCLUDED.bank),
+           terminal      = COALESCE(pos_sales.terminal, EXCLUDED.terminal),
+           customer_name = COALESCE(pos_sales.customer_name, EXCLUDED.customer_name),
+           customer_id   = COALESCE(pos_sales.customer_id, EXCLUDED.customer_id)
          RETURNING (xmax = 0) AS inserted`,
         [uuid(), site.tenant_id, site.id, nextReceipt(site.tenant_id),
           custId, custName, JSON.stringify(items),

@@ -122,13 +122,16 @@ router.post('/contact', requireAuth, async (req, res) => {
   const message = (b.message || '').toString().trim().slice(0, 5000);
   if (!message) return res.status(400).json({ error: 'message required' });
   const tenant = tid ? await tenantById(tid) : null;
-  const adminIds = (tid ? await tenantUserIds(tid, 'ADMIN') : []).filter((u) => u && u !== req.user.id);
-  // In-app inbox (alerts) for every admin
-  await notify(tid, adminIds, { type: 'contact', title: `Message from ${req.user.name || req.user.email}`, body: subject, link: 'activity' });
-  // Email every admin (reply-to the sender)
+  const allAdminIds = tid ? await tenantUserIds(tid, 'ADMIN') : [];
+  // In-app inbox (alerts) for every admin except the sender (no self-notify).
+  await notify(tid, allAdminIds.filter((u) => u && u !== req.user.id), { type: 'contact', title: `Message from ${req.user.name || req.user.email}`, body: subject, link: 'activity' });
+  // Email goes to ALL admins (including the sender if they are an admin, so a
+  // solo-admin company still gets it). Falls back to the Torama support inbox
+  // only when a company has no admin at all, so a message never goes nowhere.
   let emailed = false, email_error;
-  const adminUsers = adminIds.length ? await qall(`SELECT email FROM users WHERE id IN (${adminIds.map(() => '?').join(',')})`, adminIds) : [];
-  const emails = [...new Set(adminUsers.map((u) => u.email).filter(Boolean))];
+  const adminUsers = allAdminIds.length ? await qall(`SELECT email FROM users WHERE id IN (${allAdminIds.map(() => '?').join(',')})`, allAdminIds) : [];
+  let emails = [...new Set(adminUsers.map((u) => u.email).filter(Boolean))];
+  if (!emails.length) emails = [process.env.CONTACT_INBOX || 'support@torama.money'];
   if (emails.length) {
     try { await sendContactMessage({ to: emails, tenantName: tenant && tenant.name, fromName: req.user.name || req.user.email, fromEmail: req.user.email, subject, message }); emailed = true; }
     catch (e) { email_error = e.message; }

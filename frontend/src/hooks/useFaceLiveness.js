@@ -24,9 +24,9 @@ function ear(pts) {
   return (dist(pts[1], pts[5]) + dist(pts[2], pts[4])) / (2 * dist(pts[0], pts[3]));
 }
 
-// Two quick challenges keep it fast for floor use: blink, then a head turn in
-// EITHER direction. (Was blink + left + right, which got stuck for users.)
-const CHALLENGES = ['BLINK', 'TURN'];
+// A single, fast liveness check for floor use: one blink. (Dropped the head-turn
+// step — and the earlier blink+left+right — which kept getting stuck for users.)
+const CHALLENGES = ['BLINK'];
 const CHALLENGE_TEXT = {
   BLINK: 'Blink your eyes',
   TURN: 'Turn your head left or right',

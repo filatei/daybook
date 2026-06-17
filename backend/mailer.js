@@ -99,16 +99,22 @@ async function enqueueEmail({ to, subject, html, replyTo, tenant_id, kind }) {
 // queue it for the background worker. Permanent errors are reported to the caller.
 async function sendOrQueue({ to, subject, html, replyTo, tenant_id, kind, attachments }) {
   if (MAIL_DISABLED) { await getTransporter().sendMail({ from: FROM, to, subject, html }); return { ok: true, disabled: true }; }
+  const opts = { from: FROM, to, subject, html, replyTo: replyTo || undefined, attachments };
   try {
-    const info = await getTransporter().sendMail({ from: FROM, to, subject, html, replyTo: replyTo || undefined, attachments });
+    // deliver() retries transient 421/throttle inline (≈1s, 2s, 4s) so the mail
+    // almost always goes out within the same request — instant, like otuburu —
+    // instead of dropping to the background queue on the first hiccup.
+    const info = await deliver(opts);
     return { ok: true, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, response: info.response };
   } catch (e) {
+    // Still failing after the inline retries — only now fall back to the durable
+    // queue (can't persist file attachments, so those surface the error instead).
     if (isTransient(e) && !attachments) { await enqueueEmail({ to, subject, html, replyTo, tenant_id, kind }); return { ok: true, queued: true }; }
     throw e;
   }
 }
 
-const OUTBOX_BACKOFF = [60, 300, 900, 1800, 3600, 7200, 14400];   // 1m,5m,15m,30m,1h,2h,4h
+const OUTBOX_BACKOFF = [10, 30, 120, 300, 900, 3600, 14400];   // 10s,30s,2m,5m,15m,1h,4h
 let _outboxTimer = null;
 async function drainOutbox() {
   if (MAIL_DISABLED) return;

@@ -252,12 +252,16 @@ router.patch('/sites/:id', requireAuth, async (req, res) => {
 });
 
 // ── MEMBERS ───────────────────────────────────────────────────────────────────
-router.get('/members', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+router.get('/members', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  // Site Managers see their own site's members; GM/Snr/Admin see everyone.
+  const sb = siteBound(req.ctx);
+  const mWhere = sb ? 'm.tenant_id=? AND m.site_id=?' : 'm.tenant_id=?';
+  const mArgs = sb ? [req.ctx.tenant_id, req.ctx.site_id] : [req.ctx.tenant_id];
   const rows = await qall(
     `SELECT m.id, m.role, m.site_id, m.status, u.email, u.name, u.last_login, (u.google_sub IS NOT NULL) AS active_login
-       FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=? ORDER BY m.role DESC, u.email`,
-    [req.ctx.tenant_id]);
-  const pending = await qall('SELECT id,email,role,site_id FROM invites WHERE tenant_id=?', [req.ctx.tenant_id]);
+       FROM memberships m JOIN users u ON u.id=m.user_id WHERE ${mWhere} ORDER BY m.role DESC, u.email`, mArgs);
+  const iWhere = sb ? 'tenant_id=? AND site_id=?' : 'tenant_id=?';
+  const pending = await qall(`SELECT id,email,role,site_id FROM invites WHERE ${iWhere}`, mArgs);
   res.json({ members: rows, invites: pending });
 });
 
@@ -279,16 +283,20 @@ router.post('/email/test', requireAuth, needTenant('ADMIN'), async (req, res) =>
   }
 });
 
-router.post('/members', requireAuth, needTenant('ADMIN'), async (req, res) => {
+router.post('/members', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const { email, role, site_id } = req.body || {};
   if (!email || !role) return res.status(400).json({ error: 'email and role required' });
   const VALID_ROLES = ['ADMIN', 'GENERAL_MANAGER', 'SITE_MANAGER', 'SNR_ACCOUNTANT', 'ACCOUNTANT', 'SECRETARY', 'SUPERVISOR', 'GATEMAN', 'GATE'];
   if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'invalid role' });
+  // You can't grant a role higher than your own (only Admin can create Admins/GMs).
+  if (!atLeast(req.ctx.role, role)) return res.status(403).json({ error: 'you cannot grant a role higher than your own' });
   // Site-bound roles keep a site; Manager & Secretary must have one.
   const SITE_BOUND = ['SITE_MANAGER', 'SECRETARY', 'SUPERVISOR', 'GATEMAN', 'GATE'];
   const SITE_REQUIRED = ['SITE_MANAGER', 'SECRETARY'];
-  if (SITE_REQUIRED.includes(role) && !site_id) return res.status(400).json({ error: 'site required for this role' });
-  const memberSite = SITE_BOUND.includes(role) ? (site_id || null) : null;
+  // Site-bound inviters (a Site Manager) can only add people to their own site.
+  const sb = siteBound(req.ctx);
+  if (SITE_REQUIRED.includes(role) && !site_id && !sb) return res.status(400).json({ error: 'site required for this role' });
+  const memberSite = SITE_BOUND.includes(role) ? (sb ? req.ctx.site_id : (site_id || null)) : null;
   const lower = email.toLowerCase();
   const existing = await qone('SELECT * FROM users WHERE lower(email)=lower(?)', [lower]);
   if (existing) {
@@ -382,10 +390,21 @@ const activeAdminCount = async (tenant_id) => {
   return parseInt(r.n, 10);
 };
 
-router.patch('/members/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
+router.patch('/members/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const m = await qone('SELECT * FROM memberships WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   if (!m) return res.status(404).json({ error: 'not found' });
   const f = req.body || {};
+  // Non-admins (Manager / Accountant / Snr / GM) may only enable/disable members
+  // BELOW their own role at their own site — and only the status, never role/site.
+  // Disabling blocks app access immediately while keeping everything they created.
+  if (!atLeast(req.ctx.role, 'ADMIN')) {
+    if (atLeast(m.role, req.ctx.role)) return res.status(403).json({ error: 'you can only manage members below your role' });
+    if (siteBound(req.ctx) && m.site_id && m.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'this member is not at your site' });
+    if (f.status !== 'ACTIVE' && f.status !== 'DISABLED') return res.status(400).json({ error: 'you can only enable or disable a member' });
+    await qrun('UPDATE memberships SET status=? WHERE id=?', [f.status, m.id]);
+    if (f.status !== m.status) await audit(req.ctx.tenant_id, req.user.id, f.status === 'DISABLED' ? 'DISMISS_MEMBER' : 'RESTORE_MEMBER', 'membership', m.id);
+    return res.json({ ok: true });
+  }
   const newRole = f.role ?? m.role;
   const newStatus = f.status ?? m.status;
   const wasActiveAdmin = m.role === 'ADMIN' && m.status === 'ACTIVE';
@@ -406,11 +425,11 @@ router.delete('/members/:id', requireAuth, needTenant('ADMIN'), async (req, res)
   await audit(req.ctx.tenant_id, req.user.id, 'REMOVE_MEMBER', 'membership', m.id);
   res.json({ ok: true });
 });
-router.delete('/invites/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
+router.delete('/invites/:id', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   await qrun('DELETE FROM invites WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   res.json({ ok: true });
 });
-router.post('/invites/:id/resend', requireAuth, needTenant('ADMIN'), async (req, res) => {
+router.post('/invites/:id/resend', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
   const inv = await qone('SELECT * FROM invites WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   if (!inv) return res.status(404).json({ error: 'not found' });
   // Await the real send so the client can report a truthful result.

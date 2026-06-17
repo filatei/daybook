@@ -114,7 +114,12 @@ function Inner() {
         {tab === 'inventory'  && <Inventory />}
         {tab === 'profit'     && <Profit />}
         {tab === 'activity'   && <Activity />}
-        <footer className="app-footer">© {new Date().getFullYear()} Torama Technologies</footer>
+        <footer className="app-footer">
+          © {new Date().getFullYear()} Torama Technologies ·{' '}
+          <a href="mailto:support@torama.money">Contact us</a> ·{' '}
+          <a href="https://torama.money/privacy" target="_blank" rel="noopener noreferrer">Privacy</a> ·{' '}
+          <a href="https://torama.money/terms" target="_blank" rel="noopener noreferrer">Terms</a>
+        </footer>
       </main>
       <Modal />
       <Toast />

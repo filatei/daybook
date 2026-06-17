@@ -38,19 +38,20 @@ function SiteForm({ site, onSave, onClose }) {
   );
 }
 
-function MemberForm({ sites = [], onInvite, onClose }) {
+function MemberForm({ sites = [], onInvite, onClose, actorRole = 'ADMIN', lockSiteId = null }) {
   const { toast } = useStore();
+  const can = (r) => atLeast(actorRole, r);   // can't grant a role above your own
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState('SECRETARY');
-  const [siteId, setSiteId] = useState(sites[0]?.id || '');
+  const [role, setRole] = useState(can('SECRETARY') ? 'SECRETARY' : 'GATEMAN');
+  const [siteId, setSiteId] = useState(lockSiteId || sites[0]?.id || '');
   const [saving, setSaving] = useState(false);
   const SITE_ROLES = ['SITE_MANAGER', 'SECRETARY', 'GATEMAN', 'SUPERVISOR'];   // site-bound
   const needsSite = role === 'SITE_MANAGER' || role === 'SECRETARY';
   const invite = async () => {
     if (!email) return toast('Email required', 'err');
-    if (needsSite && !siteId) return toast('Pick a site for this Manager', 'err');
+    if (needsSite && !(lockSiteId || siteId)) return toast('Pick a site for this Manager', 'err');
     setSaving(true);
-    try { await onInvite(email, role, SITE_ROLES.includes(role) ? siteId : null); onClose(); }
+    try { await onInvite(email, role, SITE_ROLES.includes(role) ? (lockSiteId || siteId) : null); onClose(); }
     catch (e) { toast(e.message, 'err'); }
     setSaving(false);
   };
@@ -64,19 +65,21 @@ function MemberForm({ sites = [], onInvite, onClose }) {
       <label className="fl">Role</label>
       <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
         <optgroup label="Gate / Loading (gate screen only)">
-          <option value="GATEMAN">{ROLE_LABELS.GATEMAN} — scan &amp; release (exit)</option>
-          <option value="SUPERVISOR">{ROLE_LABELS.SUPERVISOR} — scan &amp; mark loaded</option>
+          {can('GATEMAN') && <option value="GATEMAN">{ROLE_LABELS.GATEMAN} — scan &amp; release (exit)</option>}
+          {can('SUPERVISOR') && <option value="SUPERVISOR">{ROLE_LABELS.SUPERVISOR} — scan &amp; mark loaded</option>}
         </optgroup>
         <optgroup label="Office (privilege ladder)">
-          <option value="SECRETARY">{ROLE_LABELS.SECRETARY} — one site: sales, expenses, attendance, generators</option>
-          <option value="ACCOUNTANT">{ROLE_LABELS.ACCOUNTANT} — + reconcile</option>
-          <option value="SNR_ACCOUNTANT">{ROLE_LABELS.SNR_ACCOUNTANT} — + payroll</option>
-          <option value="SITE_MANAGER">{ROLE_LABELS.SITE_MANAGER} — site operations</option>
-          <option value="GENERAL_MANAGER">{ROLE_LABELS.GENERAL_MANAGER} — all sites</option>
-          <option value="ADMIN">{ROLE_LABELS.ADMIN} — full access</option>
+          {can('SECRETARY') && <option value="SECRETARY">{ROLE_LABELS.SECRETARY} — one site: sales, expenses, attendance, generators</option>}
+          {can('ACCOUNTANT') && <option value="ACCOUNTANT">{ROLE_LABELS.ACCOUNTANT} — + reconcile</option>}
+          {can('SNR_ACCOUNTANT') && <option value="SNR_ACCOUNTANT">{ROLE_LABELS.SNR_ACCOUNTANT} — + payroll</option>}
+          {can('SITE_MANAGER') && <option value="SITE_MANAGER">{ROLE_LABELS.SITE_MANAGER} — site operations</option>}
+          {can('GENERAL_MANAGER') && <option value="GENERAL_MANAGER">{ROLE_LABELS.GENERAL_MANAGER} — all sites</option>}
+          {can('ADMIN') && <option value="ADMIN">{ROLE_LABELS.ADMIN} — full access</option>}
         </optgroup>
       </select>
-      {SITE_ROLES.includes(role) && sites.length > 0 && (
+      {lockSiteId ? (
+        SITE_ROLES.includes(role) && <p style={{ fontSize: 12, color: 'var(--muted)' }}>Added to your site: <b>{sites.find((s) => s.id === lockSiteId)?.name || 'your site'}</b>.</p>
+      ) : SITE_ROLES.includes(role) && sites.length > 0 && (
         <>
           <label className="fl">Site{needsSite ? ' *' : ' (optional)'}</label>
           <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
@@ -308,11 +311,17 @@ export function ProductForm({ product, onSave, onClose }) {
 
 // ── Admin ────────────────────────────────────────────────────────────────────
 export default function Admin() {
-  const { openModal, closeModal, toast, tenant } = useStore();
+  const { openModal, closeModal, toast, tenant, tenants } = useStore();
   const role = useRole();
   const isAdmin = atLeast(role, 'ADMIN');
   const isGM    = atLeast(role, 'GENERAL_MANAGER');
-  const [tab, setTab] = useState('sites');
+  const isMgr   = atLeast(role, 'SITE_MANAGER');
+  const myMembership = (tenants || []).find((t) => t.id === tenant);
+  const mySiteId = myMembership?.site_id || null;
+  const siteBoundMe = isMgr && !atLeast(role, 'SNR_ACCOUNTANT');   // Site Manager = one site
+  // A non-admin can enable/disable members strictly below their rank (+ own site).
+  const canManage = (m) => isMgr && !atLeast(m.role, role) && (!siteBoundMe || !m.site_id || m.site_id === mySiteId);
+  const [tab, setTab] = useState(isGM ? 'sites' : 'members');
   const [sites,    setSites]    = useState([]);
   const [members,  setMembers]  = useState([]);
   const [invites,  setInvites]  = useState([]);
@@ -368,6 +377,13 @@ export default function Admin() {
     await loadMembers();
   };
   const patchMember = async (id, body) => { await api(scoped(`/members/${id}`), { method: 'PATCH', body }); toast('Member updated ✓', 'ok'); await loadMembers(); };
+  const toggleMember = async (m) => {
+    const disabling = m.status !== 'DISABLED';
+    if (disabling && !window.confirm(`Disable ${m.name || m.email}? They lose app access immediately, but everything they recorded is kept. You can re-enable them later.`)) return;
+    try { await api(scoped(`/members/${m.id}`), { method: 'PATCH', body: { status: disabling ? 'DISABLED' : 'ACTIVE' } });
+      toast(disabling ? 'Member disabled — access revoked' : 'Member re-enabled ✓', 'ok'); await loadMembers(); }
+    catch (e) { toast(e.message || 'Could not update', 'err'); }
+  };
   const removeMember = async (m) => {
     if (!window.confirm(`Remove ${m.name || m.email} from this company?`)) return;
     try { await api(scoped(`/members/${m.id}`), { method: 'DELETE' }); toast('Member removed', 'ok'); closeModal(); await loadMembers(); }
@@ -381,9 +397,9 @@ export default function Admin() {
   return (
     <div>
       <div className="seg" style={{ marginBottom: 16, overflowX: 'auto', flexWrap: 'nowrap' }}>
-        <button className={`seg-b${tab === 'sites'    ? ' on' : ''}`} onClick={() => setTab('sites')}>🏗️ Sites</button>
+        {isGM && <button className={`seg-b${tab === 'sites'    ? ' on' : ''}`} onClick={() => setTab('sites')}>🏗️ Sites</button>}
         <button className={`seg-b${tab === 'members'  ? ' on' : ''}`} onClick={() => setTab('members')}>👥 Members</button>
-        <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>
+        {isGM && <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>}
         {isAdmin && <button className={`seg-b${tab === 'settings' ? ' on' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>}
       </div>
 
@@ -425,7 +441,11 @@ export default function Admin() {
                         <div style={{ fontWeight: 700 }}>{m.name || m.email}{m.status === 'DISABLED' ? ' (disabled)' : ''}</div>
                         <div style={{ fontSize: 12, color: 'var(--muted)' }}>{m.email} · {ROLE_LABELS[m.role] || m.role}{m.site_id ? ` · ${sites.find((x) => x.id === m.site_id)?.name || 'site'}` : ''}</div>
                       </div>
-                      {isAdmin && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => openEditMember(m)}>Edit</button>}
+                      {isAdmin ? (
+                        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => openEditMember(m)}>Edit</button>
+                      ) : canManage(m) && (
+                        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px', color: m.status === 'DISABLED' ? 'var(--ok)' : 'var(--err)' }} onClick={() => toggleMember(m)}>{m.status === 'DISABLED' ? 'Enable' : 'Disable'}</button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -441,8 +461,8 @@ export default function Admin() {
                           <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iv.email}</div>
                           <div style={{ fontSize: 12, color: 'var(--muted)' }}>Joins as {ROLE_LABELS[iv.role] || iv.role} when they sign in</div>
                         </div>
-                        {isAdmin && <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 10px', minWidth: 92 }} onClick={() => resendInvite(iv.id)} disabled={resendingId === iv.id}>{resendingId === iv.id ? <span className="spin" /> : '✉️ Resend'}</button>}
-                        {isAdmin && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => revokeInvite(iv.id)} disabled={resendingId === iv.id}>Remove</button>}
+                        {isMgr && <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 10px', minWidth: 92 }} onClick={() => resendInvite(iv.id)} disabled={resendingId === iv.id}>{resendingId === iv.id ? <span className="spin" /> : '✉️ Resend'}</button>}
+                        {isMgr && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => revokeInvite(iv.id)} disabled={resendingId === iv.id}>Remove</button>}
                       </div>
                     ))}
                   </div>
@@ -450,8 +470,8 @@ export default function Admin() {
               )}
             </>
           )}
-          {isAdmin && (
-            <button className="fab" onClick={() => openModal(<MemberForm sites={sites} onInvite={inviteMember} onClose={closeModal} />)}>+</button>
+          {isMgr && (
+            <button className="fab" onClick={() => openModal(<MemberForm sites={sites} onInvite={inviteMember} actorRole={role} lockSiteId={siteBoundMe ? mySiteId : null} onClose={closeModal} />)}>+</button>
           )}
         </>
       ) : (

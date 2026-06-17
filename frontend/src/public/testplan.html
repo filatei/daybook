@@ -10,7 +10,7 @@
          --blue:#0ea5e9; --blue2:#2563eb; --ok:#16a34a; --okbg:#dcfce7; --err:#dc2626; --errbg:#fee2e2; }
   *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   body{ margin:0; font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--ink);
-        padding:0 0 90px; line-height:1.45; }
+        padding:0 0 128px; line-height:1.45; }
   header{ background:linear-gradient(135deg,var(--blue),var(--blue2)); color:#fff; padding:18px 16px 14px;
           position:sticky; top:0; z-index:20; box-shadow:0 2px 10px rgba(2,6,23,.18); }
   header h1{ margin:0 0 2px; font-size:20px; }
@@ -52,9 +52,12 @@
   .signoff textarea, .signoff input[type=text]{ width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:9px; font-size:13px; font-family:inherit; margin-top:6px; }
   .ready{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
   .ready label{ flex:1; min-width:130px; border:1px solid var(--line); border-radius:9px; padding:8px; font-size:13px; display:flex; gap:6px; align-items:center; cursor:pointer; }
-  .bar{ position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid var(--line);
-        display:flex; gap:8px; padding:10px 12px; z-index:30; box-shadow:0 -2px 10px rgba(2,6,23,.08); }
+  #bottom{ position:fixed; left:0; right:0; bottom:0; z-index:30; background:#fff; border-top:1px solid var(--line);
+           box-shadow:0 -2px 10px rgba(2,6,23,.08); padding-bottom:env(safe-area-inset-bottom,0px); }
+  .bar{ display:flex; gap:8px; padding:10px 12px 6px; }
   .bar button{ flex:1; padding:12px; border-radius:10px; border:none; font-weight:800; font-size:14px; cursor:pointer; }
+  .foot{ text-align:center; font-size:11px; color:var(--muted); padding:0 12px 9px; line-height:1.6; }
+  .foot a{ color:var(--blue2); text-decoration:none; cursor:pointer; }
   .b-mail{ background:var(--blue2); color:#fff; }
   .b-copy{ background:#eef2f7; color:#0f172a; }
   .b-reset{ background:#fff; color:var(--err); border:1px solid var(--errbg) !important; max-width:96px; }
@@ -84,17 +87,21 @@
 
 <div class="wrap" id="app"></div>
 
-<footer style="text-align:center;color:var(--muted);font-size:12.5px;padding:18px 16px 8px">
-  Copyright © <span id="yr"></span> TORAMA TECHNOLOGIES<br>
-  <a id="b-copy" style="color:var(--blue2);cursor:pointer">Copy summary</a> ·
-  <a id="b-reset" style="color:var(--err);cursor:pointer">Reset my ticks</a>
-</footer>
-
 <div class="toast" id="toast"></div>
-<div class="bar">
-  <button class="b-mail" id="b-submit" style="flex:1.6">✅ Submit results</button>
-  <button class="b-copy" id="b-mail">✉️ Email</button>
-  <button class="b-copy" id="b-view">📋 Results</button>
+<div id="bottom">
+  <div class="bar">
+    <button class="b-mail" id="b-submit" style="flex:1.6">✅ Submit results</button>
+    <button class="b-copy" id="b-mail">✉️ Email</button>
+    <button class="b-copy" id="b-view">📋 Results</button>
+  </div>
+  <div class="foot">
+    © <span id="yr"></span> Torama Technologies ·
+    <a href="mailto:support@torama.money">Contact us</a> ·
+    <a href="https://torama.money/privacy" target="_blank" rel="noopener">Privacy</a> ·
+    <a href="https://torama.money/terms" target="_blank" rel="noopener">Terms</a> ·
+    <a id="b-copy">Copy</a> ·
+    <a id="b-reset">Reset</a>
+  </div>
 </div>
 
 <div id="results" style="position:fixed;inset:0;background:var(--bg);z-index:50;display:none;flex-direction:column">

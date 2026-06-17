@@ -26,19 +26,16 @@ function getTransporter() {
   const secure = process.env.SMTP_SECURE === 'true';
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
+  // Match otuburu exactly: a plain transport, one fresh connection per send.
+  // A long-lived POOLED connection is what the Google relay 421s under bursts —
+  // otuburu never hits it because every send opens and closes its own socket.
+  // Credential auth only when BOTH user and pass are set; otherwise IP relay.
   const auth = user && pass ? { user, pass } : undefined;
   _transporter = nodemailer.createTransport({
     host, port, secure, auth,
-    // Pool + rate-limit so we never hammer the relay (the cause of 421 "try again
-    // later"): at most a few messages/second over one reused connection.
-    pool: true,
-    maxConnections: parseInt(process.env.SMTP_MAX_CONN || '1', 10),
-    maxMessages: parseInt(process.env.SMTP_MAX_MSGS || '50', 10),
-    rateDelta: 1000,
-    rateLimit: parseInt(process.env.SMTP_RATE || '4', 10),
     connectionTimeout: 15000, greetingTimeout: 12000, socketTimeout: 25000,
   });
-  console.log(`[Mailer] SMTP ${host}:${port} | auth: ${auth ? 'credentials' : 'IP-relay (no password)'} | pooled`);
+  console.log(`[Mailer] SMTP ${host}:${port} | auth: ${auth ? 'credentials' : 'IP-relay (no password)'}`);
   return _transporter;
 }
 

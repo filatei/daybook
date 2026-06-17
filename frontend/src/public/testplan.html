@@ -266,7 +266,7 @@ async function doSync(){
   if(body===lastSent){ dirty=false; updateSaveBtn(); return; }
   syncing=true; updateSaveBtn();
   try{
-    const r=await fetch('/api/testplan',{method:'POST',headers:{'Content-Type':'application/json'},body});
+    const r=await fetch('/api/testplan',{method:'POST',headers:{'Content-Type':'application/json',...AUTHH()},body});
     if(!r.ok) throw new Error();
     lastSent=body; dirty=false;
   }catch{ dirty=true; /* stay dirty, will retry on next change or manual Save */ }
@@ -283,8 +283,9 @@ S.meta.date=md.value;
 md.addEventListener('input',()=>{ S.meta.date=md.value; save(); });
 
 const ROLE_LABELS={GATEMAN:'Gateman / Security',GATE:'Gate',SUPERVISOR:'Supervisor',SECRETARY:'Secretary',SITE_MANAGER:'Manager',ACCOUNTANT:'Accountant',SNR_ACCOUNTANT:'Snr Accountant',GENERAL_MANAGER:'General Manager',ADMIN:'Admin',SUPERADMIN:'Superadmin'};
-let authed=false;
+let authed=false, isAdmin=false, myUserId=null;
 const _tok=localStorage.getItem('daybook_token'), _ten=localStorage.getItem('daybook_tenant');
+const AUTHH=()=>(_tok?{Authorization:'Bearer '+_tok}:{});
 async function initAuth(){
   if(!_tok){ document.getElementById('authgate').style.display='flex'; return; }
   let me; try{ const r=await fetch('/api/auth/me',{headers:{Authorization:'Bearer '+_tok}}); if(!r.ok) throw 0; me=await r.json(); }
@@ -296,6 +297,8 @@ async function initAuth(){
   S.meta.email=(me.user&&me.user.email)||'';
   S.meta.site=siteName;
   S.meta.role=ROLE_LABELS[m&&m.role]||(m&&m.role)||'';
+  myUserId=(me.user&&me.user.id)||null;
+  isAdmin=!!(me.user&&me.user.is_superadmin)||(me.tenants||[]).some((t)=>t.role==='ADMIN');
   document.getElementById('i-name').textContent=S.meta.tester;
   document.getElementById('i-site').textContent=S.meta.site;
   document.getElementById('i-role').textContent=S.meta.role||'—';
@@ -432,7 +435,7 @@ document.getElementById('b-save').addEventListener('click',()=>{ clearTimeout(sy
 // Explicit discard — wipe this tester's saved data (server + this device)
 document.getElementById('b-discard').addEventListener('click',async()=>{
   if(!confirm('Discard this test sheet? Your saved answers are deleted from the server and this device. This cannot be undone.')) return;
-  try{ await fetch('/api/testplan/'+encodeURIComponent(S.id),{method:'DELETE'}); }catch{}
+  try{ await fetch('/api/testplan/'+encodeURIComponent(S.id),{method:'DELETE',headers:AUTHH()}); }catch{}
   localStorage.removeItem(KEY); location.reload();
 });
 
@@ -446,10 +449,11 @@ async function loadResults(){
     const READY={ready:'✅ Ready',small:'🟡 Small fixes',no:'🔴 Not ready'};
     rBody.innerHTML=rows.map(r=>{
       const when=new Date(((r.updated_at||r.created_at)||0)*1000).toLocaleString();
+      const canDel=isAdmin||(r.user_id&&r.user_id===myUserId);
       return `<div style="background:#fff;border-radius:12px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(2,6,23,.06)">
         <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
           <strong>${esc(r.site||'?')}</strong>
-          <span style="font-size:12px;color:var(--muted)">${esc(when)}</span>
+          <span style="font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center">${esc(when)}${canDel?` <button data-del="${esc(r.id)}" style="border:none;background:none;color:var(--err);cursor:pointer;font-size:15px;padding:0 2px">🗑</button>`:''}</span>
         </div>
         <div style="font-size:13px;color:var(--muted);margin:2px 0 6px">${esc(r.tester||'?')}${r.role?' · '+esc(r.role):''}${r.test_date?' · '+esc(r.test_date):''}</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:12px;font-weight:700">
@@ -461,6 +465,14 @@ async function loadResults(){
         ${r.summary?`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--blue2)">View details</summary><pre style="white-space:pre-wrap;font-size:12px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:8px;margin-top:6px;overflow:auto">${esc(r.summary)}</pre></details>`:''}
       </div>`;
     }).join('');
+    rBody.querySelectorAll('button[data-del]').forEach((b)=>b.addEventListener('click',async()=>{
+      if(!confirm('Delete this submitted result? This cannot be undone.')) return;
+      try{
+        const res=await fetch('/api/testplan/'+encodeURIComponent(b.getAttribute('data-del')),{method:'DELETE',headers:AUTHH()});
+        if(!res.ok) throw new Error();
+        loadResults();
+      }catch{ toast('Could not delete (admins only)'); }
+    }));
   }catch{ rBody.innerHTML='<div style="color:var(--err);padding:20px;text-align:center">Could not load results.</div>'; }
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }

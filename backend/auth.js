@@ -132,8 +132,21 @@ const atLeast = (role, min) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[min] || 0);
 // site.  Senior Accountant, General Manager and Admin are cross-site (all sites).
 const siteBound = (ctx) => !!(ctx && ctx.site_id && !atLeast(ctx.role, 'SNR_ACCOUNTANT'));
 
+// Sets req.user when a valid token is present, but never blocks the request.
+async function optionalAuth(req, _res, next) {
+  const token = readToken(req);
+  if (token) {
+    try {
+      const claims = jwt.verify(token, JWT_SECRET);
+      const u = await qone('SELECT * FROM users WHERE id=?', [claims.sub]);
+      if (u && u.status === 'ACTIVE') req.user = u;
+    } catch { /* ignore — treat as anonymous */ }
+  }
+  next();
+}
+
 module.exports = {
-  verifyGoogleToken, signSession, requireAuth,
+  verifyGoogleToken, signSession, requireAuth, optionalAuth,
   membershipsFor, accessibleTenants, contextFor, requestedTenant, atLeast, siteBound,
   JWT_SECRET, GOOGLE_CLIENT_ID,
 };

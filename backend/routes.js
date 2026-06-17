@@ -11,7 +11,7 @@ const fs = require('fs');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
 const {
-  verifyGoogleToken, signSession, requireAuth,
+  verifyGoogleToken, signSession, requireAuth, optionalAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, siteBound, GOOGLE_CLIENT_ID,
 } = require('./auth');
 const { sendDailyReport, sendGeneratedReport, sendInvite, sendContactMessage, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
@@ -143,30 +143,40 @@ router.post('/contact', requireAuth, async (req, res) => {
 // ── Test-plan results (public — the /testplan.html page has no login) ───────────
 // Submitted from any site; results are viewable back on the same page.
 // Auto-save: upsert by the client-stable id so each tester keeps ONE live row.
-router.post('/testplan', async (req, res) => {
+// optionalAuth records the submitter (the page is signed-in) without blocking the
+// occasional anonymous sendBeacon flush.
+router.post('/testplan', optionalAuth, async (req, res) => {
   const b = req.body || {};
   const n = (v) => Math.max(0, parseInt(v, 10) || 0);
   const clip = (v, len) => (v == null ? null : String(v).slice(0, len));
   const id = clip(b.id, 40) || uuid();
+  const uid = req.user ? req.user.id : null;
   await qrun(
-    `INSERT INTO testplan_results (id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,data,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `INSERT INTO testplan_results (id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,data,user_id,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT (id) DO UPDATE SET
        site=EXCLUDED.site, tester=EXCLUDED.tester, role=EXCLUDED.role, test_date=EXCLUDED.test_date,
        passed=EXCLUDED.passed, failed=EXCLUDED.failed, na=EXCLUDED.na, total=EXCLUDED.total,
-       readiness=EXCLUDED.readiness, summary=EXCLUDED.summary, data=EXCLUDED.data, updated_at=EXCLUDED.updated_at`,
+       readiness=EXCLUDED.readiness, summary=EXCLUDED.summary, data=EXCLUDED.data,
+       user_id=COALESCE(testplan_results.user_id, EXCLUDED.user_id), updated_at=EXCLUDED.updated_at`,
     [id, clip(b.site, 80), clip(b.tester, 80), clip(b.role, 60), clip(b.date, 20),
-      n(b.passed), n(b.failed), n(b.na), n(b.total), clip(b.readiness, 20), clip(b.summary, 20000), clip(b.data, 200000), nowS()]);
+      n(b.passed), n(b.failed), n(b.na), n(b.total), clip(b.readiness, 20), clip(b.summary, 20000), clip(b.data, 200000), uid, nowS()]);
   res.status(201).json({ ok: true, id });
 });
 
 router.get('/testplan', async (_req, res) => {
-  const rows = await qall('SELECT id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,created_at,updated_at FROM testplan_results ORDER BY COALESCE(updated_at,created_at) DESC LIMIT 200');
+  const rows = await qall('SELECT id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,user_id,created_at,updated_at FROM testplan_results ORDER BY COALESCE(updated_at,created_at) DESC LIMIT 200');
   res.json(rows);
 });
 
-// Explicit discard — remove this tester's saved row.
-router.delete('/testplan/:id', async (req, res) => {
+// Delete a result — the submitter can remove their own; an Admin can remove any.
+router.delete('/testplan/:id', requireAuth, async (req, res) => {
+  const row = await qone('SELECT user_id FROM testplan_results WHERE id=?', [req.params.id]);
+  if (!row) return res.json({ ok: true });
+  const isOwner = row.user_id && row.user_id === req.user.id;
+  const isAdmin = !!req.user.is_superadmin
+    || !!(await qone("SELECT 1 FROM memberships WHERE user_id=? AND role='ADMIN' AND status='ACTIVE' LIMIT 1", [req.user.id]));
+  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'only an admin (or the submitter) can delete this' });
   await qrun('DELETE FROM testplan_results WHERE id=?', [req.params.id]);
   res.json({ ok: true });
 });

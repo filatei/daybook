@@ -725,6 +725,7 @@ async function migrate() {
     );
     ALTER TABLE testplan_results ADD COLUMN IF NOT EXISTS data TEXT;
     ALTER TABLE testplan_results ADD COLUMN IF NOT EXISTS updated_at BIGINT;
+    ALTER TABLE testplan_results ADD COLUMN IF NOT EXISTS user_id TEXT;   -- submitter (for own-discard vs admin-delete)
     CREATE INDEX IF NOT EXISTS idx_testplan_created ON testplan_results(created_at DESC);
 
     -- Email outbox: emails are queued and drained slowly by a background worker

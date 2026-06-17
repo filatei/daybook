@@ -16,6 +16,76 @@ function Stat({ k, v, accent }) {
   );
 }
 
+// Day-operations detail (bags, rolls, crates, water, NEPA hours, generators, RO,
+// materials…) — the numbers the site keyed in. Shown in the archive detail so a
+// reviewer sees the full report, not just a "captured" note.
+function DayOpsView({ ops }) {
+  if (!ops || typeof ops !== 'object') return null;
+  const has = (o) => o && Object.values(o).some((v) => v !== '' && v != null && v !== 0);
+  const txt = (v) => v != null && String(v).trim() !== '';
+
+  const KV = ({ title, obj, rows }) => !has(obj) ? null : (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{title}</div>
+      {rows.map(([label, key]) => (obj[key] === '' || obj[key] == null) ? null : (
+        <div key={key} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+          <span style={{ color: 'var(--muted)' }}>{label}</span><span>{String(obj[key])}</span>
+        </div>
+      ))}
+    </div>
+  );
+
+  const gens = Array.isArray(ops.generators) ? ops.generators.filter((g) => g && g.name) : [];
+  const ros = Array.isArray(ops.ro) ? ops.ro.filter((r) => r && (r.unit || r.pure !== '' || r.waste !== '')) : [];
+
+  return (
+    <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+      <div style={{ fontWeight: 700, marginBottom: 2 }}>🛠 Day operations</div>
+      <KV title="Packing bags" obj={ops.packing} rows={[['Opening', 'opening'], ['Received', 'received'], ['Used for production', 'used_production'], ['Sales bags', 'sales'], ['Re-bagging', 'rebagging'], ['Damage replacement', 'damage_replacement'], ['Available', 'available']]} />
+      <KV title="Bag adjustments" obj={ops.bags} rows={[['Leakage', 'leakage'], ['Staff water', 'staff_water'], ['Extra / bonus', 'extra'], ['Re-bagging', 'rebagging'], ['Damage', 'damage']]} />
+      <KV title="Rolls (number / kg)" obj={ops.rolls} rows={[['Opening (no.)', 'opening_count'], ['Opening (kg)', 'opening_kg'], ['Received (no.)', 'received_count'], ['Received (kg)', 'received_kg'], ['Used (no.)', 'used_count'], ['Used (kg)', 'used_kg'], ['Available (no.)', 'available_count'], ['Available (kg)', 'available_kg']]} />
+      <KV title="Crates" obj={ops.crates} rows={[['50cl available', 'c50_available'], ['50cl sold', 'c50_sold'], ['60cl available', 'c60_available'], ['75cl available', 'c75_available'], ['Dispenser available', 'dispenser_available']]} />
+      <KV title="Water analysis" obj={ops.water} rows={[['PH', 'ph'], ['TDS', 'tds']]} />
+      <KV title="Public power (NEPA)" obj={ops.power} rows={[['NEPA hours today', 'nepa_hours']]} />
+      {gens.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Generator status</div>
+          {gens.map((g, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+              <span>{g.name}</span><span style={{ fontWeight: 600 }}>{g.status || '—'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {ros.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>RO readings</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700 }}>
+            <span>Unit</span><span style={{ textAlign: 'right' }}>Pure</span><span style={{ textAlign: 'right' }}>Waste</span>
+          </div>
+          {ros.map((r, i) => (
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+              <span>{r.unit || '—'}</span><span style={{ textAlign: 'right' }}>{String(r.pure ?? '')}</span><span style={{ textAlign: 'right' }}>{String(r.waste ?? '')}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {txt(ops.materials) && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Materials supplied to other locations</div>
+          <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{ops.materials}</div>
+        </div>
+      )}
+      {txt(ops.expired_docs) && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Expired documents</div>
+          <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{ops.expired_docs}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Rich read-only body of a generated/saved daily report — shared by the
 // Generate modal and the archive detail view so they always render identically.
 function GeneratedReportBody({ gen }) {
@@ -104,11 +174,13 @@ function GeneratedReportBody({ gen }) {
         </div>
       )}
 
-      {gen.scope !== 'ALL' && (
-        <div style={{ fontSize: 12, color: gen.summary?.ops ? 'var(--ok)' : 'var(--muted)', margin: '6px 2px' }}>
-          {gen.summary?.ops ? '✓ Day operations captured — included in the report.' : 'No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.'}
-        </div>
-      )}
+      {gen.scope !== 'ALL' && (gen.summary?.ops
+        ? <DayOpsView ops={gen.summary.ops} />
+        : (
+          <div style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 2px' }}>
+            No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.
+          </div>
+        ))}
     </>
   );
 }

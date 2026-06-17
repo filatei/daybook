@@ -49,6 +49,7 @@ function ProfileMenu({ user, isGMup, go, logout, canInstall, install }) {
           </div>
           {item('Activity & messages', '🔔', () => go('activity'))}
           {isGMup && item('Admin', '⚙️', () => go('admin'))}
+          {item('Test plan', '✅', () => { setOpen(false); window.open('/testplan.html', '_blank'); })}
           {canInstall && item('Install app', '⬇', install)}
           <div style={{ borderTop: '1px solid var(--line)', margin: '4px 0' }} />
           {item('Sign out', '⏻', logout)}

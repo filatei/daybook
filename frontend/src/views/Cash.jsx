@@ -71,7 +71,7 @@ function CashForm({ sites, accounts, onSave, onClose }) {
 
 // ── Cash detail — review (SEEN / VALIDATE) + receipts ───────────────────────
 function CashDetail({ id, onChanged, onClose }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const role = useRole();
   const canReview = role && atLeast(role, 'SNR_ACCOUNTANT');
   const canValidate = role && atLeast(role, 'ADMIN');
@@ -116,7 +116,7 @@ function CashDetail({ id, onChanged, onClose }) {
     } catch { toast('Could not open receipt', 'err'); }
   };
   const remove = async () => {
-    if (!window.confirm('Delete this cash entry?')) return;
+    if (!await confirm({ title: 'Delete this cash entry?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true })) return;
     try { await api(scoped(`/cash/${id}`), { method: 'DELETE' }); toast('Deleted', 'ok'); onChanged && onChanged(); onClose(); }
     catch (e) { toast(e.message || 'Could not delete', 'err'); }
   };

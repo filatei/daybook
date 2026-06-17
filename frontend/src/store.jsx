@@ -12,6 +12,7 @@ const initial = {
   tab: 'dashboard',
   toast: null,          // { msg, kind }
   modal: null,          // React node or null
+  confirm: null,        // { title, message, confirmText, cancelText, danger } or null
   online: navigator.onLine,
 };
 
@@ -23,6 +24,7 @@ function reducer(state, action) {
     case 'SET_TAB':     return { ...state, tab: action.tab };
     case 'TOAST':       return { ...state, toast: action.toast };
     case 'MODAL':       return { ...state, modal: action.modal };
+    case 'CONFIRM':     return { ...state, confirm: action.confirm };
     case 'ONLINE':      return { ...state, online: action.online };
     case 'LOGOUT':      return { ...initial, online: state.online };
     default:            return state;
@@ -59,6 +61,7 @@ export function StoreProvider({ children }) {
   const dirtyRef = useRef(false);   // …only when the form was actually edited
   const backRef = useRef([]);       // stack of in-view "go up one level" handlers
   const backId = useRef(0);
+  const confirmingRef = useRef(false);   // a discard confirm dialog is open
 
   // A drill-down view registers a handler for each open sub-level (site list →
   // order list → order). Back invokes the topmost so it steps UP one level
@@ -84,15 +87,37 @@ export function StoreProvider({ children }) {
   const closeModal = useCallback(() => { modalRef.current = null; guardRef.current = false; dirtyRef.current = false; dispatch({ type: 'MODAL', modal: null }); }, []);
   const setDirty = useCallback((v = true) => { dirtyRef.current = !!v; }, []);
 
+  // confirm(opts) → Promise<boolean> — a styled in-app replacement for window.confirm.
+  const confirmResolve = useRef(null);
+  const confirm = useCallback((opts = {}) => new Promise((resolve) => {
+    confirmResolve.current = resolve;
+    dispatch({ type: 'CONFIRM', confirm: { confirmText: 'Confirm', cancelText: 'Cancel', ...opts } });
+  }), []);
+  const resolveConfirm = useCallback((v) => {
+    dispatch({ type: 'CONFIRM', confirm: null });
+    const r = confirmResolve.current; confirmResolve.current = null;
+    if (r) r(v);
+  }, []);
+  const confirmRef = useRef(confirm); confirmRef.current = confirm;
+
   useEffect(() => {
     const buffer = () => { try { window.history.pushState({ db: true }, ''); } catch { /* ignore */ } };
     // Keep TWO spare entries so even if a re-arm push is throttled/dropped by the
     // browser, there is still an entry between us and the document — Back can
     // never pop past the app and exit it.
     buffer(); buffer();
-    const onPop = () => {
+    const onPop = async () => {
       if (modalRef.current) {                       // 1) Back closes an open modal first
-        if (guardRef.current && dirtyRef.current && !window.confirm('Discard your unsaved changes?')) { buffer(); return; }
+        if (guardRef.current && dirtyRef.current) {
+          if (confirmingRef.current) { buffer(); return; }   // a discard prompt is already open
+          buffer();                                          // re-arm before awaiting the dialog
+          confirmingRef.current = true;
+          const ok = await confirmRef.current({ title: 'Discard changes?', message: 'Your unsaved changes will be lost.', confirmText: 'Discard', cancelText: 'Keep editing', danger: true });
+          confirmingRef.current = false;
+          if (!ok) return;                                   // keep editing — modal stays
+          modalRef.current = null; guardRef.current = false; dirtyRef.current = false; dispatch({ type: 'MODAL', modal: null });
+          return;
+        }
         modalRef.current = null; guardRef.current = false; dirtyRef.current = false; dispatch({ type: 'MODAL', modal: null });
       } else if (backRef.current.length) {          // 2) …then steps UP one in-view drill level
         const top = backRef.current[backRef.current.length - 1];
@@ -120,7 +145,7 @@ export function StoreProvider({ children }) {
   }, []);
 
   const setSites = useCallback((sites) => dispatch({ type: 'SET_SITES', sites }), []);
-  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, setDirty, registerBack, logout };
+  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, setDirty, confirm, resolveConfirm, registerBack, logout };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

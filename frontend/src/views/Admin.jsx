@@ -312,7 +312,7 @@ export function ProductForm({ product, onSave, onClose }) {
 
 // ── Admin ────────────────────────────────────────────────────────────────────
 export default function Admin() {
-  const { openModal, closeModal, toast, tenant, tenants } = useStore();
+  const { openModal, closeModal, toast, tenant, tenants, confirm } = useStore();
   const role = useRole();
   const isAdmin = atLeast(role, 'ADMIN');
   const isGM    = atLeast(role, 'GENERAL_MANAGER');
@@ -380,13 +380,13 @@ export default function Admin() {
   const patchMember = async (id, body) => { await api(scoped(`/members/${id}`), { method: 'PATCH', body }); toast('Member updated ✓', 'ok'); await loadMembers(); };
   const toggleMember = async (m) => {
     const disabling = m.status !== 'DISABLED';
-    if (disabling && !window.confirm(`Disable ${m.name || m.email}? They lose app access immediately, but everything they recorded is kept. You can re-enable them later.`)) return;
+    if (disabling && !await confirm({ title: `Disable ${m.name || m.email}?`, message: 'They lose app access immediately, but everything they recorded is kept. You can re-enable them later.', confirmText: 'Disable', danger: true })) return;
     try { await api(scoped(`/members/${m.id}`), { method: 'PATCH', body: { status: disabling ? 'DISABLED' : 'ACTIVE' } });
       toast(disabling ? 'Member disabled — access revoked' : 'Member re-enabled ✓', 'ok'); await loadMembers(); }
     catch (e) { toast(e.message || 'Could not update', 'err'); }
   };
   const removeMember = async (m) => {
-    if (!window.confirm(`Remove ${m.name || m.email} from this company?`)) return;
+    if (!await confirm({ title: `Remove ${m.name || m.email}?`, message: 'They are removed from this company.', confirmText: 'Remove', danger: true })) return;
     try { await api(scoped(`/members/${m.id}`), { method: 'DELETE' }); toast('Member removed', 'ok'); closeModal(); await loadMembers(); }
     catch (e) { toast(e.message || 'Could not remove', 'err'); }
   };

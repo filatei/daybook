@@ -277,7 +277,7 @@ function PayablesView({ onOpenExpense }) {
 
 // View-first detail: read the ticket, attach receipts/notes, then choose to edit.
 function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const [pays, setPays] = useState([]);
   const [atts, setAtts] = useState([]);
   const [note, setNote] = useState('');
@@ -352,7 +352,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     } catch { toast('Could not open receipt', 'err'); }
   };
   const delAttachment = async (a) => {
-    if (!window.confirm('Remove this receipt/note?')) return;
+    if (!await confirm({ title: 'Remove this receipt/note?', confirmText: 'Remove', danger: true })) return;
     try { await api(scoped(`/expenses/${expense.id}/attachments/${a.id}`), { method: 'DELETE' }); loadAtts(); }
     catch (e) { toast(e.message || 'Could not remove', 'err'); }
   };

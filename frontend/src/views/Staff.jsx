@@ -167,7 +167,7 @@ function StaffForm({ sites, siteBound, defaultSite, onSaved, onClose }) {
 
 // ── Face liveness clock-in modal ──────────────────────────────────────────────
 function ClockModal({ staff, todayRecord, onDone, onClose, enroll = false }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const videoRef  = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -224,7 +224,7 @@ function ClockModal({ staff, todayRecord, onDone, onClose, enroll = false }) {
 
   // Remove an enrolled face (e.g. wrong person / re-do enrolment from scratch).
   const removeFace = async () => {
-    if (!window.confirm(`Remove ${staff.full_name}'s enrolled face?`)) return;
+    if (!await confirm({ title: `Remove ${staff.full_name}'s face?`, message: 'You can re-enrol it afterwards.', confirmText: 'Remove', danger: true })) return;
     setRemoving(true);
     try {
       await api(scoped(`/staff/${staff.id}/face`), { method: 'DELETE' });

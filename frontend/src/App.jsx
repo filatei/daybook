@@ -4,6 +4,7 @@ import { api, scoped, setToken } from './api.js';
 import Nav from './components/Nav.jsx';
 import ContactForm from './views/ContactForm.jsx';
 import Modal from './components/Modal.jsx';
+import ConfirmDialog from './components/ConfirmDialog.jsx';
 import Toast from './components/Toast.jsx';
 
 // Views (lazy-ish — just plain imports for now; split later if bundle grows)
@@ -123,6 +124,7 @@ function Inner() {
         </footer>
       </main>
       <Modal />
+      <ConfirmDialog />
       <Toast />
     </>
   );

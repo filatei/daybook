@@ -84,6 +84,10 @@
 
 <div class="wrap" id="app"></div>
 
+<footer style="text-align:center;color:var(--muted);font-size:12.5px;padding:18px 16px 8px">
+  Copyright © <span id="yr"></span> TORAMA TECHNOLOGIES
+</footer>
+
 <div class="toast" id="toast"></div>
 <div class="bar">
   <button class="b-mail" id="b-mail">✉️ Email results</button>
@@ -191,6 +195,7 @@ const DATA = [
 ]],
 ];
 
+document.getElementById('yr').textContent = new Date().getFullYear();
 const KEY="daybook-testplan-v1";
 let S = JSON.parse(localStorage.getItem(KEY) || "{}");
 S.meta = S.meta || {}; S.res = S.res || {}; S.cc = S.cc || {}; S.so = S.so || {};

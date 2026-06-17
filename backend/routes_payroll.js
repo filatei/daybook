@@ -641,7 +641,7 @@ async function emailMidMonth(tenant_id, runId) {
     const summary = { count: lines.length, baggers, loaders, total_baggers: sum(baggers), total_loaders: sum(loaders), total: sum(lines) };
     const csv = await fidoCsv(tenant_id, run);
     const mailer = require('./mailer');
-    const sent = await mailer.sendMidMonthPayroll({ tenant, from: run.period_from, to: run.period_to, summary, to, csv });
+    const sent = await mailer.sendMidMonthPayroll({ tenant, from: run.period_from, to: run.period_to, summary, recipients: to, csv });
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)', [uuid(), tenant_id, to.join(','), sent.subject, 'SENT']).catch(() => {});
   } catch (e) {
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)', [uuid(), tenant_id, '', 'Mid-month payroll', 'FAILED', e.message]).catch(() => {});

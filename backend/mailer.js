@@ -259,7 +259,7 @@ async function sendInvite({ to, tenantName, roleLabel, inviterName, brand = '#0e
  * Mid-month payroll draft email to accountants / GM / admin.
  * @param opts { tenant, from, to, summary:{count,total,total_baggers,total_loaders,baggers,loaders}, to:[emails], csv:string }
  */
-async function sendMidMonthPayroll({ tenant, from, to, summary, to: recipients, csv }) {
+async function sendMidMonthPayroll({ tenant, from, to, summary, recipients, csv }) {
   const brand = (tenant && tenant.brand_color) || '#2563eb';
   const name = (tenant && tenant.name) || 'Company';
   const s = summary || {};

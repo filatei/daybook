@@ -95,13 +95,14 @@ async function recentOrders({ sites, date, limit = 40 }) {
   const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
   if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
   const rows = await db.collection('fidoorders')
-    .find(match, { projection: { site: 1, txn_amount: 1, paymentMethod: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1 } })
+    .find(match, { projection: { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customer: 1, customerName: 1, customer_name: 1, transfer_from_account_name: 1, products: 1, createdAt: 1 } })
     .sort({ createdAt: -1 }).limit(Math.min(+limit || 40, 100)).toArray();
   const n = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
+  const nameMap = await customerNameMap(db, rows);
   return rows.map((o) => ({
     id: String(o._id),
     site: o.site || '',
-    customer: String(o.customerName || o.customer_name || '').trim() || null,
+    customer: orderCustomer(o, nameMap),
     amount: Math.round(n(o.txn_amount)),
     payment_method: isIncentiveOrder(o) ? 'INCENTIVE' : String(o.paymentMethod || 'CASH').toUpperCase(),
     items: Array.isArray(o.products) ? o.products.length : 0,
@@ -114,15 +115,39 @@ async function recentOrders({ sites, date, limit = 40 }) {
  * the "orders for this site" drill-down and printable per-order detail.
  */
 const n2 = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
-const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customerName: 1, customer_name: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
+const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customer: 1, customerName: 1, customer_name: 1, transfer_from_account_name: 1, contactPhone: 1, products: 1, createdAt: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
+
+// Fido orders reference a Customer by ObjectId (the name lives in the customers
+// collection); transfers also carry the depositor's bank-account name. Resolve a
+// best-effort display name for a batch of orders → Map(orderId → name).
+async function customerNameMap(db, rows) {
+  const { ObjectId } = require('mongodb');
+  const ids = [...new Set(rows.map((o) => o && o.customer).filter(Boolean).map(String))];
+  const byCust = new Map();
+  if (ids.length) {
+    const oids = ids.map((s) => { try { return new ObjectId(s); } catch { return null; } }).filter(Boolean);
+    for (const coll of ['customers', 'fiacustomers', 'fia_customers']) {
+      try {
+        const docs = await db.collection(coll).find({ _id: { $in: oids } }, { projection: { name: 1 } }).toArray();
+        for (const d of docs) { const nm = String(d.name || '').trim(); if (nm) byCust.set(String(d._id), nm); }
+      } catch { /* collection may not exist for this tenant */ }
+    }
+  }
+  return byCust;
+}
+// Best display name for one order, given the resolved customer-name map.
+const orderCustomer = (o, nameMap) =>
+  (o.customer && nameMap && nameMap.get(String(o.customer)))
+  || String(o.customerName || o.customer_name || o.transfer_from_account_name || '').trim()
+  || null;
 // Which bank/terminal a payment went through: POS uses the acquirer/card bank +
 // terminal location; transfer uses the source bank.
 const orderBank = (o) => String(o.acquirer || o.card_bank || o.bank || o.transfer_from_bank || '').trim().toUpperCase() || null;
-const mapOrder = (o) => ({
+const mapOrder = (o, nameMap) => ({
   id: String(o._id),
   order_no: o.fidoOrderId ?? o.orderId ?? null,
   site: o.site || '',
-  customer: String(o.customerName || o.customer_name || '').trim() || null,
+  customer: orderCustomer(o, nameMap),
   entry_by: String(o.userName || '').trim() || null,
   amount: Math.round(n2(o.txn_amount)),
   payment_method: isIncentiveOrder(o) ? 'INCENTIVE' : String(o.paymentMethod || 'CASH').toUpperCase(),
@@ -160,7 +185,8 @@ async function listOrders({ from, to, sites, method, bank, terminal, limit = 500
   const rows = await db.collection('fidoorders')
     .find(match, { projection: ORDER_PROJ })
     .sort({ createdAt: -1 }).limit(Math.min(+limit || 500, 1000)).toArray();
-  return rows.map(mapOrder);
+  const nameMap = await customerNameMap(db, rows);
+  return rows.map((o) => mapOrder(o, nameMap));
 }
 
 // Non-cash sales grouped by POS terminal / transfer bank, for the dashboard drill.
@@ -196,7 +222,9 @@ async function getOrder(id) {
   const db = await getDb();
   let _id; try { _id = new (require('mongodb').ObjectId)(id); } catch { return null; }
   const o = await db.collection('fidoorders').findOne({ _id }, { projection: ORDER_PROJ });
-  return o ? mapOrder(o) : null;
+  if (!o) return null;
+  const nameMap = await customerNameMap(db, [o]);
+  return mapOrder(o, nameMap);
 }
 
 /** Sum a site's expenses for one day from `expenses`. */

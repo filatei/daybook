@@ -54,6 +54,7 @@ jobs:
           PORT: "8090"
           DATABASE_URL: postgres://daybook:ci-password@localhost:5432/daybook_ci
           UPLOAD_DIR: /tmp/ci-uploads
+          MAIL_DISABLED: "1"
         run: |
           node backend/server.js & sleep 6
           node backend/smoke.js

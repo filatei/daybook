@@ -13,7 +13,13 @@ const nodemailer = require('nodemailer');
 const path = require('path');
 
 let _transporter;
+// In CI / local tests set MAIL_DISABLED=1 to skip real SMTP — every send resolves
+// as a no-op so the app logic (which only needs a result) runs without a relay.
+const MAIL_DISABLED = process.env.MAIL_DISABLED === '1' || process.env.MAIL_DISABLED === 'true';
 function getTransporter() {
+  if (MAIL_DISABLED) {
+    return { sendMail: async () => ({ messageId: 'disabled', accepted: [], rejected: [], response: 'MAIL_DISABLED' }), verify: async () => true };
+  }
   if (_transporter) return _transporter;
   const host = process.env.SMTP_HOST || 'smtp-relay.gmail.com';
   const port = parseInt(process.env.SMTP_PORT || '587', 10);

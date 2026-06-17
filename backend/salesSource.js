@@ -95,7 +95,7 @@ async function recentOrders({ sites, date, limit = 40 }) {
   const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
   if (Array.isArray(sites) && sites.length) match.$or = sites.map((c) => ({ site: siteRegex(c) }));
   const rows = await db.collection('fidoorders')
-    .find(match, { projection: { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customer: 1, customerName: 1, customer_name: 1, transfer_from_account_name: 1, products: 1, createdAt: 1 } })
+    .find(match, { projection: { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customer: 1, customerName: 1, customer_name: 1, transfer_from_account_name: 1, name_teller: 1, products: 1, createdAt: 1, clientTime: 1, trans_date: 1 } })
     .sort({ createdAt: -1 }).limit(Math.min(+limit || 40, 100)).toArray();
   const n = (v) => { const x = typeof v === 'object' && v && '$numberDecimal' in v ? parseFloat(v.$numberDecimal) : Number(v); return isNaN(x) ? 0 : x; };
   const nameMap = await customerNameMap(db, rows);
@@ -122,7 +122,7 @@ const toEpoch = (o) => {
   const t = d ? new Date(d).getTime() : NaN;
   return Number.isNaN(t) ? null : Math.floor(t / 1000);
 };
-const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customer: 1, customerName: 1, customer_name: 1, transfer_from_account_name: 1, contactPhone: 1, products: 1, createdAt: 1, clientTime: 1, trans_date: 1, received_date: 1, date_teller: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
+const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customer: 1, customerName: 1, customer_name: 1, transfer_from_account_name: 1, name_teller: 1, contactPhone: 1, products: 1, createdAt: 1, clientTime: 1, trans_date: 1, received_date: 1, date_teller: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
 
 // Fido orders reference a Customer by ObjectId (the name lives in the customers
 // collection); transfers also carry the depositor's bank-account name. Resolve a
@@ -142,10 +142,11 @@ async function customerNameMap(db, rows) {
   }
   return byCust;
 }
-// Best display name for one order, given the resolved customer-name map.
+// Best display name for one order: the linked Customer record, else any name
+// Fido carries on the order itself (transfer sender, teller-slip name).
 const orderCustomer = (o, nameMap) =>
   (o.customer && nameMap && nameMap.get(String(o.customer)))
-  || String(o.customerName || o.customer_name || o.transfer_from_account_name || '').trim()
+  || String(o.customerName || o.customer_name || o.transfer_from_account_name || o.name_teller || '').trim()
   || null;
 // Which bank/terminal a payment went through: POS uses the acquirer/card bank +
 // terminal location; transfer uses the source bank.

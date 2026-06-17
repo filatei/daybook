@@ -60,7 +60,9 @@
   .foot a{ color:var(--blue2); text-decoration:none; cursor:pointer; }
   .b-mail{ background:var(--blue2); color:#fff; }
   .b-copy{ background:#eef2f7; color:#0f172a; }
-  .b-reset{ background:#fff; color:var(--err); border:1px solid var(--errbg) !important; max-width:96px; }
+  .b-reset{ background:#fff; color:var(--err); border:1px solid var(--errbg) !important; max-width:104px; }
+  .b-save{ background:var(--ok); color:#fff; max-width:120px; }
+  .b-save:disabled{ background:#e2e8f0; color:#94a3b8; cursor:default; }
   .hint{ font-size:12px; color:var(--muted); padding:0 16px 10px; }
   .toast{ position:fixed; bottom:74px; left:50%; transform:translateX(-50%); background:#0f172a; color:#fff;
           padding:9px 16px; border-radius:20px; font-size:13px; opacity:0; transition:opacity .2s; z-index:40; pointer-events:none; }
@@ -99,17 +101,16 @@
 <div class="toast" id="toast"></div>
 <div id="bottom">
   <div class="bar">
-    <button class="b-mail" id="b-submit" style="flex:1.6">✅ Submit results</button>
+    <button class="b-save" id="b-save" disabled>✓ Saved</button>
     <button class="b-copy" id="b-mail">✉️ Email</button>
     <button class="b-copy" id="b-view">📋 Results</button>
+    <button class="b-reset" id="b-discard">🗑 Discard</button>
   </div>
   <div class="foot">
-    © <span id="yr"></span> Torama Technologies ·
+    Saves automatically · © <span id="yr"></span> Torama Technologies ·
     <a href="mailto:support@torama.money">Contact us</a> ·
     <a href="https://torama.money/privacy" target="_blank" rel="noopener">Privacy</a> ·
-    <a href="https://torama.money/terms" target="_blank" rel="noopener">Terms</a> ·
-    <a id="b-copy">Copy</a> ·
-    <a id="b-reset">Reset</a>
+    <a href="https://torama.money/terms" target="_blank" rel="noopener">Terms</a>
   </div>
 </div>
 
@@ -226,9 +227,36 @@ document.getElementById('yr').textContent = new Date().getFullYear();
 const KEY="daybook-testplan-v1";
 let S = JSON.parse(localStorage.getItem(KEY) || "{}");
 S.meta = S.meta || {}; S.res = S.res || {}; S.cc = S.cc || {}; S.so = S.so || {};
+S.id = S.id || ((crypto.randomUUID && crypto.randomUUID()) || ('tp-'+Date.now()+'-'+Math.random().toString(36).slice(2,8)));
 const allIds = DATA.flatMap(s => s[1].map(t => t[0]));
-const save = () => localStorage.setItem(KEY, JSON.stringify(S));
 const toast = (m) => { const t=document.getElementById('toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1600); };
+
+// ── Auto-save: persist locally + sync to the server (debounced) ───────────────
+let dirty=false, syncing=false, syncT=null, lastSent='';
+function updateSaveBtn(){
+  const b=document.getElementById('b-save'); if(!b) return;
+  if(syncing){ b.textContent='Saving…'; b.disabled=true; }
+  else if(dirty){ b.textContent='Save now'; b.disabled=false; }
+  else { b.textContent='✓ Saved'; b.disabled=true; }
+}
+async function doSync(){
+  if(syncing) return;
+  const c=counts();
+  const payload={ id:S.id, site:S.meta.site||'', tester:S.meta.tester||'', role:S.meta.role||'', date:S.meta.date||'',
+    passed:c.passed, failed:c.failed, na:c.na, total:c.total, readiness:S.so.ready||'', summary:summary(), data:JSON.stringify(S) };
+  const body=JSON.stringify(payload);
+  if(body===lastSent){ dirty=false; updateSaveBtn(); return; }
+  syncing=true; updateSaveBtn();
+  try{
+    const r=await fetch('/api/testplan',{method:'POST',headers:{'Content-Type':'application/json'},body});
+    if(!r.ok) throw new Error();
+    lastSent=body; dirty=false;
+  }catch{ dirty=true; /* stay dirty, will retry on next change or manual Save */ }
+  syncing=false; updateSaveBtn();
+}
+function scheduleSync(){ dirty=true; updateSaveBtn(); clearTimeout(syncT); syncT=setTimeout(doSync, 900); }
+// save() persists locally immediately, then queues a server sync.
+const save = () => { localStorage.setItem(KEY, JSON.stringify(S)); scheduleSync(); };
 
 // meta controls
 const mt=document.getElementById('m-tester'), ms=document.getElementById('m-site'), mr=document.getElementById('m-role'), md=document.getElementById('m-date');
@@ -319,6 +347,18 @@ const soP=soSec.querySelector('#so-problems'); soP.addEventListener('input',()=>
 soSec.querySelectorAll('input[name=ready]').forEach(r=>{ if(S.so.ready===r.value)r.checked=true; r.addEventListener('change',()=>{S.so.ready=r.value; save();});});
 
 prog();
+updateSaveBtn();
+// Push any progress already on this device up to the server on load.
+if(S.meta.tester || Object.keys(S.res).length || Object.keys(S.cc).length) scheduleSync();
+// Best-effort flush if they close the tab mid-edit.
+window.addEventListener('beforeunload',()=>{
+  if(dirty && navigator.sendBeacon){
+    const c=counts();
+    const payload={ id:S.id, site:S.meta.site||'', tester:S.meta.tester||'', role:S.meta.role||'', date:S.meta.date||'',
+      passed:c.passed, failed:c.failed, na:c.na, total:c.total, readiness:S.so.ready||'', summary:summary(), data:JSON.stringify(S) };
+    navigator.sendBeacon('/api/testplan', new Blob([JSON.stringify(payload)], {type:'application/json'}));
+  }
+});
 
 // Build a text summary of results
 function summary(){
@@ -336,19 +376,7 @@ function summary(){
   return out;
 }
 
-document.getElementById('b-mail').addEventListener('click',()=>{
-  const m=S.meta; const subj=`Daybook test — ${m.site||'?'} — ${m.tester||'?'} (${m.date||''})`;
-  location.href=`mailto:${REPORT_TO}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(summary())}`;
-});
-document.getElementById('b-copy').addEventListener('click',async()=>{
-  try{ await navigator.clipboard.writeText(summary()); toast('Summary copied'); }
-  catch{ const ta=document.createElement('textarea'); ta.value=summary(); document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); toast('Summary copied'); }
-});
-document.getElementById('b-reset').addEventListener('click',()=>{
-  if(confirm('Clear all your ticks and notes on this device?')){ localStorage.removeItem(KEY); location.reload(); }
-});
-
-// Counts for submission
+// Counts for the summary / server payload
 function counts(){
   const passed=allIds.filter(i=>S.res[i]&&S.res[i].st==='pass').length;
   const failed=allIds.filter(i=>S.res[i]&&S.res[i].st==='fail').length;
@@ -356,20 +384,18 @@ function counts(){
   return {passed,failed,na,total:allIds.length};
 }
 
-// Submit results to the server so any site can view them
-document.getElementById('b-submit').addEventListener('click',async()=>{
-  if(!S.meta.tester || !S.meta.site){ toast('Enter your name and site first'); return; }
-  const c=counts();
-  if(c.passed+c.failed+c.na===0 && !confirm('You haven\'t ticked anything yet. Submit anyway?')) return;
-  const btn=document.getElementById('b-submit'); const old=btn.textContent; btn.textContent='Submitting…'; btn.disabled=true;
-  try{
-    const r=await fetch('/api/testplan',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({site:S.meta.site,tester:S.meta.tester,role:S.meta.role,date:S.meta.date,
-        passed:c.passed,failed:c.failed,na:c.na,total:c.total,readiness:S.so.ready||'',summary:summary()})});
-    if(!r.ok) throw new Error();
-    toast('Submitted ✓ — viewable in Results');
-  }catch{ toast('Submit failed — try Email instead'); }
-  btn.textContent=old; btn.disabled=false;
+// Email a copy to Torama
+document.getElementById('b-mail').addEventListener('click',()=>{
+  const m=S.meta; const subj=`Daybook test — ${m.site||'?'} — ${m.tester||'?'} (${m.date||''})`;
+  location.href=`mailto:${REPORT_TO}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(summary())}`;
+});
+// Save now (manual flush — auto-save already runs in the background)
+document.getElementById('b-save').addEventListener('click',()=>{ clearTimeout(syncT); doSync().then(()=>{ if(!dirty) toast('Saved ✓'); }); });
+// Explicit discard — wipe this tester's saved data (server + this device)
+document.getElementById('b-discard').addEventListener('click',async()=>{
+  if(!confirm('Discard this test sheet? Your saved answers are deleted from the server and this device. This cannot be undone.')) return;
+  try{ await fetch('/api/testplan/'+encodeURIComponent(S.id),{method:'DELETE'}); }catch{}
+  localStorage.removeItem(KEY); location.reload();
 });
 
 // View submitted results from all sites
@@ -381,7 +407,7 @@ async function loadResults(){
     if(!rows.length){ rBody.innerHTML='<div style="color:var(--muted);padding:20px;text-align:center">No results submitted yet.</div>'; return; }
     const READY={ready:'✅ Ready',small:'🟡 Small fixes',no:'🔴 Not ready'};
     rBody.innerHTML=rows.map(r=>{
-      const when=new Date((r.created_at||0)*1000).toLocaleString();
+      const when=new Date(((r.updated_at||r.created_at)||0)*1000).toLocaleString();
       return `<div style="background:#fff;border-radius:12px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(2,6,23,.06)">
         <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
           <strong>${esc(r.site||'?')}</strong>

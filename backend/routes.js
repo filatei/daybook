@@ -139,21 +139,33 @@ router.post('/contact', requireAuth, async (req, res) => {
 
 // ── Test-plan results (public — the /testplan.html page has no login) ───────────
 // Submitted from any site; results are viewable back on the same page.
+// Auto-save: upsert by the client-stable id so each tester keeps ONE live row.
 router.post('/testplan', async (req, res) => {
   const b = req.body || {};
   const n = (v) => Math.max(0, parseInt(v, 10) || 0);
   const clip = (v, len) => (v == null ? null : String(v).slice(0, len));
+  const id = clip(b.id, 40) || uuid();
   await qrun(
-    `INSERT INTO testplan_results (id,site,tester,role,test_date,passed,failed,na,total,readiness,summary)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-    [uuid(), clip(b.site, 80), clip(b.tester, 80), clip(b.role, 60), clip(b.date, 20),
-      n(b.passed), n(b.failed), n(b.na), n(b.total), clip(b.readiness, 20), clip(b.summary, 20000)]);
-  res.status(201).json({ ok: true });
+    `INSERT INTO testplan_results (id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,data,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT (id) DO UPDATE SET
+       site=EXCLUDED.site, tester=EXCLUDED.tester, role=EXCLUDED.role, test_date=EXCLUDED.test_date,
+       passed=EXCLUDED.passed, failed=EXCLUDED.failed, na=EXCLUDED.na, total=EXCLUDED.total,
+       readiness=EXCLUDED.readiness, summary=EXCLUDED.summary, data=EXCLUDED.data, updated_at=EXCLUDED.updated_at`,
+    [id, clip(b.site, 80), clip(b.tester, 80), clip(b.role, 60), clip(b.date, 20),
+      n(b.passed), n(b.failed), n(b.na), n(b.total), clip(b.readiness, 20), clip(b.summary, 20000), clip(b.data, 200000), nowS()]);
+  res.status(201).json({ ok: true, id });
 });
 
 router.get('/testplan', async (_req, res) => {
-  const rows = await qall('SELECT id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,created_at FROM testplan_results ORDER BY created_at DESC LIMIT 200');
+  const rows = await qall('SELECT id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,created_at,updated_at FROM testplan_results ORDER BY COALESCE(updated_at,created_at) DESC LIMIT 200');
   res.json(rows);
+});
+
+// Explicit discard — remove this tester's saved row.
+router.delete('/testplan/:id', async (req, res) => {
+  await qrun('DELETE FROM testplan_results WHERE id=?', [req.params.id]);
+  res.json({ ok: true });
 });
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────

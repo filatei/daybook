@@ -718,8 +718,12 @@ async function migrate() {
       total      INTEGER DEFAULT 0,
       readiness  TEXT,
       summary    TEXT,
-      created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+      data       TEXT,
+      created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      updated_at BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
     );
+    ALTER TABLE testplan_results ADD COLUMN IF NOT EXISTS data TEXT;
+    ALTER TABLE testplan_results ADD COLUMN IF NOT EXISTS updated_at BIGINT;
     CREATE INDEX IF NOT EXISTS idx_testplan_created ON testplan_results(created_at DESC);
   `);
 

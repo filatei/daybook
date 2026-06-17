@@ -8,6 +8,7 @@ const EMPTY = () => ({
   rolls: { opening_kg: '', received_kg: '', used_kg: '', available_kg: '' },
   crates: { c50_available: '', c50_sold: '', c60_available: '', c75_available: '', dispenser_available: '' },
   water: { ph: '', tds: '' },
+  power: { nepa_hours: '' },   // hours of NEPA / public-utility power for the day
   generators: [],
   ro: [],
   materials: '',
@@ -20,8 +21,16 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
   const [date, setDate] = useState(defaultDate || today());
   const [siteId, setSiteId] = useState(siteBound ? '' : (defaultSite && defaultSite !== 'ALL' ? defaultSite : (sites[0]?.id || '')));
   const [d, setD] = useState(EMPTY());
+  const [gens, setGens] = useState([]);   // generators registered for this site
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Pull the site's generators so the user only selects (never re-types names).
+  useEffect(() => {
+    if (!siteBound && !siteId) { setGens([]); return; }
+    const qs = (!siteBound && siteId) ? `?site=${encodeURIComponent(siteId)}` : '';
+    api(scoped(`/generators${qs}`)).then((r) => setGens(Array.isArray(r) ? r : [])).catch(() => setGens([]));
+  }, [siteId, siteBound]);
 
   const load = useCallback(async () => {
     if (!siteBound && !siteId) return;
@@ -128,13 +137,21 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
             <Num group="water" k="tds" label="TDS" />
           </Group>
 
-          {/* Generators — dynamic list */}
+          <Group title="Public power (NEPA)">
+            <Num group="power" k="nepa_hours" label="NEPA hours today" />
+          </Group>
+
+          {/* Generators — select from the site's registered generators */}
           <div style={{ marginTop: 12 }}>
             <div style={{ fontWeight: 800, fontSize: 13, marginBottom: 6 }}>Generator status</div>
             {d.generators.map((g, i) => (
               <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                <input className="input" placeholder="e.g. MARAPCO 150KVA" value={g.name || ''} style={{ flex: 2 }}
-                  onChange={(e) => setD((p) => ({ ...p, generators: p.generators.map((x, j) => j === i ? { ...x, name: e.target.value } : x) }))} />
+                <select className="input" value={g.name || ''} style={{ flex: 2 }}
+                  onChange={(e) => setD((p) => ({ ...p, generators: p.generators.map((x, j) => j === i ? { ...x, name: e.target.value } : x) }))}>
+                  <option value="">Select generator…</option>
+                  {gens.map((x) => <option key={x.id} value={x.name}>{x.name}{x.capacity_kva ? ` (${x.capacity_kva}KVA)` : ''}</option>)}
+                  {g.name && !gens.some((x) => x.name === g.name) && <option value={g.name}>{g.name}</option>}
+                </select>
                 <select className="input" value={g.status || ''} style={{ flex: 1 }}
                   onChange={(e) => setD((p) => ({ ...p, generators: p.generators.map((x, j) => j === i ? { ...x, status: e.target.value } : x) }))}>
                   <option value="">—</option>
@@ -144,7 +161,11 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
                   onClick={() => setD((p) => ({ ...p, generators: p.generators.filter((_, j) => j !== i) }))}>×</button>
               </div>
             ))}
-            <button className="btn btn-ghost btn-sm" onClick={() => setD((p) => ({ ...p, generators: [...p.generators, { name: '', status: '' }] }))}>＋ Add generator</button>
+            {gens.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>No generators registered for this site — add them in More → Generators first.</div>
+            ) : (
+              <button className="btn btn-ghost btn-sm" onClick={() => setD((p) => ({ ...p, generators: [...p.generators, { name: '', status: '' }] }))}>＋ Add generator</button>
+            )}
           </div>
 
           {/* RO readings — dynamic list */}

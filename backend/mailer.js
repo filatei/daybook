@@ -344,6 +344,7 @@ function opsHtml(ops) {
   out += kv('Rolls (kg)', ops.rolls, [['Opening', 'opening_kg'], ['Received', 'received_kg'], ['Used', 'used_kg'], ['Available', 'available_kg']]);
   out += kv('Crates', ops.crates, [['50cl available', 'c50_available'], ['50cl sold', 'c50_sold'], ['60cl available', 'c60_available'], ['75cl available', 'c75_available'], ['Dispenser available', 'dispenser_available']]);
   out += kv('Water analysis', ops.water, [['PH', 'ph'], ['TDS', 'tds']]);
+  out += kv('Public power (NEPA)', ops.power, [['NEPA hours today', 'nepa_hours']]);
   if (Array.isArray(ops.generators) && ops.generators.some((g) => g && g.name)) {
     out += `<div style="font-weight:800;margin:8px 0 4px">Generator status</div><table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px">${ops.generators.filter((g) => g && g.name).map((g) => `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0">${esc(g.name)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600">${esc(g.status || '')}</td></tr>`).join('')}</table>`;
   }

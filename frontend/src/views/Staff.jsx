@@ -404,6 +404,8 @@ function ProductionGrid({ siteFilter }) {
   const [date, setDate] = useState(today());
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState('');
+  const [showAll, setShowAll] = useState(false);   // default: baggers & loaders only
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -413,37 +415,46 @@ function ProductionGrid({ siteFilter }) {
   }, [tenant, date, siteFilter]);
   useEffect(() => { load(); }, [load]);
 
-  const setVal = (i, k, v) => setRows((p) => p.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
+  const setVal = (id, k, v) => setRows((p) => p.map((r) => (r.staff_id === id ? { ...r, [k]: v } : r)));
   const save = async (r) => {
     try { await api(scoped('/payroll/production'), { method: 'POST', body: { staff_id: r.staff_id, work_date: date, bags_loaded: +r.bags_loaded || 0, bags_bagged: +r.bags_bagged || 0 } }); }
     catch (e) { toast(e.message, 'err'); }
   };
+  // Totals reflect all production contributors (baggers & loaders), not the filter.
   const totL = rows.reduce((s, r) => s + (+r.bags_loaded || 0), 0);
   const totB = rows.reduce((s, r) => s + (+r.bags_bagged || 0), 0);
+  const isPiece = (r) => r.staff_type === 'BAGGER' || r.staff_type === 'LOADER' || r.pay_type === 'PIECE';
+  const term = q.trim().toLowerCase();
+  const shown = rows.filter((r) => (showAll || isPiece(r)) && (!term || (r.full_name || '').toLowerCase().includes(term)));
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-        <input type="date" className="input" value={date} max={today()} onChange={(e) => setDate(e.target.value)} />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input type="date" className="input" style={{ flex: '0 1 150px' }} value={date} max={today()} onChange={(e) => setDate(e.target.value)} />
         <span style={{ fontSize: 12, color: 'var(--muted)' }}>Loaded {totL} · Bagged {totB}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input className="input" style={{ flex: '1 1 160px' }} placeholder="🔍 Search staff by name" value={q} onChange={(e) => setQ(e.target.value)} />
+        <button className={`btn btn-ghost btn-sm${!showAll ? ' on' : ''}`} style={{ width: 'auto', padding: '0 12px' }} onClick={() => setShowAll(false)}>Baggers & loaders</button>
+        <button className={`btn btn-ghost btn-sm${showAll ? ' on' : ''}`} style={{ width: 'auto', padding: '0 12px' }} onClick={() => setShowAll(true)}>All staff</button>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px', gap: 6, fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', padding: '0 2px 4px' }}>
         <span>Staff</span><span style={{ textAlign: 'center' }}>Loaded</span><span style={{ textAlign: 'center' }}>Bagged</span>
       </div>
-      {loading ? <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</> : rows.length === 0 ? (
-        <div className="empty"><div className="ic">📦</div><p>No staff</p></div>
+      {loading ? <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</> : shown.length === 0 ? (
+        <div className="empty"><div className="ic">📦</div><p>{rows.length ? 'No matching staff' : 'No staff'}</p></div>
       ) : (
         <div className="card" style={{ padding: 8 }}>
-          {rows.map((r, i) => (
+          {shown.map((r) => (
             <div key={r.staff_id} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px', gap: 6, alignItems: 'center', padding: '4px 0', borderBottom: '1px solid var(--line)' }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.full_name}</div>
-                <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.pay_type === 'PIECE' ? 'piece' : (r.role_title || 'staff')}</div>
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.staff_type && r.staff_type !== 'REGULAR' ? r.staff_type.toLowerCase() : (r.role_title || 'staff')}</div>
               </div>
               <input className="input" type="number" inputMode="numeric" style={{ padding: '7px 6px', textAlign: 'center' }} value={r.bags_loaded}
-                onChange={(e) => setVal(i, 'bags_loaded', e.target.value)} onBlur={() => save(r)} onFocus={(e) => e.target.select()} />
+                onChange={(e) => setVal(r.staff_id, 'bags_loaded', e.target.value)} onBlur={() => save(r)} onFocus={(e) => e.target.select()} />
               <input className="input" type="number" inputMode="numeric" style={{ padding: '7px 6px', textAlign: 'center' }} value={r.bags_bagged}
-                onChange={(e) => setVal(i, 'bags_bagged', e.target.value)} onBlur={() => save(r)} onFocus={(e) => e.target.select()} />
+                onChange={(e) => setVal(r.staff_id, 'bags_bagged', e.target.value)} onBlur={() => save(r)} onFocus={(e) => e.target.select()} />
             </div>
           ))}
         </div>

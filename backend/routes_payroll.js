@@ -342,7 +342,7 @@ router.get('/production', requireAuth, async (req, res) => {
   const where = ['s.tenant_id=?', "s.status='ACTIVE'"], args = [date, c.tenant_id];
   if (siteBound(c)) { where.push('s.site_id=?'); args.push(c.site_id); }
   else if (req.query.site) { where.push('s.site_id=?'); args.push(req.query.site); }
-  res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.site_id,
+  res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.staff_type, s.site_id,
     COALESCE(p.bags_loaded,0) bags_loaded, COALESCE(p.bags_bagged,0) bags_bagged
     FROM staff s LEFT JOIN production p ON p.staff_id=s.id AND p.work_date=?
     WHERE ${where.join(' AND ')} ORDER BY s.full_name`, args));

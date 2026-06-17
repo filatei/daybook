@@ -703,6 +703,24 @@ async function migrate() {
       updated_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
       UNIQUE(tenant_id, site_id, ops_date)
     );
+
+    -- Daybook test-plan submissions (from /testplan.html) so results are viewable
+    -- in-app / at any site, not just emailed.
+    CREATE TABLE IF NOT EXISTS testplan_results (
+      id         TEXT PRIMARY KEY,
+      site       TEXT,
+      tester     TEXT,
+      role       TEXT,
+      test_date  TEXT,
+      passed     INTEGER DEFAULT 0,
+      failed     INTEGER DEFAULT 0,
+      na         INTEGER DEFAULT 0,
+      total      INTEGER DEFAULT 0,
+      readiness  TEXT,
+      summary    TEXT,
+      created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_testplan_created ON testplan_results(created_at DESC);
   `);
 
   // VENDORS — suppliers/payees, imported from fido `contacts`.  A global pool

@@ -114,6 +114,7 @@ function Inner() {
         {tab === 'inventory'  && <Inventory />}
         {tab === 'profit'     && <Profit />}
         {tab === 'activity'   && <Activity />}
+        <footer className="app-footer">© {new Date().getFullYear()} Torama Technologies</footer>
       </main>
       <Modal />
       <Toast />

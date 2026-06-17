@@ -85,14 +85,25 @@
 <div class="wrap" id="app"></div>
 
 <footer style="text-align:center;color:var(--muted);font-size:12.5px;padding:18px 16px 8px">
-  Copyright © <span id="yr"></span> TORAMA TECHNOLOGIES
+  Copyright © <span id="yr"></span> TORAMA TECHNOLOGIES<br>
+  <a id="b-copy" style="color:var(--blue2);cursor:pointer">Copy summary</a> ·
+  <a id="b-reset" style="color:var(--err);cursor:pointer">Reset my ticks</a>
 </footer>
 
 <div class="toast" id="toast"></div>
 <div class="bar">
-  <button class="b-mail" id="b-mail">✉️ Email results</button>
-  <button class="b-copy" id="b-copy">Copy summary</button>
-  <button class="b-reset" id="b-reset">Reset</button>
+  <button class="b-mail" id="b-submit" style="flex:1.6">✅ Submit results</button>
+  <button class="b-copy" id="b-mail">✉️ Email</button>
+  <button class="b-copy" id="b-view">📋 Results</button>
+</div>
+
+<div id="results" style="position:fixed;inset:0;background:var(--bg);z-index:50;display:none;flex-direction:column">
+  <div style="background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;padding:14px 16px;display:flex;align-items:center;gap:10px">
+    <strong style="flex:1;font-size:17px">Submitted results</strong>
+    <button id="r-refresh" style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-weight:700;cursor:pointer">↻</button>
+    <button id="r-close" style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-weight:700;cursor:pointer">✕</button>
+  </div>
+  <div id="r-body" style="flex:1;overflow:auto;padding:12px;max-width:780px;margin:0 auto;width:100%"></div>
 </div>
 
 <script>
@@ -320,6 +331,62 @@ document.getElementById('b-copy').addEventListener('click',async()=>{
 document.getElementById('b-reset').addEventListener('click',()=>{
   if(confirm('Clear all your ticks and notes on this device?')){ localStorage.removeItem(KEY); location.reload(); }
 });
+
+// Counts for submission
+function counts(){
+  const passed=allIds.filter(i=>S.res[i]&&S.res[i].st==='pass').length;
+  const failed=allIds.filter(i=>S.res[i]&&S.res[i].st==='fail').length;
+  const na=allIds.filter(i=>S.res[i]&&S.res[i].st==='na').length;
+  return {passed,failed,na,total:allIds.length};
+}
+
+// Submit results to the server so any site can view them
+document.getElementById('b-submit').addEventListener('click',async()=>{
+  if(!S.meta.tester || !S.meta.site){ toast('Enter your name and site first'); return; }
+  const c=counts();
+  if(c.passed+c.failed+c.na===0 && !confirm('You haven\'t ticked anything yet. Submit anyway?')) return;
+  const btn=document.getElementById('b-submit'); const old=btn.textContent; btn.textContent='Submitting…'; btn.disabled=true;
+  try{
+    const r=await fetch('/api/testplan',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({site:S.meta.site,tester:S.meta.tester,role:S.meta.role,date:S.meta.date,
+        passed:c.passed,failed:c.failed,na:c.na,total:c.total,readiness:S.so.ready||'',summary:summary()})});
+    if(!r.ok) throw new Error();
+    toast('Submitted ✓ — viewable in Results');
+  }catch{ toast('Submit failed — try Email instead'); }
+  btn.textContent=old; btn.disabled=false;
+});
+
+// View submitted results from all sites
+const resultsEl=document.getElementById('results'), rBody=document.getElementById('r-body');
+async function loadResults(){
+  rBody.innerHTML='<div style="color:var(--muted);padding:20px;text-align:center">Loading…</div>';
+  try{
+    const rows=await (await fetch('/api/testplan')).json();
+    if(!rows.length){ rBody.innerHTML='<div style="color:var(--muted);padding:20px;text-align:center">No results submitted yet.</div>'; return; }
+    const READY={ready:'✅ Ready',small:'🟡 Small fixes',no:'🔴 Not ready'};
+    rBody.innerHTML=rows.map(r=>{
+      const when=new Date((r.created_at||0)*1000).toLocaleString();
+      return `<div style="background:#fff;border-radius:12px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(2,6,23,.06)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+          <strong>${esc(r.site||'?')}</strong>
+          <span style="font-size:12px;color:var(--muted)">${esc(when)}</span>
+        </div>
+        <div style="font-size:13px;color:var(--muted);margin:2px 0 6px">${esc(r.tester||'?')}${r.role?' · '+esc(r.role):''}${r.test_date?' · '+esc(r.test_date):''}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:12px;font-weight:700">
+          <span style="background:var(--okbg);color:var(--ok);padding:2px 9px;border-radius:20px">${r.passed} pass</span>
+          <span style="background:${r.failed?'var(--errbg)':'#eef2f7'};color:${r.failed?'var(--err)':'#64748b'};padding:2px 9px;border-radius:20px">${r.failed} fail</span>
+          <span style="background:#eef2f7;color:#475569;padding:2px 9px;border-radius:20px">${r.na} n/a</span>
+          <span style="margin-left:auto;color:#475569">${READY[r.readiness]||''}</span>
+        </div>
+        ${r.summary?`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--blue2)">View details</summary><pre style="white-space:pre-wrap;font-size:12px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:8px;margin-top:6px;overflow:auto">${esc(r.summary)}</pre></details>`:''}
+      </div>`;
+    }).join('');
+  }catch{ rBody.innerHTML='<div style="color:var(--err);padding:20px;text-align:center">Could not load results.</div>'; }
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+document.getElementById('b-view').addEventListener('click',()=>{ resultsEl.style.display='flex'; loadResults(); });
+document.getElementById('r-close').addEventListener('click',()=>{ resultsEl.style.display='none'; });
+document.getElementById('r-refresh').addEventListener('click',loadResults);
 </script>
 </body>
 </html>

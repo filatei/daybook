@@ -114,6 +114,25 @@ function needTenant(minRole) {
 // ── PUBLIC config ──────────────────────────────────────────────────────────────
 router.get('/config', (_req, res) => res.json({ google_client_id: GOOGLE_CLIENT_ID }));
 
+// ── Test-plan results (public — the /testplan.html page has no login) ───────────
+// Submitted from any site; results are viewable back on the same page.
+router.post('/testplan', async (req, res) => {
+  const b = req.body || {};
+  const n = (v) => Math.max(0, parseInt(v, 10) || 0);
+  const clip = (v, len) => (v == null ? null : String(v).slice(0, len));
+  await qrun(
+    `INSERT INTO testplan_results (id,site,tester,role,test_date,passed,failed,na,total,readiness,summary)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [uuid(), clip(b.site, 80), clip(b.tester, 80), clip(b.role, 60), clip(b.date, 20),
+      n(b.passed), n(b.failed), n(b.na), n(b.total), clip(b.readiness, 20), clip(b.summary, 20000)]);
+  res.status(201).json({ ok: true });
+});
+
+router.get('/testplan', async (_req, res) => {
+  const rows = await qall('SELECT id,site,tester,role,test_date,passed,failed,na,total,readiness,summary,created_at FROM testplan_results ORDER BY created_at DESC LIMIT 200');
+  res.json(rows);
+});
+
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 async function loginResponse(res, req, user) {
   await qrun('UPDATE users SET last_login=? WHERE id=?', [nowS(), user.id]);

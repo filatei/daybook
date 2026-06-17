@@ -205,7 +205,7 @@ function SettingsTab() {
         <div style={{ fontSize: 12.5, background: emailRes.ok ? '#dcfce7' : '#fee2e2', color: emailRes.ok ? '#166534' : '#991b1b', borderRadius: 10, padding: '10px 12px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
           {emailRes.kind === 'health'
             ? (emailRes.ok ? `✓ SMTP reachable\nHost ${emailRes.host}:${emailRes.port} · From ${emailRes.from} · auth ${emailRes.auth ? 'password' : 'IP-relay'}` : `✗ Cannot reach SMTP: ${emailRes.error}`)
-            : (emailRes.ok ? `✓ Server accepted the test to ${emailRes.to}\nFrom: ${emailRes.from}\nAccepted: ${(emailRes.accepted || []).join(', ') || '—'}\nRejected: ${(emailRes.rejected || []).join(', ') || 'none'}\nServer said: ${emailRes.response || '—'}\n\nIf it accepted but you didn't get it, check Spam, and that ${emailRes.from?.match(/@([^>]+)/)?.[1] || 'the From domain'} is an allowed sender on your relay.` : `✗ Send failed: ${emailRes.error}`)}
+            : (emailRes.ok ? `✓ Server accepted the test to ${emailRes.to}\nFrom: ${emailRes.from}\nAccepted: ${(emailRes.accepted || []).join(', ') || '—'}\nRejected: ${(emailRes.rejected || []).join(', ') || 'none'}\nServer said: ${emailRes.response || '—'}\n\nIf it accepted but you didn't get it, check Spam, and that ${emailRes.from?.match(/@([^>]+)/)?.[1] || 'the From domain'} is an allowed sender on your relay.` : `✗ Send failed: ${emailRes.error}${emailRes.code ? `\nCode: ${emailRes.code}` : ''}${emailRes.smtp_response ? `\nSMTP said: ${emailRes.smtp_response}` : ''}\n\nA 421 here = the relay throttled this server. A 5xx/credentials error = this server's IP isn't allowed on the Google SMTP relay rule.`)}
         </div>
       )}
     </div>

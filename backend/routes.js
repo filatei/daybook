@@ -317,7 +317,8 @@ router.post('/email/test', requireAuth, needTenant('ADMIN'), async (req, res) =>
     res.json({ ok: true, to, ...r });
   } catch (e) {
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)', [uuid(), req.ctx.tenant_id, to, 'Daybook email test', 'FAILED', e.message]).catch(() => {});
-    res.status(502).json({ ok: false, to, error: e.message, from: MAIL_FROM });
+    // Surface the raw SMTP verdict so an admin can see exactly why (e.g. 421 relay throttle).
+    res.status(502).json({ ok: false, to, error: e.message, code: e.responseCode || e.code || null, smtp_response: e.response || null, from: MAIL_FROM });
   }
 });
 

@@ -208,8 +208,8 @@ function ReportDetail({ report, canEdit, onEdit, onClose }) {
   }, [report.report_date, report.site_id]);
 
   const emailReport = async () => {
+    if (emailing) return;   // ignore repeat taps — send exactly once
     setEmailing(true);
-    toast('Sending report…', 'info');
     try {
       const r = await api(scoped('/reports/generate/email'), { method: 'POST', body: { date: report.report_date, site: report.site_id || 'ALL', incidents: (report.notes || '').trim() } });
       const who = (r.to || []).join(', ');
@@ -242,7 +242,7 @@ function ReportDetail({ report, canEdit, onEdit, onClose }) {
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
             <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
-            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <span className="spin" /> : '✉️ Email'}</button>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <><span className="spin" /> Sending…</> : '✉️ Email'}</button>
             {canEdit && <button className="btn" style={{ flex: '1 1 100%' }} onClick={onEdit}>✎ Edit report</button>}
           </div>
         </>
@@ -383,8 +383,8 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
   };
 
   const emailReport = async () => {
+    if (emailing) return;   // ignore repeat taps — send exactly once
     setEmailing(true);
-    toast('Sending report…', 'info');
     try {
       const r = await api(scoped('/reports/generate/email'), { method: 'POST', body: { date, site: siteId, incidents: incidents.trim() } });
       const who = (r.to || []).join(', ');
@@ -444,12 +444,12 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
             {gen.scope === 'ALL' ? (
               <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                 <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
-                <button className="btn" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <span className="spin" /> : '✉️ Email report'}</button>
+                <button className="btn" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <><span className="spin" /> Sending…</> : '✉️ Email report'}</button>
               </div>
             ) : (
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
                 <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => save(false)} disabled={saving}>Save draft</button>
-                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <span className="spin" /> : '✉️ Email'}</button>
+                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <><span className="spin" /> Sending…</> : '✉️ Email'}</button>
                 <button className="btn" style={{ flex: '1 1 100%' }} onClick={() => save(true)} disabled={saving}>{saving ? <span className="spin" /> : 'Submit'}</button>
               </div>
             )}

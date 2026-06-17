@@ -254,6 +254,29 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
               </div>
             )}
 
+            {/* Bags compilation across all sites (sold excludes bonus) */}
+            {gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0 && (
+              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>Bags — all sites <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(sold excl. bonus)</span></div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
+                  <span>Site</span><span style={{ textAlign: 'right' }}>Sold</span><span style={{ textAlign: 'right' }}>Avail</span>
+                </div>
+                {gen.summary.bagBySite.map((r) => (
+                  <div key={r.site_id} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+                    <span>{r.site_name}</span><span style={{ textAlign: 'right' }}>{(r.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(r.available || 0).toLocaleString()}</span>
+                  </div>
+                ))}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
+                  <span>Total</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.available || 0).toLocaleString()}</span>
+                </div>
+                {gen.summary.stockTotals && (
+                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 6 }}>
+                    Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {(gen.summary.stockTotals.packing_available || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg · avail {(gen.summary.stockTotals.rolls_available_kg || 0).toLocaleString()}kg
+                  </div>
+                )}
+              </div>
+            )}
+
             {gen.scope !== 'ALL' && (
               <div style={{ fontSize: 12, color: gen.summary?.ops ? 'var(--ok)' : 'var(--muted)', margin: '6px 2px' }}>
                 {gen.summary?.ops ? '✓ Day operations captured — included in the report.' : 'No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.'}

@@ -410,6 +410,21 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
         <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Site</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sales</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Cash</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Transfer/POS</th></tr></thead>
         <tbody>${dist}</tbody>
       </table>` : ''}
+      ${(s.bagBySite && s.bagBySite.length) ? `<div style="font-weight:800;margin:6px 0">Bags ${esc(s.bagTotals && s.bagTotals.product ? '(' + s.bagTotals.product + ')' : '')} — all sites <span style="font-weight:600;color:#6b7280;font-size:12px">(sold excludes bonus)</span></div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Site</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Opening</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Produced</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sold</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Available</th></tr></thead>
+        <tbody>
+          ${s.bagBySite.map((r) => `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0">${esc(r.site_name)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(r.opening || 0).toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(r.produced || 0).toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(r.sold || 0).toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(r.available || 0).toLocaleString()}</td></tr>`).join('')}
+          <tr style="font-weight:800"><td style="padding:6px 10px">TOTAL</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.opening || 0).toLocaleString()}</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.produced || 0).toLocaleString()}</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.sold || 0).toLocaleString()}</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.available || 0).toLocaleString()}</td></tr>
+        </tbody>
+      </table>` : ''}
+      ${s.stockTotals ? `<div style="font-weight:800;margin:6px 0">Stock compilation — all sites</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Packing bags used</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.packing_used || 0).toLocaleString()}</td></tr>
+        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Packing bags available</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.packing_available || 0).toLocaleString()}</td></tr>
+        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls used (kg)</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_used_kg || 0).toLocaleString()}</td></tr>
+        <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls available (kg)</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_available_kg || 0).toLocaleString()}</td></tr>
+      </table>` : ''}
       ${opsHtml(s.ops)}
       ${incidents ? `<div style="font-weight:800;margin:6px 0">Incidents / notes</div>
         <div style="white-space:pre-wrap;font-size:13px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:10px 12px">${esc(incidents)}</div>` : ''}

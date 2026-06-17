@@ -668,7 +668,8 @@ async function bagDayReport(ctx, siteId, date) {
       `SELECT COALESCE(SUM((elem->>'qty')::numeric),0) total,
               COALESCE(SUM(CASE WHEN p.sale_date=? THEN (elem->>'qty')::numeric ELSE 0 END),0) today
          FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
-        WHERE p.tenant_id=? AND p.site_id=? AND p.items_json IS NOT NULL AND left(p.items_json,1)='[' AND lower(elem->>'name')=lower(?)`,
+        WHERE p.tenant_id=? AND p.site_id=? AND COALESCE(p.payment_method,'') <> 'INCENTIVE'
+          AND p.items_json IS NOT NULL AND left(p.items_json,1)='[' AND lower(elem->>'name')=lower(?)`,
       [date, ctx.tenant_id, siteId, pr.name]);
     soldTotal = Number(r.total) || 0; soldToday = Number(r.today) || 0;
   } catch { /* malformed json */ }
@@ -707,6 +708,36 @@ async function buildGeneratedReport(ctx, date, siteArg) {
     const oRow = await qone('SELECT data FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [ctx.tenant_id, single.site_id, date]);
     if (oRow) ops = J(oRow.data, null);
   }
+
+  // All-sites roll-up: per-site bags (produced / sold-excl-bonus / available) + a
+  // grand total, and a stock compilation (packing bags + rolls) from each site's
+  // day-ops. Addresses "total stocks used & available" and "bags sold & available".
+  let bagBySite = null, bagTotals = null, stockTotals = null;
+  if (wantAll) {
+    bagBySite = [];
+    bagTotals = { product: null, opening: 0, produced: 0, total: 0, sold: 0, available: 0 };
+    for (const site of sites) {
+      const br = await bagDayReport(ctx, site.id, date);
+      if (!br) continue;
+      bagBySite.push({ site_id: site.id, site_name: site.name, ...br });
+      bagTotals.product = br.product;
+      bagTotals.opening += br.opening; bagTotals.produced += br.produced;
+      bagTotals.total += br.total; bagTotals.sold += br.sold; bagTotals.available += br.available;
+    }
+    const oRows = await qall('SELECT data FROM ops_daily WHERE tenant_id=? AND ops_date=?', [ctx.tenant_id, date]);
+    if (oRows.length) {
+      stockTotals = { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0 };
+      for (const o of oRows) {
+        const dd = J(o.data, {}) || {}; const pk = dd.packing || {}, rl = dd.rolls || {};
+        stockTotals.packing_available += Number(pk.available) || 0;
+        stockTotals.packing_used += Number(pk.used_production) || 0;
+        stockTotals.rolls_used_kg += Number(rl.used_kg) || 0;
+        stockTotals.rolls_available_kg += Number(rl.available_kg) || 0;
+        stockTotals.sites++;
+      }
+    }
+  }
+
   return {
     report_date: date, scope: wantAll ? 'ALL' : 'SITE',
     site_id: single ? single.site_id : null,
@@ -716,7 +747,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       orders: tot.orders, totalLoaded: tot.totalLoaded, totalBagged: tot.totalBagged,
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
-      bagReport, ops,
+      bagReport, ops, bagBySite, bagTotals, stockTotals,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
     // Single-site reports are saveable/submittable; the all-sites roll-up is view/email only.

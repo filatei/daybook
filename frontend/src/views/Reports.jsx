@@ -7,6 +7,175 @@ import OpsForm from './OpsForm.jsx';
 
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
 
+function Stat({ k, v, accent }) {
+  return (
+    <div className="stat" style={accent ? { background: '#fffbeb' } : undefined}>
+      <div className="k" style={accent ? { color: '#92400e' } : undefined}>{k}</div>
+      <div className="v" style={{ fontSize: 18, ...(accent ? { color: '#92400e' } : {}) }}>{v}</div>
+    </div>
+  );
+}
+
+// Rich read-only body of a generated/saved daily report — shared by the
+// Generate modal and the archive detail view so they always render identically.
+function GeneratedReportBody({ gen }) {
+  const s = gen?.summary;
+  if (!gen || !s) return null;
+  return (
+    <>
+      <div style={{ fontWeight: 700, marginBottom: 6 }}>{gen.site_name} · {gen.report_date}</div>
+      <div className="stat-grid" style={{ marginBottom: 8 }}>
+        <Stat k="Total Sales" v={ngn(s.totalSales)} />
+        <Stat k="Orders" v={(s.orders || 0).toLocaleString()} />
+        <Stat k="Cash" v={ngn(s.cash)} />
+        <Stat k="POS / Card" v={ngn(s.pos)} />
+        <Stat k="Transfer" v={ngn(s.transfer)} />
+        {s.incentive > 0 && <Stat k="🎁 Incentive (bonus)" v={ngn(s.incentive)} accent />}
+      </div>
+
+      {(s.totalLoaded > 0 || s.totalBagged > 0) && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — loaded {s.totalLoaded.toLocaleString()} · bagged {s.totalBagged.toLocaleString()}</div>
+          {s.loaders.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>Loaders</div>}
+          {s.loaders.map((l, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+              <span>{l.name}</span><span style={{ fontWeight: 600 }}>{l.loaded.toLocaleString()} loaded</span>
+            </div>
+          ))}
+          {s.baggers.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Baggers</div>}
+          {s.baggers.map((b, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+              <span>{b.name}</span><span style={{ fontWeight: 600 }}>{b.bagged.toLocaleString()} bagged</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {s.bagReport && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — {s.bagReport.product || 'bags'}</div>
+          {[['Opening', s.bagReport.opening], ['Production', s.bagReport.produced], ['Total', s.bagReport.total], ['Sales', s.bagReport.sold], ['Available', s.bagReport.available]].map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0', ...(k === 'Total' || k === 'Available' ? { fontWeight: 700 } : {}) }}>
+              <span style={{ color: 'var(--muted)' }}>{k}</span><span>{(v || 0).toLocaleString()}</span>
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>Available = opening + production − sales. Add leakage/staff water under incidents if needed.</div>
+        </div>
+      )}
+
+      {(s.diesel > 0 || s.expenses > 0) && (
+        <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--muted)', margin: '8px 2px' }}>
+          <span>Diesel: <strong style={{ color: 'var(--ink)' }}>{ngn(s.diesel)}</strong></span>
+          <span>Other expenses: <strong style={{ color: 'var(--ink)' }}>{ngn(s.expenses)}</strong></span>
+        </div>
+      )}
+
+      {gen.scope === 'ALL' && (gen.bySite || []).some((r) => r.totalSales > 0 || r.incentive > 0) && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales distribution</div>
+          {(gen.bySite || []).filter((r) => r.totalSales > 0 || r.incentive > 0).sort((a, b) => b.totalSales - a.totalSales).map((r) => (
+            <div key={r.site_id || r.site_name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderTop: '1px solid var(--line)' }}>
+              <span>{r.site_name}</span>
+              <span style={{ fontWeight: 600 }}>{ngn(r.totalSales)}{r.incentive > 0 ? ` · 🎁${ngn(r.incentive)}` : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0 && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Bags — all sites <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(sold excl. bonus)</span></div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
+            <span>Site</span><span style={{ textAlign: 'right' }}>Sold</span><span style={{ textAlign: 'right' }}>Avail</span>
+          </div>
+          {gen.summary.bagBySite.map((r) => (
+            <div key={r.site_id} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+              <span>{r.site_name}</span><span style={{ textAlign: 'right' }}>{(r.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(r.available || 0).toLocaleString()}</span>
+            </div>
+          ))}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
+            <span>Total</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.available || 0).toLocaleString()}</span>
+          </div>
+          {gen.summary.stockTotals && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 6 }}>
+              Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {(gen.summary.stockTotals.packing_available || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg) · avail {(gen.summary.stockTotals.rolls_available_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_available_kg || 0).toLocaleString()}kg)
+            </div>
+          )}
+        </div>
+      )}
+
+      {gen.scope !== 'ALL' && (
+        <div style={{ fontSize: 12, color: gen.summary?.ops ? 'var(--ok)' : 'var(--muted)', margin: '6px 2px' }}>
+          {gen.summary?.ops ? '✓ Day operations captured — included in the report.' : 'No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.'}
+        </div>
+      )}
+    </>
+  );
+}
+
+// Read-only archive view of one saved daily report. Re-derives the rich detail
+// from /reports/generate for that site+date, then shows status + saved notes.
+function ReportDetail({ report, canEdit, onEdit, onClose }) {
+  const { toast } = useStore();
+  const [gen, setGen] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [emailing, setEmailing] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const qs = new URLSearchParams({ date: report.report_date });
+        if (report.site_id) qs.set('site', report.site_id);
+        const r = await api(scoped(`/reports/generate?${qs}`));
+        if (alive) setGen(r);
+      } catch (e) { if (alive) toast(e.message || 'Could not load report', 'err'); }
+      if (alive) setLoading(false);
+    })();
+    return () => { alive = false; };
+  }, [report.report_date, report.site_id]);
+
+  const emailReport = async () => {
+    setEmailing(true);
+    try {
+      const r = await api(scoped('/reports/generate/email'), { method: 'POST', body: { date: report.report_date, site: report.site_id || 'ALL', incidents: (report.notes || '').trim() } });
+      toast(`Report emailed ✓ → ${(r.to || []).join(', ')}`, 'ok');
+    } catch (e) { toast(e.message || 'Email failed', 'err'); }
+    setEmailing(false);
+  };
+
+  return (
+    <div>
+      <div className="grip" />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <h3 style={{ margin: 0, flex: 1 }}>{report.site_name}</h3>
+        <span className={`badge ${STATUS_LABEL[report.status] || 'draft'}`}>{report.status}</span>
+      </div>
+      <p className="sub" style={{ marginTop: 2 }}>
+        {report.report_date}{report.tenant_name ? ` · ${report.tenant_name}` : ''}
+        {report.emailed_at ? ' · ✉️ emailed' : ''}
+      </p>
+
+      {loading ? <div className="skel" style={{ marginTop: 12 }} /> : (
+        <>
+          <GeneratedReportBody gen={gen} />
+          {report.notes && (
+            <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>Incidents / notes</div>
+              <div style={{ fontSize: 13, whiteSpace: 'pre-wrap', color: 'var(--ink)' }}>{report.notes}</div>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <span className="spin" /> : '✉️ Email'}</button>
+            {canEdit && <button className="btn" style={{ flex: '1 1 100%' }} onClick={onEdit}>✎ Edit report</button>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ReportForm({ report, sites, onSave, onClose }) {
   const { toast, setDirty } = useStore();
   const role = useRole();
@@ -160,12 +329,6 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
   };
 
   const s = gen?.summary;
-  const Stat = ({ k, v, accent }) => (
-    <div className="stat" style={accent ? { background: '#fffbeb' } : undefined}>
-      <div className="k" style={accent ? { color: '#92400e' } : undefined}>{k}</div>
-      <div className="v" style={{ fontSize: 18, ...(accent ? { color: '#92400e' } : {}) }}>{v}</div>
-    </div>
-  );
 
   return (
     <div onClick={() => !saving && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
@@ -194,94 +357,7 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
 
         {gen && s && (
           <>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>{gen.site_name} · {gen.report_date}</div>
-            <div className="stat-grid" style={{ marginBottom: 8 }}>
-              <Stat k="Total Sales" v={ngn(s.totalSales)} />
-              <Stat k="Orders" v={(s.orders || 0).toLocaleString()} />
-              <Stat k="Cash" v={ngn(s.cash)} />
-              <Stat k="POS / Card" v={ngn(s.pos)} />
-              <Stat k="Transfer" v={ngn(s.transfer)} />
-              {s.incentive > 0 && <Stat k="🎁 Incentive (bonus)" v={ngn(s.incentive)} accent />}
-            </div>
-
-            {(s.totalLoaded > 0 || s.totalBagged > 0) && (
-              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — loaded {s.totalLoaded.toLocaleString()} · bagged {s.totalBagged.toLocaleString()}</div>
-                {s.loaders.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>Loaders</div>}
-                {s.loaders.map((l, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
-                    <span>{l.name}</span><span style={{ fontWeight: 600 }}>{l.loaded.toLocaleString()} loaded</span>
-                  </div>
-                ))}
-                {s.baggers.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Baggers</div>}
-                {s.baggers.map((b, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
-                    <span>{b.name}</span><span style={{ fontWeight: 600 }}>{b.bagged.toLocaleString()} bagged</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {s.bagReport && (
-              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — {s.bagReport.product || 'bags'}</div>
-                {[['Opening', s.bagReport.opening], ['Production', s.bagReport.produced], ['Total', s.bagReport.total], ['Sales', s.bagReport.sold], ['Available', s.bagReport.available]].map(([k, v], i) => (
-                  <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0', ...(k === 'Total' || k === 'Available' ? { fontWeight: 700 } : {}) }}>
-                    <span style={{ color: 'var(--muted)' }}>{k}</span><span>{(v || 0).toLocaleString()}</span>
-                  </div>
-                ))}
-                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>Available = opening + production − sales. Add leakage/staff water under incidents if needed.</div>
-              </div>
-            )}
-
-            {(s.diesel > 0 || s.expenses > 0) && (
-              <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--muted)', margin: '8px 2px' }}>
-                <span>Diesel: <strong style={{ color: 'var(--ink)' }}>{ngn(s.diesel)}</strong></span>
-                <span>Other expenses: <strong style={{ color: 'var(--ink)' }}>{ngn(s.expenses)}</strong></span>
-              </div>
-            )}
-
-            {/* Sales distribution by site — the global roll-up */}
-            {gen.scope === 'ALL' && (gen.bySite || []).some((r) => r.totalSales > 0 || r.incentive > 0) && (
-              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-                <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales distribution</div>
-                {(gen.bySite || []).filter((r) => r.totalSales > 0 || r.incentive > 0).sort((a, b) => b.totalSales - a.totalSales).map((r) => (
-                  <div key={r.site_id || r.site_name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderTop: '1px solid var(--line)' }}>
-                    <span>{r.site_name}</span>
-                    <span style={{ fontWeight: 600 }}>{ngn(r.totalSales)}{r.incentive > 0 ? ` · 🎁${ngn(r.incentive)}` : ''}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Bags compilation across all sites (sold excludes bonus) */}
-            {gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0 && (
-              <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-                <div style={{ fontWeight: 700, marginBottom: 4 }}>Bags — all sites <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(sold excl. bonus)</span></div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
-                  <span>Site</span><span style={{ textAlign: 'right' }}>Sold</span><span style={{ textAlign: 'right' }}>Avail</span>
-                </div>
-                {gen.summary.bagBySite.map((r) => (
-                  <div key={r.site_id} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, padding: '2px 0' }}>
-                    <span>{r.site_name}</span><span style={{ textAlign: 'right' }}>{(r.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(r.available || 0).toLocaleString()}</span>
-                  </div>
-                ))}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
-                  <span>Total</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.available || 0).toLocaleString()}</span>
-                </div>
-                {gen.summary.stockTotals && (
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 6 }}>
-                    Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {(gen.summary.stockTotals.packing_available || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg) · avail {(gen.summary.stockTotals.rolls_available_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_available_kg || 0).toLocaleString()}kg)
-                  </div>
-                )}
-              </div>
-            )}
-
-            {gen.scope !== 'ALL' && (
-              <div style={{ fontSize: 12, color: gen.summary?.ops ? 'var(--ok)' : 'var(--muted)', margin: '6px 2px' }}>
-                {gen.summary?.ops ? '✓ Day operations captured — included in the report.' : 'No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.'}
-              </div>
-            )}
+            <GeneratedReportBody gen={gen} />
 
             <label className="fl">Incidents / notes</label>
             <textarea className="input" rows={3} value={incidents} onChange={(e) => setIncidents(e.target.value)}
@@ -434,6 +510,21 @@ export default function Reports() {
     );
   };
 
+  // Tapping a saved report opens its full read-only detail (the archive view).
+  // From there the user can Email it or jump into Edit. Site-bound staff can
+  // edit their own site's reports; everyone Snr Accountant+ can edit any.
+  const openDetail = (report) => {
+    openModal(
+      <ReportDetail
+        report={report}
+        canEdit={!isSM || String(report.site_id) === String(sites[0]?.id)}
+        onEdit={() => { closeModal(); openForm(report); }}
+        onClose={closeModal}
+      />,
+      { guard: true }
+    );
+  };
+
   return (
     <div>
       {/* Filters row */}
@@ -529,8 +620,16 @@ export default function Reports() {
         <div className="empty"><div className="ic">🧾</div><p>{pos && pos.totals.orders > 0 ? 'No daily reports yet — POS sales shown above' : 'No reports found'}</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+            <strong style={{ fontSize: 14 }}>📑 Daily report archive</strong>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+              {(!filters.from && !filters.to) ? 'all dates'
+                : (filters.from && filters.from === filters.to) ? (filters.from === today() ? 'today' : filters.from)
+                : `${filters.from || '…'} → ${filters.to || '…'}`} · {reports.length}
+            </span>
+          </div>
           {reports.map((r) => (
-            <button key={r.id} onClick={() => openForm(r)}
+            <button key={r.id} onClick={() => openDetail(r)}
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700 }}>{r.site_name} <span className={`badge ${STATUS_LABEL[r.status] || 'draft'}`}>{r.status}</span></div>

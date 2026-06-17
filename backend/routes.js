@@ -544,7 +544,16 @@ async function emailReportOnSubmit(tenant_id, reportId, site, user) {
     if (!isFidoFiafia) return;
     const report = await qone('SELECT * FROM daily_reports WHERE id=?', [reportId]);
     if (!report) return;
-    const to = [...new Set([user && user.email, REPORTS_INBOX].filter(Boolean))];
+    // Recipients: the report's creator + every company admin + the central inbox.
+    const adminIds = await tenantUserIds(tenant_id, 'ADMIN');
+    const adminRows = adminIds.length
+      ? await qall(`SELECT email FROM users WHERE id IN (${adminIds.map(() => '?').join(',')})`, adminIds)
+      : [];
+    const to = [...new Set([
+      user && user.email,
+      ...adminRows.map((r) => r.email),
+      REPORTS_INBOX,
+    ].filter(Boolean))];
     if (!to.length) return;
     const docs = (await qall('SELECT * FROM documents WHERE report_id=?', [reportId]))
       .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));

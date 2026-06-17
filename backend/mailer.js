@@ -218,6 +218,14 @@ async function sendDailyReport({ tenant, site, report, to, attachments = [] }) {
     </div>
   </div>`;
 
+  // No attachments → route through the persistent outbox queue so a relay
+  // throttle (421) is retried for hours rather than lost. With attachments we
+  // must send inline (the queue can't persist file payloads) but `deliver`
+  // still retries transient failures a few times.
+  if (!attachments.length) {
+    const r = await sendOrQueue({ to: to.join(', '), subject, html, tenant_id: tenant && tenant.id, kind: 'report' });
+    return { messageId: r.messageId, queued: r.queued, subject, to };
+  }
   const info = await deliver({
     from: FROM,
     to: to.join(', '),

@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { StoreProvider, useStore, useRole, isGateRole } from './store.jsx';
 import { api, scoped, setToken } from './api.js';
 import Nav from './components/Nav.jsx';
+import ContactForm from './views/ContactForm.jsx';
 import Modal from './components/Modal.jsx';
 import Toast from './components/Toast.jsx';
 
@@ -27,7 +28,7 @@ import Profit from './views/Profit.jsx';
 import Activity from './views/Activity.jsx';
 
 function Inner() {
-  const { user, tab, go, login, logout, toast, setTenant, setSites, tenant, tenants } = useStore();
+  const { user, tab, go, login, logout, toast, setTenant, setSites, tenant, tenants, openModal, closeModal } = useStore();
   const role = useRole();
   const [booting, setBooting] = useState(true);
 
@@ -116,7 +117,7 @@ function Inner() {
         {tab === 'activity'   && <Activity />}
         <footer className="app-footer">
           © {new Date().getFullYear()} Torama Technologies ·{' '}
-          <a href="mailto:support@torama.money">Contact us</a> ·{' '}
+          <a role="button" tabIndex={0} style={{ cursor: 'pointer' }} onClick={() => openModal(<ContactForm onClose={closeModal} />)}>Contact us</a> ·{' '}
           <a href="https://torama.money/privacy" target="_blank" rel="noopener noreferrer">Privacy</a> ·{' '}
           <a href="https://torama.money/terms" target="_blank" rel="noopener noreferrer">Terms</a>
         </footer>

@@ -307,6 +307,24 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
   return { messageId: info.messageId, subject, to };
 }
 
+// Contact-us message → emailed to all admins (reply-to the sender).
+async function sendContactMessage({ to, tenantName, fromName, fromEmail, subject, message }) {
+  const html = `
+  <div style="font-family:Segoe UI,Arial,sans-serif;max-width:560px;margin:auto;color:#1f2937">
+    <div style="background:#0ea5e9;color:#fff;padding:18px 22px;border-radius:10px 10px 0 0">
+      <div style="font-size:13px;letter-spacing:2px;opacity:.85">DAYBOOK · CONTACT</div>
+      <div style="font-size:20px;font-weight:800">${esc(subject)}</div>
+    </div>
+    <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 10px 10px;padding:20px">
+      <p style="margin:0 0 10px;color:#6b7280;font-size:13px">From <b>${esc(fromName)}</b> &lt;${esc(fromEmail)}&gt;${tenantName ? ' · ' + esc(tenantName) : ''}</p>
+      <div style="white-space:pre-wrap;font-size:14px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:12px 14px">${esc(message)}</div>
+      <p style="color:#9ca3af;font-size:12px;margin-top:16px">Reply directly to this email to respond to ${esc(fromName)}.</p>
+    </div>
+  </div>`;
+  const info = await getTransporter().sendMail({ from: FROM, to, replyTo: fromEmail || undefined, subject: `[Daybook] ${subject}`, html });
+  return { messageId: info.messageId, to };
+}
+
 async function verifyConnection() {
   try { await getTransporter().verify(); return { ok: true }; }
   catch (e) { return { ok: false, error: e.message }; }
@@ -326,4 +344,4 @@ async function sendTest({ to }) {
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, sendGeneratedReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, verifyConnection, sendTest, FROM };
+module.exports = { sendDailyReport, sendGeneratedReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, sendContactMessage, verifyConnection, sendTest, FROM };

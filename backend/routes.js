@@ -14,7 +14,7 @@ const {
   verifyGoogleToken, signSession, requireAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, siteBound, GOOGLE_CLIENT_ID,
 } = require('./auth');
-const { sendDailyReport, sendGeneratedReport, sendInvite, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
+const { sendDailyReport, sendGeneratedReport, sendInvite, sendContactMessage, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
 
 const ROLE_LABELS = {
   GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
@@ -113,6 +113,29 @@ function needTenant(minRole) {
 
 // ── PUBLIC config ──────────────────────────────────────────────────────────────
 router.get('/config', (_req, res) => res.json({ google_client_id: GOOGLE_CLIENT_ID }));
+
+// ── Contact us — message goes to all admins by email + their in-app inbox ───────
+router.post('/contact', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req);
+  const b = req.body || {};
+  const subject = (b.subject || '').toString().trim().slice(0, 140) || 'Message via Daybook';
+  const message = (b.message || '').toString().trim().slice(0, 5000);
+  if (!message) return res.status(400).json({ error: 'message required' });
+  const tenant = tid ? await tenantById(tid) : null;
+  const adminIds = (tid ? await tenantUserIds(tid, 'ADMIN') : []).filter((u) => u && u !== req.user.id);
+  // In-app inbox (alerts) for every admin
+  await notify(tid, adminIds, { type: 'contact', title: `Message from ${req.user.name || req.user.email}`, body: subject, link: 'activity' });
+  // Email every admin (reply-to the sender)
+  let emailed = false, email_error;
+  const adminUsers = adminIds.length ? await qall(`SELECT email FROM users WHERE id IN (${adminIds.map(() => '?').join(',')})`, adminIds) : [];
+  const emails = [...new Set(adminUsers.map((u) => u.email).filter(Boolean))];
+  if (emails.length) {
+    try { await sendContactMessage({ to: emails, tenantName: tenant && tenant.name, fromName: req.user.name || req.user.email, fromEmail: req.user.email, subject, message }); emailed = true; }
+    catch (e) { email_error = e.message; }
+  }
+  await audit(tid, req.user.id, 'CONTACT', 'contact', null, { subject });
+  res.status(201).json({ ok: true, emailed, recipients: emails.length, email_error });
+});
 
 // ── Test-plan results (public — the /testplan.html page has no login) ───────────
 // Submitted from any site; results are viewable back on the same page.

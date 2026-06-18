@@ -265,6 +265,14 @@ label.fl { display: block; font-size: 13px; font-weight: 600; color: var(--muted
 }
 .chat-row:hover .chat-reply-btn { opacity: 1; }
 .chat-reply-btn:hover { background: var(--line); color: var(--ink); }
+/* AI assistant: header button on desktop, floating FAB (bottom-left) on mobile */
+.ai-fab {
+  display: none; position: fixed; left: 16px; bottom: calc(72px + var(--safe-b));
+  width: 52px; height: 52px; border-radius: 50%; border: none; z-index: 28;
+  background: var(--brand); color: #fff; font-size: 24px; cursor: pointer;
+  box-shadow: 0 6px 18px rgba(15,23,42,.28); place-items: center;
+}
+.ai-fab:active { transform: scale(.94); }
 @media (max-width: 767px) { .chat-reply-btn { opacity: .6; } }   /* always tappable on touch */
 
 /* ── Toast ─────────────────────────────────────────────────────────────────── */
@@ -451,6 +459,9 @@ tr:hover td { background: #f8fafc; }
   .main-content { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
   /* FAB sits above bottom nav on mobile */
   .fab { bottom: calc(72px + var(--safe-b)); }
+  /* AI: hide the header button, show the floating FAB instead */
+  .ai-hdr-btn { display: none; }
+  .ai-fab { display: grid; }
 
   /* Inputs at ≥16px so iOS Safari never zooms the page on focus */
   .input, select.input, textarea.input { font-size: 16px; padding: 12px; }

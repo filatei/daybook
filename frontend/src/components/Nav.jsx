@@ -124,7 +124,7 @@ export default function Nav() {
             ))}
           </select>
           {isAdmin && (
-            <button className="chat-btn" onClick={() => openModal(<AIAssistant onClose={closeModal} />, { guard: true })} title="Ask Daybook AI" aria-label="AI assistant">
+            <button className="chat-btn ai-hdr-btn" onClick={() => openModal(<AIAssistant onClose={closeModal} />, { guard: true })} title="Ask Daybook AI" aria-label="AI assistant">
               🤖
             </button>
           )}
@@ -145,6 +145,13 @@ export default function Nav() {
           ))}
         </nav>
       </header>
+
+      {/* AI assistant — floating FAB on mobile (bottom-left), Admin only */}
+      {isAdmin && (
+        <button className="ai-fab" onClick={() => openModal(<AIAssistant onClose={closeModal} />, { guard: true })} title="Ask Daybook AI" aria-label="AI assistant">
+          🤖
+        </button>
+      )}
 
       {/* ── Bottom nav (mobile only, fixed at bottom) ─────────── */}
       <nav className="bottom-nav">

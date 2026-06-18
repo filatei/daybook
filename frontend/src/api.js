@@ -38,6 +38,23 @@ export async function api(path, { method = 'GET', body, form } = {}) {
 export const isNetErr = (e) =>
   !navigator.onLine || /failed to fetch|networkerror|load failed|fetch failed/i.test(e?.message || '');
 
+// ── Receipt deep-link / install URL ───────────────────────────────────────────
+// The QR printed on a receipt encodes a full URL so that a customer scanning it
+// with their phone camera is taken to daybook.torama.money (Chrome opens it),
+// where they're prompted to install the app. Internally the gate scanner pulls
+// the receipt number back out of the same URL, so one QR serves both.
+export const RECEIPT_BASE = 'https://daybook.torama.money';
+export const receiptUrl = (no) => `${RECEIPT_BASE}/?r=${encodeURIComponent(String(no || ''))}`;
+// Extract a receipt number from a scanned value (a bare number, a URL with ?r=,
+// or any string containing digits).
+export const receiptFromValue = (v) => {
+  const s = String(v || '').trim();
+  const m = s.match(/[?&]r=([^&#\s]+)/i);
+  if (m) { const dec = decodeURIComponent(m[1]); const d = dec.match(/\d+/g); return d ? d.join('') : dec; }
+  const d = s.match(/\d+/g);
+  return d ? d.join('') : s;
+};
+
 export const ngn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 export const today = () => new Date().toISOString().slice(0, 10);
 export const timeAgo = (s) => {

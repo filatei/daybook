@@ -4,7 +4,7 @@
  * Pure presentational; takes the same payload object used by useBTPrinter.print.
  */
 import React from 'react';
-import { ngn } from '../api.js';
+import { ngn, receiptUrl } from '../api.js';
 import QRCode from './QRCode.jsx';
 
 const Row = ({ l, r, bold }) => (
@@ -55,7 +55,7 @@ export default function ReceiptPreview({ receipt: r }) {
       <div style={{ textAlign: 'center', fontWeight: 800 }}>TAKE TO LOADING POINT</div>
       <div style={{ textAlign: 'center', marginBottom: 4 }}>Receipt {rno}</div>
       {r.receipt_no !== 'OFFLINE' && (
-        <div style={{ width: 120, height: 120, margin: '0 auto' }}><QRCode value={String(r.receipt_no)} size={120} /></div>
+        <div style={{ width: 120, height: 120, margin: '0 auto' }}><QRCode value={receiptUrl(r.receipt_no)} size={120} /></div>
       )}
       <Hr />
     </div>

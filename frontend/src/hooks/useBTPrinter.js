@@ -5,6 +5,7 @@
  * Tries multiple known BLE GATT profiles (different printer chipsets).
  */
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { receiptUrl } from '../api.js';
 
 // BLE service → write-characteristic pairs, ordered by market share
 const PROFILES = [
@@ -134,7 +135,9 @@ export function buildReceipt(opts) {
   push(CMD_BOLD_OFF, CMD_SIZE_NORM);
   push(t(`Receipt #${rno}\n`));
   push(new Uint8Array([LF]));
-  push(qrEscPos(String(receipt_no || '')));
+  // Encode the install/verify URL so a customer scanning with their phone camera
+  // is taken to daybook.torama.money (the gate scanner extracts the number back).
+  push(qrEscPos(receiptUrl(receipt_no)));
   push(DIVIDER, NEWLINES, CMD_CUT);
 
   // Combine into a single Uint8Array

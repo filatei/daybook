@@ -10,7 +10,7 @@
  * + Enter into the auto-focused input.  Staff can also type manually.
  */
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { api, scoped, ngn } from '../api.js';
+import { api, scoped, ngn, receiptFromValue } from '../api.js';
 import { useRealtime } from '../hooks/useRealtime.js';
 import BarcodeScanner from '../components/BarcodeScanner.jsx';
 
@@ -71,7 +71,8 @@ export default function Gate() {
   const reset = () => { setQuery(''); setSale(null); setTimeout(() => inputRef.current?.focus(), 50); };
 
   const lookupValue = useCallback(async (rawVal) => {
-    const rn = String(rawVal || '').trim();
+    // Accept a bare number, a scanned receipt URL (…/?r=1234), or digits-in-text.
+    const rn = receiptFromValue(rawVal);
     if (!rn) return;
     setLoading(true); setSale(null);
     try {
@@ -88,9 +89,20 @@ export default function Gate() {
   // Camera scan → fill the field and look it up immediately.
   const onScan = useCallback((code) => {
     setScanning(false);
-    const digits = (code.match(/\d+/g) || [code]).join('');
-    setQuery(digits);
-    lookupValue(digits);
+    const rn = receiptFromValue(code);
+    setQuery(rn);
+    lookupValue(rn);
+  }, [lookupValue]);
+
+  // Deep-link: a receipt scanned from outside the app (the ?r= QR link) lands
+  // here once a gate user is signed in — prefill and look it up automatically.
+  useEffect(() => {
+    const pending = sessionStorage.getItem('daybook_pending_receipt');
+    if (pending) {
+      sessionStorage.removeItem('daybook_pending_receipt');
+      setQuery(pending);
+      lookupValue(pending);
+    }
   }, [lookupValue]);
 
   const markLoaded = useCallback(async () => {

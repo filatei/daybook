@@ -6,6 +6,7 @@ import ContactForm from './views/ContactForm.jsx';
 import Modal from './components/Modal.jsx';
 import ConfirmDialog from './components/ConfirmDialog.jsx';
 import Toast from './components/Toast.jsx';
+import InstallLanding, { isStandalone } from './components/InstallLanding.jsx';
 
 // Views (lazy-ish — just plain imports for now; split later if bundle grows)
 import Dashboard from './views/Dashboard.jsx';
@@ -32,6 +33,21 @@ function Inner() {
   const { user, tab, go, login, logout, toast, setSites, tenant, tenants, openModal, closeModal } = useStore();
   const role = useRole();
   const [booting, setBooting] = useState(true);
+  // A receipt QR was scanned (…/?r=NNNN) in a phone browser without the app:
+  // show the install landing first. When dismissed, the receipt is stashed so a
+  // signed-in gate user lands straight on the lookup.
+  const [scannedReceipt, setScannedReceipt] = useState(() => {
+    try {
+      const r = new URLSearchParams(window.location.search).get('r');
+      if (r) {
+        sessionStorage.setItem('daybook_pending_receipt', r.replace(/\D/g, '') || r);
+        // strip ?r= from the URL so reloads/installs don't re-trigger the landing
+        window.history.replaceState({}, '', window.location.pathname);
+        return (!isStandalone()) ? r.replace(/\D/g, '') || r : null;
+      }
+    } catch { /* ignore */ }
+    return null;
+  });
 
   // Gate-only roles (Gateman, Supervisor) are confined to the Gate screen.
   useEffect(() => { if (isGateRole(role) && tab !== 'gate') go('gate'); }, [role, tab, go]);
@@ -87,6 +103,9 @@ function Inner() {
       login(data.user, data.token, data.tenants);
     } catch (e) { toast(e.message, 'err'); }
   }, []);
+
+  // Customer scanned a receipt QR in a browser without the app → prompt install.
+  if (scannedReceipt) return <InstallLanding receipt={scannedReceipt} onContinue={() => setScannedReceipt(null)} />;
 
   if (booting) return <div className="boot-screen">Loading…</div>;
 

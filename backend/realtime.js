@@ -54,12 +54,19 @@ function attach(server) {
       if (!ctx) return ws.close(4003, 'no access');
       const site_id = siteBound(ctx) ? ctx.site_id : null;
 
-      const client = { ws, tenant_id: tenant, site_id, alive: true };
+      const client = { ws, tenant_id: tenant, site_id, user_id: user.id, alive: true };
+      const wasOnline = userSocketCount(tenant, user.id) > 0;   // another device already connected?
       clients.add(client);
+      if (!wasOnline) presenceChange(tenant, user.id, true);     // first socket → user came online
+      const onGone = () => {
+        if (!clients.has(client)) return;
+        clients.delete(client);
+        if (userSocketCount(tenant, user.id) === 0) presenceChange(tenant, user.id, false);
+      };
       ws.on('pong', () => { client.alive = true; });
-      ws.on('close', () => clients.delete(client));
-      ws.on('error', () => clients.delete(client));
-      ws.send(JSON.stringify({ t: 'ready', tenant, site_id }));
+      ws.on('close', onGone);
+      ws.on('error', onGone);
+      ws.send(JSON.stringify({ t: 'ready', tenant, site_id, online: usersOnline(tenant) }));
 
       // Resume: replay missed events (scoped), capped so a long-dead client gets
       // a fresh baseline rather than a huge backlog.
@@ -73,10 +80,16 @@ function attach(server) {
     } catch (e) { try { ws.close(1011); } catch { /* */ } }
   });
 
-  // Heartbeat: ping every 25s; drop silently-dead sockets.
+  // Heartbeat: ping every 25s; drop silently-dead sockets (and flip the user
+  // offline once their last socket is gone).
   const hb = setInterval(() => {
     for (const c of clients) {
-      if (!c.alive) { try { c.ws.terminate(); } catch { /* */ } clients.delete(c); continue; }
+      if (!c.alive) {
+        try { c.ws.terminate(); } catch { /* */ }
+        clients.delete(c);
+        if (c.user_id && userSocketCount(c.tenant_id, c.user_id) === 0) presenceChange(c.tenant_id, c.user_id, false);
+        continue;
+      }
       c.alive = false; try { c.ws.ping(); } catch { /* */ }
     }
   }, 25000);
@@ -92,4 +105,28 @@ function broadcastLive(tenant_id, site_id, type, payload) {
   broadcast({ seq: 0, tenant_id, site_id: site_id || null, type, payload: payload || {}, created_at: Math.floor(Date.now() / 1000) });
 }
 
-module.exports = { attach, emitEvent, broadcastLive };
+// ── Presence + user-targeted delivery (1-to-1 chat) ───────────────────────────
+function userSocketCount(tenant_id, user_id) {
+  let n = 0;
+  for (const c of clients) if (c.tenant_id === tenant_id && c.user_id === user_id) n++;
+  return n;
+}
+function usersOnline(tenant_id) {
+  const s = new Set();
+  for (const c of clients) if (c.tenant_id === tenant_id && c.user_id) s.add(c.user_id);
+  return [...s];
+}
+// Notify the whole tenant that a user came online / went offline.
+function presenceChange(tenant_id, user_id, online) {
+  broadcastLive(tenant_id, null, online ? 'presence.online' : 'presence.offline', { user_id });
+}
+// Deliver an ephemeral event to specific users' live sockets (e.g. a DM to the
+// recipient + the sender's other devices). Not persisted — history is in Postgres.
+function sendToUsers(tenant_id, userIds, type, payload) {
+  const ids = new Set(userIds.filter(Boolean));
+  if (!ids.size) return;
+  const msg = JSON.stringify({ t: 'event', seq: 0, tenant_id, type, payload: payload || {}, created_at: Math.floor(Date.now() / 1000) });
+  for (const c of clients) if (c.tenant_id === tenant_id && ids.has(c.user_id) && c.ws.readyState === 1) { try { c.ws.send(msg); } catch { /* dropped */ } }
+}
+
+module.exports = { attach, emitEvent, broadcastLive, sendToUsers, usersOnline };

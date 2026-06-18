@@ -1,5 +1,20 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useStore, useRole, useActiveTenant, atLeast, isGateRole } from '../store.jsx';
+import { api, scoped } from '../api.js';
+import { useRealtime } from '../hooks/useRealtime.js';
+
+// Live total of unread direct messages → the Nav chat badge.
+function useChatUnread(meId) {
+  const [total, setTotal] = useState(0);
+  const load = useCallback(() => { api(scoped('/chat/unread')).then((r) => setTotal(r.total || 0)).catch(() => {}); }, []);
+  useEffect(() => { load(); }, [load]);
+  useRealtime((evt) => {
+    if (evt.type === 'chat.message' && evt.payload?.to_user === meId) load();
+    else if (evt.type === 'chat.read') load();
+  });
+  useEffect(() => { const h = () => load(); window.addEventListener('chat-read', h); return () => window.removeEventListener('chat-read', h); }, [load]);
+  return total;
+}
 
 function useInstallPrompt() {
   const [canInstall, setCanInstall] = useState(() => !!window.__pwaInstallPrompt);
@@ -65,6 +80,7 @@ export default function Nav() {
   const role    = useRole();
   const active  = useActiveTenant();
   const { canInstall, install } = useInstallPrompt();
+  const unread = useChatUnread(user?.id);
 
   const isGMup       = role && atLeast(role, 'GENERAL_MANAGER');
   const isMgr        = role && atLeast(role, 'SITE_MANAGER');
@@ -105,6 +121,11 @@ export default function Nav() {
               <option key={t.id} value={t.id}>{t.name}</option>
             ))}
           </select>
+          <button className="chat-btn" onClick={() => go('chat')} title="Chat" aria-label="Chat"
+            style={{ position: 'relative' }}>
+            💬
+            {unread > 0 && <span className="chat-badge nav">{unread > 99 ? '99+' : unread}</span>}
+          </button>
           <ProfileMenu user={user} isGMup={isGMup} isMgr={isMgr} go={go} logout={logout} canInstall={canInstall} install={install} />
         </div>
 

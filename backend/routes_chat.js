@@ -1,0 +1,126 @@
+/**
+ * Daybook — Staff chat (1-to-1 direct messages)
+ *
+ * Realtime delivery rides the existing WS gateway (realtime.js): a sent message
+ * is pushed to the recipient's live sockets + the sender's other devices, and
+ * presence (online/offline) is broadcast by the gateway. This table is the
+ * durable history + unread source. Broadcast/group channels come later.
+ *
+ * Mounted at /api/chat
+ */
+'use strict';
+
+const express = require('express');
+const { v4: uuid } = require('uuid');
+const { qone, qall, qrun } = require('./db');
+const { requireAuth, contextFor, requestedTenant } = require('./auth');
+const { sendToUsers, usersOnline } = require('./realtime');
+
+const router = express.Router();
+const nowS = () => Math.floor(Date.now() / 1000);
+
+// Resolve the caller's membership in the requested tenant (any active member may chat).
+async function chatCtx(req, res) {
+  const tid = requestedTenant(req);
+  if (!tid) { res.status(400).json({ error: 'select a workspace' }); return null; }
+  const c = await contextFor(req.user, tid);
+  if (!c) { res.status(403).json({ error: 'no access' }); return null; }
+  return { tenant_id: tid, me: req.user.id };
+}
+
+// Roster: every active member of the tenant (except me) with online state + the
+// number of unread messages they've sent me + last message preview/time.
+router.get('/users', requireAuth, async (req, res) => {
+  const ctx = await chatCtx(req, res); if (!ctx) return;
+  const { tenant_id, me } = ctx;
+  const rows = await qall(
+    `SELECT u.id, u.name, u.email, m.role, s.name AS site_name
+       FROM memberships m
+       JOIN users u ON u.id = m.user_id
+       LEFT JOIN sites s ON s.id = m.site_id
+      WHERE m.tenant_id = ? AND m.status = 'ACTIVE' AND u.id <> ?
+      ORDER BY u.name NULLS LAST, u.email`, [tenant_id, me]);
+  const unread = await qall(
+    `SELECT from_user, COUNT(*)::int n, MAX(created_at) last_at
+       FROM chat_messages WHERE tenant_id = ? AND to_user = ? AND read_at IS NULL
+       GROUP BY from_user`, [tenant_id, me]);
+  const last = await qall(
+    `SELECT CASE WHEN from_user = ? THEN to_user ELSE from_user END AS other,
+            MAX(created_at) last_at
+       FROM chat_messages
+      WHERE tenant_id = ? AND (from_user = ? OR to_user = ?)
+      GROUP BY other`, [me, tenant_id, me, me]);
+  const unreadBy = Object.fromEntries(unread.map((r) => [r.from_user, r.n]));
+  const lastBy = Object.fromEntries(last.map((r) => [r.other, Number(r.last_at)]));
+  const online = new Set(usersOnline(tenant_id));
+  const list = rows.map((u) => ({
+    id: u.id, name: u.name || u.email, role: u.role, site_name: u.site_name || null,
+    online: online.has(u.id), unread: unreadBy[u.id] || 0, last_at: lastBy[u.id] || null,
+  })).sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
+  res.json({ users: list, online: [...online] });
+});
+
+// Total unread + per-sender counts — powers the Nav badge.
+router.get('/unread', requireAuth, async (req, res) => {
+  const ctx = await chatCtx(req, res); if (!ctx) return;
+  const rows = await qall(
+    `SELECT from_user, COUNT(*)::int n FROM chat_messages
+      WHERE tenant_id = ? AND to_user = ? AND read_at IS NULL GROUP BY from_user`,
+    [ctx.tenant_id, ctx.me]);
+  res.json({ total: rows.reduce((a, r) => a + r.n, 0), by_user: Object.fromEntries(rows.map((r) => [r.from_user, r.n])) });
+});
+
+// Conversation history with one user (oldest→newest); marks their msgs read.
+router.get('/thread/:userId', requireAuth, async (req, res) => {
+  const ctx = await chatCtx(req, res); if (!ctx) return;
+  const { tenant_id, me } = ctx;
+  const other = req.params.userId;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 300);
+  const rows = await qall(
+    `SELECT * FROM (
+        SELECT id, from_user, to_user, body, created_at, read_at FROM chat_messages
+         WHERE tenant_id = ? AND ((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?))
+         ORDER BY created_at DESC LIMIT ?
+     ) t ORDER BY created_at ASC`,
+    [tenant_id, me, other, other, me, limit]);
+  // Mark their messages to me as read, and tell them (read receipts).
+  const upd = await qrun(
+    `UPDATE chat_messages SET read_at = ? WHERE tenant_id = ? AND from_user = ? AND to_user = ? AND read_at IS NULL`,
+    [nowS(), tenant_id, other, me]);
+  if (upd.rowCount) sendToUsers(tenant_id, [other], 'chat.read', { by: me, at: nowS() });
+  res.json({ messages: rows.map((m) => ({ ...m, created_at: Number(m.created_at), read_at: m.read_at ? Number(m.read_at) : null })) });
+});
+
+// Send a DM → persist + push to recipient and the sender's other devices.
+router.post('/send', requireAuth, async (req, res) => {
+  const ctx = await chatCtx(req, res); if (!ctx) return;
+  const { tenant_id, me } = ctx;
+  const to = (req.body && req.body.to) || '';
+  const body = ((req.body && req.body.body) || '').toString().trim();
+  if (!to || !body) return res.status(400).json({ error: 'recipient and message required' });
+  if (to === me) return res.status(400).json({ error: 'cannot message yourself' });
+  // Recipient must be a member of this tenant.
+  const member = await qone(`SELECT 1 FROM memberships WHERE tenant_id = ? AND user_id = ? AND status = 'ACTIVE'`, [tenant_id, to]);
+  if (!member) return res.status(404).json({ error: 'recipient not found' });
+  const id = uuid();
+  const at = nowS();
+  await qrun(`INSERT INTO chat_messages (id, tenant_id, from_user, to_user, body, created_at) VALUES (?,?,?,?,?,?)`,
+    [id, tenant_id, me, to, body.slice(0, 4000), at]);
+  const msg = { id, tenant_id, from_user: me, to_user: to, body: body.slice(0, 4000), created_at: at, read_at: null };
+  sendToUsers(tenant_id, [to, me], 'chat.message', msg);   // recipient + sender's other tabs
+  res.status(201).json(msg);
+});
+
+// Explicit mark-read (e.g. swipe to clear) without loading the thread.
+router.post('/read/:userId', requireAuth, async (req, res) => {
+  const ctx = await chatCtx(req, res); if (!ctx) return;
+  const { tenant_id, me } = ctx;
+  const other = req.params.userId;
+  const upd = await qrun(
+    `UPDATE chat_messages SET read_at = ? WHERE tenant_id = ? AND from_user = ? AND to_user = ? AND read_at IS NULL`,
+    [nowS(), tenant_id, other, me]);
+  if (upd.rowCount) sendToUsers(tenant_id, [other], 'chat.read', { by: me, at: nowS() });
+  res.json({ cleared: upd.rowCount || 0 });
+});
+
+module.exports = router;

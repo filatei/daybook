@@ -246,6 +246,20 @@ label.fl { display: block; font-size: 13px; font-weight: 600; color: var(--muted
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── Chat ──────────────────────────────────────────────────────────────────── */
+.chat-btn {
+  width: 38px; height: 38px; border-radius: 50%; border: none;
+  background: rgba(255,255,255,.18); color: #fff; font-size: 18px;
+  cursor: pointer; display: grid; place-items: center; margin-right: 6px;
+}
+.chat-btn:hover { background: rgba(255,255,255,.28); }
+.chat-badge {
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--err); color: #fff; font-size: 11px; font-weight: 800;
+  display: inline-grid; place-items: center; line-height: 1;
+}
+.chat-badge.nav { position: absolute; top: -3px; right: -3px; border: 2px solid var(--brand); }
+
 /* ── Toast ─────────────────────────────────────────────────────────────────── */
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);

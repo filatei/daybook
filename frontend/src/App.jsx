@@ -28,6 +28,7 @@ import Badges from './views/Badges.jsx';
 import Inventory from './views/Inventory.jsx';
 import Profit from './views/Profit.jsx';
 import Activity from './views/Activity.jsx';
+import Chat from './views/Chat.jsx';
 
 function Inner() {
   const { user, tab, go, login, logout, toast, setSites, tenant, tenants, openModal, closeModal } = useStore();
@@ -135,6 +136,7 @@ function Inner() {
         {tab === 'inventory'  && <Inventory />}
         {tab === 'profit'     && <Profit />}
         {tab === 'activity'   && <Activity />}
+        {tab === 'chat'       && <Chat />}
         <footer className="app-footer">
           © {new Date().getFullYear()} Torama Technologies ·{' '}
           <a role="button" tabIndex={0} style={{ cursor: 'pointer' }} onClick={() => openModal(<ContactForm onClose={closeModal} />)}>Contact us</a> ·{' '}

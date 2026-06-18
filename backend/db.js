@@ -483,6 +483,22 @@ async function migrate() {
     ALTER TABLE tenants    ADD COLUMN IF NOT EXISTS report_email_all TEXT;
   `);
 
+  // Staff 1-to-1 direct messages (WhatsApp-style chat). Realtime delivery rides
+  // the existing WS gateway; this table is the durable history + unread source.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      from_user   TEXT NOT NULL,
+      to_user     TEXT NOT NULL,
+      body        TEXT NOT NULL,
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      read_at     BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_pair   ON chat_messages(tenant_id, from_user, to_user, created_at);
+    CREATE INDEX IF NOT EXISTS idx_chat_unread ON chat_messages(tenant_id, to_user, read_at);
+  `);
+
   // Cutover quarantine — fido orders rejected during migration (no usable
   // timestamp or no Fido order id) are recorded here instead of imported, so
   // they're auditable and can be cleaned in Fido rather than carried into Postgres.

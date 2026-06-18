@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { api, scoped } from '../api.js';
 import { useStore } from '../store.jsx';
+import Markdown from './Markdown.jsx';
 
 // Admin-only assistant — asks the backend /ai/chat, which reads THIS company's
 // data (live POS/expenses/payroll/staff + Daybook reports) scoped to the user.
@@ -41,8 +42,8 @@ export default function AIAssistant({ onClose }) {
           const mine = m.role === 'user';
           return (
             <div key={i} style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '88%' }}>
-              <div style={{ background: mine ? 'var(--brand)' : '#f1f5f9', color: mine ? '#fff' : 'var(--ink)', padding: '9px 13px', borderRadius: 14, borderBottomRightRadius: mine ? 4 : 14, borderBottomLeftRadius: mine ? 14 : 4, fontSize: 14, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                {m.content}
+              <div style={{ background: mine ? 'var(--brand)' : '#f1f5f9', color: mine ? '#fff' : 'var(--ink)', padding: '9px 13px', borderRadius: 14, borderBottomRightRadius: mine ? 4 : 14, borderBottomLeftRadius: mine ? 14 : 4, fontSize: 14, wordBreak: 'break-word', ...(mine ? { whiteSpace: 'pre-wrap' } : {}) }}>
+                {mine ? m.content : <Markdown text={m.content} />}
               </div>
             </div>
           );

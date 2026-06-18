@@ -275,6 +275,16 @@ label.fl { display: block; font-size: 13px; font-weight: 600; color: var(--muted
 .ai-fab:active { transform: scale(.94); }
 @media (max-width: 767px) { .chat-reply-btn { opacity: .6; } }   /* always tappable on touch */
 
+/* ── Rich text (AI responses) ──────────────────────────────────────────────── */
+.md { line-height: 1.5; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md-p { margin: 6px 0; }
+.md-h { font-weight: 800; margin: 8px 0 3px; }
+.md-list { margin: 4px 0; padding-left: 20px; }
+.md-list li { margin: 2px 0; }
+.md-code { background: rgba(0,0,0,.06); border-radius: 5px; padding: 1px 5px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; }
+
 /* ── Toast ─────────────────────────────────────────────────────────────────── */
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);

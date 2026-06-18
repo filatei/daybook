@@ -33,8 +33,8 @@ a { color: var(--brand-d); text-decoration: none; }
   padding: 12px 14px;
 }
 .nav-logo {
-  font-weight: 800; letter-spacing: .5px; font-size: 17px;
-  color: #fff; flex: 1;
+  font-weight: 900; letter-spacing: .5px; font-size: 17px;
+  color: #f4f2ea; flex: 1;   /* chalk white, bold */
 }
 .tenant-sel {
   background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35);

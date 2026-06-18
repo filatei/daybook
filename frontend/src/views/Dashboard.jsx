@@ -17,26 +17,43 @@ function daysAgo(n) {
   const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10);
 }
 
-function BarChart({ data }) {
-  if (!data?.length) return null;
-  const max = Math.max(...data.map((d) => +d.sales), 1);
-  const W = 340, H = 80, bar = Math.max(2, Math.floor(W / data.length) - 2);
+const ngnK = (n) => n >= 1000 ? `₦${Math.round(n / 1000)}k` : `₦${Math.round(n)}`;
+const hourLabel = (h) => { if (h == null) return '—'; const ap = h < 12 ? 'a' : 'p'; const hr = h % 12 === 0 ? 12 : h % 12; return `${hr}${ap}`; };
+const peakHour = (byHour) => (byHour || []).reduce((b, h) => (h.sales > (b?.sales ?? -1) ? h : b), null)?.hour;
+const peakHourSales = (byHour) => (byHour || []).reduce((m, h) => Math.max(m, h.sales || 0), 0);
+// Build a continuous hour series (first→last active hour) so gaps read as a trend.
+function hourItems(byHour) {
+  const map = new Map((byHour || []).map((h) => [h.hour, +h.sales || 0]));
+  const active = [...map.keys()].filter((h) => map.get(h) > 0);
+  if (!active.length) return [];
+  const lo = Math.min(...active), hi = Math.max(...active);
+  const out = [];
+  for (let h = lo; h <= hi; h++) out.push({ label: h % 3 === 0 ? hourLabel(h) : '', value: map.get(h) || 0, strong: false });
+  return out;
+}
+
+// Labeled bar chart — value on the tallest bar, sparse x-labels, last/peak bold.
+function SalesBars({ items }) {
+  if (!items?.length) return null;
+  const max = Math.max(...items.map((d) => d.value), 1);
+  const W = 340, H = 96, gap = 2;
+  const bw = Math.max(2, (W / items.length) - gap);
+  const peakI = items.reduce((bi, d, i) => (d.value > items[bi].value ? i : bi), 0);
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 80 }} aria-hidden>
-      {data.map((d, i) => {
-        const h = Math.max(3, Math.round((d.sales / max) * (H - 20)));
-        const x = i * (W / data.length);
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 96 }} aria-hidden>
+      {items.map((d, i) => {
+        const h = Math.max(2, Math.round((d.value / max) * (H - 34)));
+        const x = i * (W / items.length);
+        const top = H - h - 16;
+        const hot = i === peakI || d.strong;
         return (
-          <g key={d.day || i}>
-            <rect x={x + 1} y={H - h - 16} width={bar} height={h}
-              rx={2} fill={d.sales >= max * 0.9 ? 'var(--brand-d)' : 'var(--brand-l)'} />
+          <g key={i}>
+            <rect x={x + gap / 2} y={top} width={bw} height={h} rx={2} fill={hot ? 'var(--brand-d)' : 'var(--brand-l)'} />
+            {i === peakI && <text x={x + bw / 2} y={top - 3} fontSize={9} fill="var(--ink)" textAnchor="middle" fontWeight="700">{ngnK(d.value)}</text>}
+            {d.label && <text x={x + bw / 2} y={H - 3} fontSize={9} fill="var(--muted)" textAnchor="middle">{d.label}</text>}
           </g>
         );
       })}
-      {data.length > 1 && <>
-        <text x={2} y={H} fontSize={9} fill="var(--muted)">{data[0]?.day?.slice(5)}</text>
-        <text x={W - 2} y={H} fontSize={9} fill="var(--muted)" textAnchor="end">{data[data.length - 1]?.day?.slice(5)}</text>
-      </>}
     </svg>
   );
 }
@@ -122,6 +139,10 @@ export default function Dashboard() {
   const bySite = usePos ? pos.bySite : data?.bySite;
   const byProduct = usePos ? (pos.byProduct || []) : [];
   const byCustomer = usePos ? (pos.byCustomer || []) : [];
+  const byHour = usePos ? (pos.byHour || []) : [];
+  // A single calendar day is selected (Today or a picked day) → show hourly; a
+  // multi-day range → show the daily trend.
+  const isSingleDay = !!day || RANGES[rangeIdx].days === 0;
 
   // FAQ-style foldable breakdowns: Site open by default, Product/Customer hidden.
   const [openSec, setOpenSec] = useState({ site: true, product: false, customer: false });
@@ -213,14 +234,20 @@ export default function Dashboard() {
             </button>
           )}
 
-          {byDay?.length > 0 && (
+          {isSingleDay && byHour.some((h) => h.sales > 0) ? (
             <div className="card" style={{ paddingBottom: 8 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6 }}>
-                Daily Sales Trend
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Sales by hour · {day || 'today'}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>peak {hourLabel(peakHour(byHour))} · {ngn(peakHourSales(byHour))}</div>
               </div>
-              <BarChart data={byDay} />
+              <SalesBars items={hourItems(byHour)} />
             </div>
-          )}
+          ) : (byDay?.length > 1) ? (
+            <div className="card" style={{ paddingBottom: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 6 }}>Daily sales trend</div>
+              <SalesBars items={(byDay || []).map((d, i) => ({ label: (d.day || '').slice(5), value: +d.sales || 0, strong: i === byDay.length - 1 }))} />
+            </div>
+          ) : null}
 
           {bySite?.length > 0 && (
             <FoldSection title="By Site" count={bySite.length} open={openSec.site} onToggle={() => toggleSec('site')}>

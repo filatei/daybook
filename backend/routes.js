@@ -1931,6 +1931,8 @@ router.get('/pos/range', requireAuth, async (req, res) => {
       ]);
       // Resolve customer ObjectIds → names (null = Walk-in).
       const custNames = await sales.namesByIds(byCustomerR.map((r) => r.group).filter(Boolean)).catch(() => ({}));
+      // Single-day view → sales by hour (peak selling hours).
+      const byHourR = (from === to) ? await sales.query({ from, to, sites, groupBy: 'hour' }).catch(() => []) : [];
       const isCash = (m) => String(m || '').toUpperCase().includes('CASH');
       const orders = byMethodR.reduce((a, r) => a + (r.orders || 0), 0);
       const salesTot = byMethodR.reduce((a, r) => a + (r.amount || 0), 0);
@@ -1947,6 +1949,7 @@ router.get('/pos/range', requireAuth, async (req, res) => {
           const id = r.group ? String(r.group) : null;
           return { customer: id ? (custNames[id] || 'Unknown') : 'Walk-in', customer_id: id || 'null', sales: r.amount, orders: r.orders };
         }).sort((a, b) => b.sales - a.sales),
+        byHour: byHourR.map((r) => ({ hour: Number(r.group), sales: r.amount })).sort((a, b) => a.hour - b.hour),
       });
     } catch (e) { /* fall through to the pos_sales snapshot on any source error */ }
   }
@@ -1985,6 +1988,12 @@ router.get('/pos/range', requireAuth, async (req, res) => {
   const byProduct = Object.values(prod).sort((a, b) => b.sales - a.sales).slice(0, 30);
   const byCustomerRows = await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders
     FROM pos_sales ${Wn} GROUP BY COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') ORDER BY sales DESC LIMIT 30`, args);
+  // Single-day view → sales by hour-of-day (business timezone).
+  const byHour = (from === to)
+    ? (await qall(`SELECT EXTRACT(HOUR FROM to_timestamp(created_at) AT TIME ZONE ?)::int hour, COALESCE(SUM(total),0) sales
+        FROM pos_sales ${Wn} AND created_at IS NOT NULL GROUP BY hour ORDER BY hour`, [process.env.SALES_TZ || 'Africa/Lagos', ...args]))
+      .map((r) => ({ hour: Number(r.hour), sales: Number(r.sales) }))
+    : [];
   res.json({
     totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer), incentive: Number(totals.incentive) },
     bySite: bySite.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
@@ -1992,6 +2001,7 @@ router.get('/pos/range', requireAuth, async (req, res) => {
     byMethod: byMethod.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
     byProduct,
     byCustomer: byCustomerRows.map((r) => ({ customer: r.customer, customer_name: r.customer, sales: Number(r.sales), orders: Number(r.orders) })),
+    byHour,
   });
 });
 

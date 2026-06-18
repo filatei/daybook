@@ -333,6 +333,10 @@ async function query({ from, to, site, sites, groupBy = 'site' }) {
   if (groupBy === 'product') {
     pipeline = [{ $match: match }, { $unwind: '$products' },
       { $group: { _id: '$products.name', amount: { $sum: num('$products.amount') }, qty: { $sum: num('$products.qty') } } }];
+  } else if (groupBy === 'hour') {
+    // Sales by hour-of-day (0–23) in the business timezone — for the single-day view.
+    pipeline = [{ $match: match }, { $addFields: { _amt: num('$txn_amount') } },
+      { $group: { _id: { $hour: { date: '$createdAt', timezone: TZ() } }, amount: { $sum: '$_amt' }, orders: { $sum: 1 } } }];
   } else if (groupBy === 'customer') {
     // Group by the linked Customer ObjectId (null = walk-in). Names resolved by
     // the caller; drilling re-filters on the same id for an exact match.

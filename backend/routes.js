@@ -53,7 +53,11 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../data/uploa
 const MAX_MB = parseInt(process.env.MAX_UPLOAD_MB || '25', 10);
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const ALLOWED = new Set(['.xls', '.xlsx', '.csv', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.doc', '.docx', '.txt', '.heic']);
+const ALLOWED = new Set([
+  '.xls', '.xlsx', '.csv', '.pdf', '.txt', '.rtf', '.md', '.json', '.xml',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff', '.svg',
+  '.doc', '.docx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.zip',
+]);
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_q, _f, cb) => cb(null, UPLOAD_DIR),

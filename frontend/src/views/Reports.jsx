@@ -76,10 +76,14 @@ function ReportAttachments({ reportId, siteId, canEdit = true }) {
       ))}
       {canEdit && (
         <>
-          <input ref={fileRef} type="file" multiple onChange={onPick} style={{ display: 'none' }} />
+          <input ref={fileRef} type="file" multiple onChange={onPick} style={{ display: 'none' }}
+            accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.odt,.ods,.odp,.rtf,.txt,.md,.json,.xml,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff,.svg,.heic,.heif,.zip,image/*" />
           <button className="btn btn-ghost btn-sm" style={{ width: '100%' }} onClick={() => fileRef.current?.click()} disabled={busy}>
             {busy ? <span className="spin" /> : '＋ Attach file'}
           </button>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6, textAlign: 'center' }}>
+            PDF, images, Office docs (Word/Excel/PowerPoint), CSV, text or ZIP · up to 25&nbsp;MB each
+          </div>
         </>
       )}
     </div>

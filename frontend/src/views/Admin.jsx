@@ -155,6 +155,8 @@ function ReportEmailsTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);   // locked (greyed) until Edit is clicked
+  const [snapshot, setSnapshot] = useState(null);   // restore-on-cancel copy
 
   useEffect(() => {
     setLoading(true);
@@ -165,6 +167,8 @@ function ReportEmailsTab() {
   }, [tenant]);
 
   const setSite = (id, v) => setData((p) => ({ ...p, sites: p.sites.map((s) => s.id === id ? { ...s, report_email: v } : s) }));
+  const startEdit = () => { setSnapshot(JSON.parse(JSON.stringify(data))); setEditing(true); };
+  const cancel = () => { if (snapshot) setData(snapshot); setEditing(false); };
   const save = async () => {
     setSaving(true);
     try {
@@ -172,6 +176,7 @@ function ReportEmailsTab() {
       const r = await api(scoped('/report-recipients'), { method: 'PATCH', body: { sites: sitesMap, all_sites: (data.all_sites || '').trim() } });
       setData({ ...r, sites: r.sites || [] });
       toast('Report emails saved ✓', 'ok');
+      setEditing(false);
     } catch (e) { toast(e.message || 'Save failed', 'err'); }
     setSaving(false);
   };
@@ -181,28 +186,38 @@ function ReportEmailsTab() {
 
   return (
     <div>
-      <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>
-        Each site's daily report is emailed to its address below — the person who generated the report is always copied automatically. Separate multiple addresses with commas.
-      </p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+        <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0, flex: 1 }}>
+          Each site's daily report is emailed to its address below — the person who generated the report is always copied automatically. Separate multiple addresses with commas.
+        </p>
+        {!editing && (
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', whiteSpace: 'nowrap' }} onClick={startEdit}>✎ Edit</button>
+        )}
+      </div>
 
       <div className="card" style={{ padding: '4px 0', overflow: 'hidden' }}>
         {data.sites.map((s) => (
           <div key={s.id} style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
             <label className="fl" style={{ marginTop: 0 }}>{s.name} <span style={{ color: 'var(--muted)', fontWeight: 400 }}>· {s.code}</span></label>
-            <input className="input" type="email" inputMode="email" placeholder="e.g. site@torama.money"
+            <input className="input" type="email" inputMode="email" placeholder={editing ? 'e.g. site@torama.money' : '—'} disabled={!editing}
               value={s.report_email || ''} onChange={(e) => setSite(s.id, e.target.value)} />
           </div>
         ))}
         <div style={{ padding: '10px 14px', background: 'var(--brand-l)' }}>
           <label className="fl" style={{ marginTop: 0 }}>🌍 All-sites roll-up report</label>
-          <input className="input" type="email" inputMode="email" placeholder={data.default_all || 'dailyreports@torama.money'}
+          <input className="input" type="email" inputMode="email" placeholder={data.default_all || 'dailyreports@torama.money'} disabled={!editing}
             value={data.all_sites || ''} onChange={(e) => setData((p) => ({ ...p, all_sites: e.target.value }))} />
         </div>
       </div>
 
-      <button className="btn" style={{ marginTop: 14, width: '100%' }} onClick={save} disabled={saving}>
-        {saving ? <span className="spin" /> : 'Save report emails'}
-      </button>
+      {editing ? (
+        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={cancel} disabled={saving}>Cancel</button>
+          <button className="btn" style={{ flex: 2 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Save report emails'}</button>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 10, textAlign: 'center' }}>🔒 Locked — tap “✎ Edit” to change or add addresses.</div>
+      )}
     </div>
   );
 }

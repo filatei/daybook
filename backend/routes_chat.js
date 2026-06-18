@@ -88,6 +88,7 @@ router.get('/thread/:userId', requireAuth, async (req, res) => {
     `UPDATE chat_messages SET read_at = ? WHERE tenant_id = ? AND from_user = ? AND to_user = ? AND read_at IS NULL`,
     [nowS(), tenant_id, other, me]);
   if (upd.rowCount) sendToUsers(tenant_id, [other], 'chat.read', { by: me, at: nowS() });
+  await clearChatNotices(tenant_id, me, other);
   res.json({ messages: rows.map((m) => ({ ...m, created_at: Number(m.created_at), read_at: m.read_at ? Number(m.read_at) : null })) });
 });
 
@@ -108,8 +109,28 @@ router.post('/send', requireAuth, async (req, res) => {
     [id, tenant_id, me, to, body.slice(0, 4000), at]);
   const msg = { id, tenant_id, from_user: me, to_user: to, body: body.slice(0, 4000), created_at: at, read_at: null };
   sendToUsers(tenant_id, [to, me], 'chat.message', msg);   // recipient + sender's other tabs
+
+  // If the recipient is offline, drop a notification into their in-app inbox
+  // (Activity). Collapse per-sender so they get one "New message from X", not a
+  // flood. Online users already see the live message + badge, so skip them.
+  if (!new Set(usersOnline(tenant_id)).has(to)) {
+    const fromName = req.user.name || req.user.email || 'A teammate';
+    const title = `New message from ${fromName}`;
+    await qrun(`DELETE FROM notifications WHERE user_id=? AND type='chat' AND title=? AND read=0`, [to, title]).catch(() => {});
+    await qrun(`INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)`,
+      [uuid(), tenant_id, to, 'chat', title, body.slice(0, 120), 'chat']).catch(() => {});
+  }
   res.status(201).json(msg);
 });
+
+// Mark the in-app inbox notifications from `otherId` as read (called when the
+// recipient opens that conversation), so the Activity bell clears too.
+async function clearChatNotices(tenant_id, me, otherId) {
+  const o = await qone('SELECT name, email FROM users WHERE id=?', [otherId]).catch(() => null);
+  if (!o) return;
+  const title = `New message from ${o.name || o.email}`;
+  await qrun(`UPDATE notifications SET read=1 WHERE user_id=? AND type='chat' AND title=? AND read=0`, [me, title]).catch(() => {});
+}
 
 // Explicit mark-read (e.g. swipe to clear) without loading the thread.
 router.post('/read/:userId', requireAuth, async (req, res) => {
@@ -120,6 +141,7 @@ router.post('/read/:userId', requireAuth, async (req, res) => {
     `UPDATE chat_messages SET read_at = ? WHERE tenant_id = ? AND from_user = ? AND to_user = ? AND read_at IS NULL`,
     [nowS(), tenant_id, other, me]);
   if (upd.rowCount) sendToUsers(tenant_id, [other], 'chat.read', { by: me, at: nowS() });
+  await clearChatNotices(tenant_id, me, other);
   res.json({ cleared: upd.rowCount || 0 });
 });
 

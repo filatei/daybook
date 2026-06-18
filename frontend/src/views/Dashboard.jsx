@@ -41,6 +41,20 @@ function BarChart({ data }) {
   );
 }
 
+// FAQ-style foldable breakdown card — tap the header to reveal/hide its rows.
+function FoldSection({ title, count, open, onToggle, children }) {
+  return (
+    <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      <button onClick={onToggle} aria-expanded={open}
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', border: 'none', background: 'none', cursor: 'pointer', padding: '14px 16px', textAlign: 'left' }}>
+        <span className="section-title" style={{ margin: 0 }}>{title}{count != null ? <span style={{ color: 'var(--muted)', fontWeight: 600 }}> · {count}</span> : null}</span>
+        <span style={{ color: 'var(--muted)', fontSize: 18, transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .18s' }}>›</span>
+      </button>
+      {open && <div style={{ padding: '0 16px 10px' }}>{children}</div>}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { tenant } = useStore();
   const [rangeIdx, setRangeIdx] = useState(0);
@@ -106,6 +120,12 @@ export default function Dashboard() {
   const transfer = usePos ? pos.totals.transfer : (t?.deposit || 0);
   const byDay = usePos ? pos.byDay : data?.byDay;
   const bySite = usePos ? pos.bySite : data?.bySite;
+  const byProduct = usePos ? (pos.byProduct || []) : [];
+  const byCustomer = usePos ? (pos.byCustomer || []) : [];
+
+  // FAQ-style foldable breakdowns: Site open by default, Product/Customer hidden.
+  const [openSec, setOpenSec] = useState({ site: true, product: false, customer: false });
+  const toggleSec = (k) => setOpenSec((p) => ({ ...p, [k]: !p[k] }));
 
   // Build the orders-drill query for the current date range (+ extra filters).
   const rangeQS = () => {
@@ -203,8 +223,7 @@ export default function Dashboard() {
           )}
 
           {bySite?.length > 0 && (
-            <div className="card">
-              <div className="section-title" style={{ marginTop: 0 }}>By Site</div>
+            <FoldSection title="By Site" count={bySite.length} open={openSec.site} onToggle={() => toggleSec('site')}>
               {bySite.map((s, i) => (
                 <button className="list-item" key={s.site} onClick={() => usePos && openOrders(s.site, `site_code=${encodeURIComponent(s.code || s.site)}`)}
                   style={{ width: '100%', border: 'none', background: 'none', cursor: usePos ? 'pointer' : 'default', textAlign: 'left' }}>
@@ -213,7 +232,33 @@ export default function Dashboard() {
                   <div className="amt">{ngn(s.sales)}</div>
                 </button>
               ))}
-            </div>
+            </FoldSection>
+          )}
+
+          {byProduct.length > 0 && (
+            <FoldSection title="By Product" count={byProduct.length} open={openSec.product} onToggle={() => toggleSec('product')}>
+              {byProduct.map((p, i) => (
+                <button className="list-item" key={p.product + i} onClick={() => openOrders(p.product, `product=${encodeURIComponent(p.product)}`)}
+                  style={{ width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                  <div className="av" style={{ borderRadius: 8, fontSize: 14, fontWeight: 800 }}>{i + 1}</div>
+                  <div className="meta"><div className="t">{p.product} ›</div>{p.qty ? <div className="s" style={{ fontSize: 12, color: 'var(--muted)' }}>{Number(p.qty).toLocaleString()} sold</div> : null}</div>
+                  <div className="amt">{ngn(p.sales)}</div>
+                </button>
+              ))}
+            </FoldSection>
+          )}
+
+          {byCustomer.length > 0 && (
+            <FoldSection title="By Customer" count={byCustomer.length} open={openSec.customer} onToggle={() => toggleSec('customer')}>
+              {byCustomer.map((c, i) => (
+                <button className="list-item" key={(c.customer_id || c.customer) + i} onClick={() => openOrders(c.customer, `customer=${encodeURIComponent(c.customer_id || c.customer)}`)}
+                  style={{ width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                  <div className="av" style={{ borderRadius: 8, fontSize: 14, fontWeight: 800 }}>{i + 1}</div>
+                  <div className="meta"><div className="t">{c.customer} ›</div>{c.orders ? <div className="s" style={{ fontSize: 12, color: 'var(--muted)' }}>{Number(c.orders).toLocaleString()} order{c.orders > 1 ? 's' : ''}</div> : null}</div>
+                  <div className="amt">{ngn(c.sales)}</div>
+                </button>
+              ))}
+            </FoldSection>
           )}
 
           <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>

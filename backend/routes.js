@@ -1923,11 +1923,15 @@ router.get('/pos/range', requireAuth, async (req, res) => {
         const sc = await qone('SELECT code FROM sites WHERE id=?', [site]);
         if (sc) sites = [sc.code];
       }
-      const [bySiteR, byDayR, byMethodR] = await Promise.all([
+      const [bySiteR, byDayR, byMethodR, byProductR, byCustomerR] = await Promise.all([
         sales.query({ from, to, sites, groupBy: 'site' }),
         sales.query({ from, to, sites, groupBy: 'day' }),
         sales.query({ from, to, sites, groupBy: 'paymentMethod' }),
+        sales.query({ from, to, sites, groupBy: 'product' }),
+        sales.query({ from, to, sites, groupBy: 'customer' }),
       ]);
+      // Resolve customer ObjectIds → names (null = Walk-in).
+      const custNames = await sales.namesByIds(byCustomerR.map((r) => r.group).filter(Boolean)).catch(() => ({}));
       const isCash = (m) => String(m || '').toUpperCase().includes('CASH');
       const orders = byMethodR.reduce((a, r) => a + (r.orders || 0), 0);
       const salesTot = byMethodR.reduce((a, r) => a + (r.amount || 0), 0);
@@ -1939,6 +1943,11 @@ router.get('/pos/range', requireAuth, async (req, res) => {
         bySite: bySiteR.map((r) => ({ site: r.group || '—', code: r.group, sales: r.amount, orders: r.orders })),
         byDay: byDayR.map((r) => ({ day: r.group, sales: r.amount })).sort((a, b) => (a.day < b.day ? -1 : 1)),
         byMethod: byMethodR.map((r) => ({ method: r.group || '—', sales: r.amount, orders: r.orders })),
+        byProduct: byProductR.map((r) => ({ product: r.group || '—', sales: r.amount, qty: r.qty })),
+        byCustomer: byCustomerR.map((r) => {
+          const id = r.group ? String(r.group) : null;
+          return { customer: id ? (custNames[id] || 'Unknown') : 'Walk-in', customer_id: id || 'null', sales: r.amount, orders: r.orders };
+        }).sort((a, b) => b.sales - a.sales),
       });
     } catch (e) { /* fall through to the pos_sales snapshot on any source error */ }
   }
@@ -1963,11 +1972,27 @@ router.get('/pos/range', requireAuth, async (req, res) => {
     FROM pos_sales p JOIN sites s ON s.id=p.site_id ${WPn} GROUP BY s.id, s.name, s.code ORDER BY sales DESC LIMIT 20`, args);
   const byDay = await qall(`SELECT sale_date AS "day", COALESCE(SUM(total),0) sales FROM pos_sales ${Wn} GROUP BY sale_date ORDER BY sale_date DESC LIMIT 60`, args);
   const byMethod = await qall(`SELECT payment_method method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method ORDER BY sales DESC`, args);
+  // Per-product totals — items_json is TEXT, so aggregate in JS (incentive excluded).
+  const prodRows = await qall(`SELECT items_json FROM pos_sales ${Wn}`, args);
+  const prod = {};
+  for (const r of prodRows) {
+    for (const it of J(r.items_json, [])) {
+      const k = (it.name || 'Unknown').trim() || 'Unknown';
+      if (!prod[k]) prod[k] = { product: k, qty: 0, sales: 0 };
+      prod[k].qty += Number(it.qty) || 0;
+      prod[k].sales += Number(it.amount) || 0;
+    }
+  }
+  const byProduct = Object.values(prod).sort((a, b) => b.sales - a.sales).slice(0, 30);
+  const byCustomerRows = await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders
+    FROM pos_sales ${Wn} GROUP BY COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') ORDER BY sales DESC LIMIT 30`, args);
   res.json({
     totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer), incentive: Number(totals.incentive) },
     bySite: bySite.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
     byDay: byDay.reverse().map((r) => ({ ...r, sales: Number(r.sales) })),
     byMethod: byMethod.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
+    byProduct,
+    byCustomer: byCustomerRows.map((r) => ({ customer: r.customer, customer_name: r.customer, sales: Number(r.sales), orders: Number(r.orders) })),
   });
 });
 
@@ -1997,14 +2022,14 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const from = req.query.from || new Date().toISOString().slice(0, 10);
   const to = req.query.to || from;
-  const { site, site_code, method, bank, terminal } = req.query;
+  const { site, site_code, method, bank, terminal, product, customer } = req.query;
   if (await posEnabled(s.ctx.tenant_id)) {
     try {
       let sites = (await qall('SELECT code FROM sites WHERE tenant_id=?', [s.ctx.tenant_id])).map((r) => r.code);
       if (siteBound(s.ctx)) { const sc = await qone('SELECT code FROM sites WHERE id=?', [s.ctx.site_id]); sites = sc ? [sc.code] : sites; }
       else if (site_code) { sites = [site_code]; }
       else if (site) { const sc = await qone('SELECT code FROM sites WHERE id=?', [site]); if (sc) sites = [sc.code]; }
-      return res.json(await sales.listOrders({ from, to, sites, method, bank, terminal, limit: 800 }));
+      return res.json(await sales.listOrders({ from, to, sites, method, bank, terminal, product, customer, limit: 800 }));
     } catch (e) { /* fall through */ }
   }
   const where = ['p.tenant_id=?', 'p.sale_date>=?', 'p.sale_date<=?'], args = [s.ctx.tenant_id, from, to];
@@ -2015,6 +2040,12 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
   else { where.push("p.payment_method<>'INCENTIVE'"); }   // exclude bonus from "all orders"
   if (bank) { where.push('UPPER(p.bank)=UPPER(?)'); args.push(bank); }
   if (terminal) { where.push('UPPER(p.terminal)=UPPER(?)'); args.push(terminal); }
+  // product → row whose items_json mentions it; customer → exact name (Walk-in = none)
+  if (product) { where.push('p.items_json ILIKE ?'); args.push(`%${String(product).replace(/[%_]/g, '')}%`); }
+  if (customer) {
+    if (customer === 'null' || customer === 'WALKIN' || customer === 'Walk-in') where.push("COALESCE(NULLIF(TRIM(p.customer_name),''),'')=''");
+    else { where.push('LOWER(TRIM(p.customer_name))=LOWER(?)'); args.push(String(customer).trim()); }
+  }
   const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
   res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at })));

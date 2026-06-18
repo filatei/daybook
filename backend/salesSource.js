@@ -142,6 +142,24 @@ async function customerNameMap(db, rows) {
   }
   return byCust;
 }
+// Resolve a list of customer ObjectIds → { idString: name } (for per-customer
+// dashboard totals). Looks across the fido/fiafia customer collections.
+async function namesByIds(ids) {
+  const db = await getDb();
+  const { ObjectId } = require('mongodb');
+  const out = {};
+  const oids = [...new Set((ids || []).map(String))]
+    .map((s) => { try { return new ObjectId(s); } catch { return null; } }).filter(Boolean);
+  if (!oids.length) return out;
+  for (const coll of ['customers', 'fiacustomers', 'fia_customers']) {
+    try {
+      const docs = await db.collection(coll).find({ _id: { $in: oids } }, { projection: { name: 1 } }).toArray();
+      for (const d of docs) { const nm = String(d.name || '').trim(); if (nm) out[String(d._id)] = nm; }
+    } catch { /* collection may not exist */ }
+  }
+  return out;
+}
+
 // Best display name for one order: the linked Customer record, else any name
 // Fido carries on the order itself (transfer sender, teller-slip name).
 const orderCustomer = (o, nameMap) =>
@@ -175,13 +193,19 @@ function methodMatch(method) {
   return { paymentMethod: siteRegex(m) };
 }
 const exactRegex = (s) => new RegExp(`^${String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
-async function listOrders({ from, to, sites, method, bank, terminal, limit = 500 }) {
+async function listOrders({ from, to, sites, method, bank, terminal, product, customer, limit = 500 }) {
   const db = await getDb();
+  const { ObjectId } = require('mongodb');
   const start = new Date(`${from}T00:00:00.000${TZ()}`);
   const end = new Date(new Date(`${to}T00:00:00.000${TZ()}`).getTime() + 24 * 3600 * 1000);
   const match = { createdAt: { $gte: start, $lt: end }, status: { $in: SALE_STATUS } };
   const ands = [];
   if (Array.isArray(sites) && sites.length) ands.push({ $or: sites.map((c) => ({ site: siteRegex(c) })) });
+  if (product) match['products.name'] = exactRegex(product);
+  if (customer != null && customer !== '') {
+    if (customer === 'null' || customer === 'WALKIN') match.customer = { $in: [null, undefined] };
+    else { try { match.customer = new ObjectId(String(customer)); } catch { match.customer = String(customer); } }
+  }
   // Show incentive orders only when explicitly asked; otherwise exclude them so
   // lists match the (incentive-free) sales/cash/transfer totals.
   if (String(method || '').toUpperCase() === 'INCENTIVE') Object.assign(match, IS_INCENTIVE);
@@ -309,6 +333,11 @@ async function query({ from, to, site, sites, groupBy = 'site' }) {
   if (groupBy === 'product') {
     pipeline = [{ $match: match }, { $unwind: '$products' },
       { $group: { _id: '$products.name', amount: { $sum: num('$products.amount') }, qty: { $sum: num('$products.qty') } } }];
+  } else if (groupBy === 'customer') {
+    // Group by the linked Customer ObjectId (null = walk-in). Names resolved by
+    // the caller; drilling re-filters on the same id for an exact match.
+    pipeline = [{ $match: match }, { $addFields: { _amt: num('$txn_amount') } },
+      { $group: { _id: '$customer', amount: { $sum: '$_amt' }, orders: { $sum: 1 } } }];
   } else {
     const key = groupBy === 'paymentMethod' ? '$paymentMethod'
       : groupBy === 'day' ? { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: TZ() } } : '$site';
@@ -382,4 +411,4 @@ async function ping() {
   catch (e) { return { ok: false, error: e.message }; }
 }
 
-module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getOrder, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping, incentiveTotal, isIncentiveOrder, bankBreakdown };
+module.exports = { salesEnabled, getDb, getSales, recentOrders, listOrders, getOrder, getExpensesTotal, getPayroll, getStaff, searchStaff, searchCustomers, query, queryExpenses, payrollAgg, staffCount, ping, incentiveTotal, isIncentiveOrder, bankBreakdown, namesByIds };

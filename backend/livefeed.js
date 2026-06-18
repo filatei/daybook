@@ -66,6 +66,10 @@ async function persistSale(o, site) {
 const LOOKBACK_MIN = parseInt(process.env.LIVEFEED_LOOKBACK_MIN || '180', 10);
 let lastSeen = new Date(Date.now() - LOOKBACK_MIN * 60 * 1000);
 let timer = null;
+// The first poll covers the look-back window (so a restart doesn't miss sales
+// for the durable copy) — but those are NOT live, so we persist them WITHOUT
+// broadcasting. Only sales seen on later ticks light up the dashboard feed.
+let firstPoll = true;
 
 async function poll() {
   // fido site string → { tenant_id, site_id } for pos_source tenants only
@@ -84,6 +88,7 @@ async function poll() {
     if (!site) continue;
     // Durable copy first (idempotent), then the ephemeral live broadcast.
     if (LIVE_PERSIST) { try { await persistSale(o, site); } catch (e) { console.error('[livefeed] persist:', e.message); } }
+    if (firstPoll) continue;   // look-back catch-up — persist only, don't show as "live"
     broadcastLive(site.tenant_id, site.id, 'fido.sale', {
       id: String(o._id),
       site: o.site, amount: num(o.txn_amount),
@@ -94,6 +99,7 @@ async function poll() {
     });
   }
   lastSeen = now;
+  firstPoll = false;
 }
 
 function start() {

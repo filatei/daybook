@@ -57,18 +57,30 @@ export default function Dashboard() {
   useBackHandler(!!detailId, () => setDetailId(null));   // deepest → declared last → closed first
 
   // Live sales feed (streamed from the still-running fido POS, pre-cutover).
-  const [live, setLive] = useState({ total: 0, count: 0, feed: [] });
+  // Only genuinely live sales are shown: the card auto-hides when none have
+  // arrived in the last few minutes, and stale/look-back events are ignored.
+  const LIVE_FRESH_MS = 5 * 60 * 1000;   // a sale is "live" for 5 minutes
+  const [live, setLive] = useState({ total: 0, count: 0, feed: [], lastAt: 0 });
   const flash = useRef(0);
+  const [, setTick] = useState(0);   // re-render every 30s so the card can expire
+  useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 30000); return () => clearInterval(t); }, []);
   const { connected } = useRealtime((evt) => {
     if (evt.type !== 'fido.sale' && evt.type !== 'sale.created') return;
+    // Ignore events whose sale time is well in the past — a reconnect/look-back
+    // burst is not "sales going on now".
+    const atMs = evt.payload?.at ? new Date(evt.payload.at).getTime() : Date.now();
+    if (Number.isFinite(atMs) && Date.now() - atMs > LIVE_FRESH_MS) return;
     const amount = Number(evt.payload?.amount ?? evt.payload?.total ?? 0);
     setLive((p) => ({
       total: p.total + amount,
       count: p.count + 1,
-      feed: [{ id: `${evt.seq}-${Date.now()}`, oid: evt.payload?.id || evt.payload?.sale_id || null, site: evt.payload?.site || '', amount, pm: evt.payload?.payment_method || '', at: evt.payload?.at ? Math.floor(new Date(evt.payload.at).getTime() / 1000) : Math.floor(Date.now() / 1000) }, ...p.feed].slice(0, 8),
+      lastAt: Date.now(),
+      feed: [{ id: `${evt.seq}-${Date.now()}`, oid: evt.payload?.id || evt.payload?.sale_id || null, site: evt.payload?.site || '', amount, pm: evt.payload?.payment_method || '', at: Math.floor((Number.isFinite(atMs) ? atMs : Date.now()) / 1000) }, ...p.feed].slice(0, 8),
     }));
     flash.current += 1;
   });
+  // The feed is "live" only while a sale arrived recently; otherwise hide it.
+  const liveActive = live.lastAt > 0 && (Date.now() - live.lastAt) < LIVE_FRESH_MS;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -105,8 +117,8 @@ export default function Dashboard() {
 
   return (
     <div>
-      {/* Live sales feed — streams from the running fido POS before cutover */}
-      {(connected || live.count > 0) && (
+      {/* Live sales feed — only while sales are actually happening now */}
+      {liveActive && (
         <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid #16a34a' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6 }}>

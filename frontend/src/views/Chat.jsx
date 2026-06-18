@@ -1,7 +1,10 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { api, scoped, timeAgo } from '../api.js';
+import { api, scoped, timeAgo, isNetErr, getActiveTenant } from '../api.js';
 import { useStore, useBackHandler } from '../store.jsx';
 import { useRealtime } from '../hooks/useRealtime.js';
+import { queueChat, syncChatOutbox, pendingChat } from '../chatOutbox.js';
+
+const newUid = () => (window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
 const clockOf = (s) => new Date((s || 0) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -12,10 +15,10 @@ export default function Chat() {
   const [active, setActive] = useState(null);      // the user object we're chatting with
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
-  const [sending, setSending] = useState(false);
   const [replyTo, setReplyTo] = useState(null);   // message being replied to
   const endRef = useRef(null);
   const inputRef = useRef(null);
+  const lpTimer = useRef(null);   // long-press timer (mobile reply)
 
   const nameOfUser = (uid) => uid === me ? 'You' : (active?.name || 'them');
 
@@ -30,11 +33,29 @@ export default function Chat() {
     setActive(u); setMessages([]);
     try {
       const r = await api(scoped(`/chat/thread/${u.id}`));
-      setMessages(r.messages || []);
+      const server = r.messages || [];
+      // Append any still-queued (offline) messages for this conversation.
+      const haveUids = new Set(server.map((m) => m.client_uid).filter(Boolean));
+      const queued = pendingChat(getActiveTenant(), u.id)
+        .filter((p) => !haveUids.has(p.client_uid))
+        .map((p) => ({ id: p.client_uid, client_uid: p.client_uid, from_user: me, to_user: u.id, body: p.body, created_at: Math.floor(Date.now() / 1000), read_at: null, reply_to: p.reply_to || null, status: 'queued' }));
+      setMessages([...server, ...queued]);
       window.dispatchEvent(new CustomEvent('chat-read'));   // refresh Nav badge
       setUsers((list) => (list || []).map((x) => x.id === u.id ? { ...x, unread: 0 } : x));
-    } catch (e) { toast(e.message || 'Could not load chat', 'err'); }
-  }, [toast]);
+    } catch (e) {
+      // Offline: still let them open the thread and see/queue messages.
+      if (isNetErr(e)) setMessages(pendingChat(getActiveTenant(), u.id).map((p) => ({ id: p.client_uid, client_uid: p.client_uid, from_user: me, to_user: u.id, body: p.body, created_at: Math.floor(Date.now() / 1000), status: 'queued' })));
+      else toast(e.message || 'Could not load chat', 'err');
+    }
+  }, [toast, me]);
+
+  // Flush any queued messages on mount; refresh the open thread once they send.
+  useEffect(() => { syncChatOutbox(); }, []);
+  useEffect(() => {
+    const onSynced = () => { setActive((a) => { if (a) openThread(a); return a; }); loadRoster(); };
+    window.addEventListener('chat-synced', onSynced);
+    return () => window.removeEventListener('chat-synced', onSynced);
+  }, [openThread, loadRoster]);
 
   // Realtime: incoming DMs, presence, read receipts.
   useRealtime((evt) => {
@@ -46,7 +67,11 @@ export default function Chat() {
       const otherId = p.from_user === me ? p.to_user : p.from_user;
       // Append to the open thread (dedupe by id), else bump the roster unread.
       if (active && otherId === active.id) {
-        setMessages((m) => m.some((x) => x.id === p.id) ? m : [...m, p]);
+        setMessages((m) => {
+          if (p.client_uid && m.some((x) => x.client_uid === p.client_uid)) return m.map((x) => x.client_uid === p.client_uid ? { ...p, status: 'sent' } : x);
+          if (m.some((x) => x.id === p.id)) return m;
+          return [...m, p];
+        });
         if (p.from_user === active.id) {
           api(scoped(`/chat/read/${active.id}`), { method: 'POST', body: {} }).catch(() => {});
           window.dispatchEvent(new CustomEvent('chat-read'));
@@ -64,20 +89,38 @@ export default function Chat() {
 
   const send = async () => {
     const body = draft.trim();
-    if (!body || !active || sending) return;
-    setSending(true);
-    setDraft('');
+    if (!body || !active) return;
     const reply = replyTo;
-    setReplyTo(null);
+    const cuid = newUid();
+    const optimistic = {
+      id: cuid, client_uid: cuid, from_user: me, to_user: active.id, body,
+      created_at: Math.floor(Date.now() / 1000), read_at: null,
+      reply_to: reply?.id || null, reply_excerpt: reply ? String(reply.body).slice(0, 120) : null, reply_from: reply?.from_user || null,
+      status: 'sending',
+    };
+    setDraft(''); setReplyTo(null);
+    setMessages((m) => [...m, optimistic]);
+    setUsers((list) => (list || []).map((x) => x.id === active.id ? { ...x, last_at: optimistic.created_at } : x).sort((a, b) => (b.last_at || 0) - (a.last_at || 0)));
+    const payload = { to: active.id, body, reply_to: reply?.id || undefined, client_uid: cuid };
     try {
-      const msg = await api(scoped('/chat/send'), { method: 'POST', body: { to: active.id, body, reply_to: reply?.id || undefined } });
-      setMessages((m) => m.some((x) => x.id === msg.id) ? m : [...m, msg]);
-      setUsers((list) => (list || []).map((x) => x.id === active.id ? { ...x, last_at: msg.created_at } : x).sort((a, b) => (b.last_at || 0) - (a.last_at || 0)));
-    } catch (e) { toast(e.message || 'Send failed', 'err'); setDraft(body); setReplyTo(reply); }
-    setSending(false);
+      const msg = await api(scoped('/chat/send'), { method: 'POST', body: payload });
+      setMessages((m) => m.map((x) => x.client_uid === cuid ? { ...msg, status: 'sent' } : x));
+    } catch (e) {
+      if (isNetErr(e)) {
+        queueChat(getActiveTenant(), payload);   // offline → deliver on reconnect
+        setMessages((m) => m.map((x) => x.client_uid === cuid ? { ...x, status: 'queued' } : x));
+      } else {
+        toast(e.message || 'Send failed', 'err');
+        setMessages((m) => m.filter((x) => x.client_uid !== cuid));
+        setDraft(body); setReplyTo(reply);
+      }
+    }
   };
 
   const startReply = (m) => { setReplyTo(m); inputRef.current?.focus(); };
+  // Long-press (≈450ms) on a bubble → reply, on touch devices.
+  const lpStart = (m) => { lpTimer.current = setTimeout(() => startReply(m), 450); };
+  const lpEnd = () => { if (lpTimer.current) { clearTimeout(lpTimer.current); lpTimer.current = null; } };
 
   // ── Roster (conversation list) ──────────────────────────────────────────────
   if (!active) {
@@ -128,7 +171,8 @@ export default function Chat() {
           return (
             <div key={m.id} className="chat-row" style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '82%', display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'center', gap: 4 }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ background: mine ? 'var(--brand)' : '#f1f5f9', color: mine ? '#fff' : 'var(--ink)', padding: '8px 12px', borderRadius: 14, borderBottomRightRadius: mine ? 4 : 14, borderBottomLeftRadius: mine ? 14 : 4, fontSize: 14, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                <div onTouchStart={() => lpStart(m)} onTouchEnd={lpEnd} onTouchMove={lpEnd} onContextMenu={(e) => { e.preventDefault(); startReply(m); }}
+                  style={{ background: mine ? 'var(--brand)' : '#f1f5f9', color: mine ? '#fff' : 'var(--ink)', padding: '8px 12px', borderRadius: 14, borderBottomRightRadius: mine ? 4 : 14, borderBottomLeftRadius: mine ? 14 : 4, fontSize: 14, whiteSpace: 'pre-wrap', wordBreak: 'break-word', opacity: m.status === 'queued' || m.status === 'sending' ? 0.7 : 1, userSelect: 'none' }}>
                   {m.reply_to && (
                     <div style={{ borderLeft: `3px solid ${mine ? 'rgba(255,255,255,.6)' : 'var(--brand)'}`, padding: '2px 8px', marginBottom: 5, fontSize: 12, opacity: .85, background: mine ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.04)', borderRadius: 6 }}>
                       <div style={{ fontWeight: 700 }}>{nameOfUser(m.reply_from)}</div>
@@ -138,7 +182,7 @@ export default function Chat() {
                   {m.body}
                 </div>
                 <div style={{ fontSize: 10.5, color: 'var(--muted)', textAlign: mine ? 'right' : 'left', marginTop: 2 }}>
-                  {clockOf(m.created_at)}{mine ? (m.read_at ? ' · read' : ' · sent') : ''}
+                  {clockOf(m.created_at)}{mine ? (m.status === 'queued' ? ' · queued ⏳' : m.status === 'sending' ? ' · sending…' : (m.read_at ? ' · read' : ' · sent')) : ''}
                 </div>
               </div>
               <button className="chat-reply-btn" title="Reply" onClick={() => startReply(m)}>↩</button>
@@ -160,7 +204,7 @@ export default function Chat() {
       <div style={{ display: 'flex', gap: 8, paddingTop: 8, borderTop: '1px solid var(--line)' }}>
         <input ref={inputRef} className="input" placeholder="Message…" value={draft}
           onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
-        <button className="btn" style={{ width: 'auto', padding: '0 18px' }} onClick={send} disabled={sending || !draft.trim()}>{sending ? <span className="spin" /> : 'Send'}</button>
+        <button className="btn" style={{ width: 'auto', padding: '0 18px' }} onClick={send} disabled={!draft.trim()}>Send</button>
       </div>
     </div>
   );

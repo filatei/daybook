@@ -78,7 +78,7 @@ router.get('/thread/:userId', requireAuth, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 300);
   const rows = await qall(
     `SELECT * FROM (
-        SELECT id, from_user, to_user, body, created_at, read_at, reply_to, reply_excerpt, reply_from FROM chat_messages
+        SELECT id, from_user, to_user, body, created_at, read_at, reply_to, reply_excerpt, reply_from, client_uid FROM chat_messages
          WHERE tenant_id = ? AND ((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?))
          ORDER BY created_at DESC LIMIT ?
      ) t ORDER BY created_at ASC`,
@@ -113,11 +113,21 @@ router.post('/send', requireAuth, async (req, res) => {
       [replyId, tenant_id, me, to, to, me]);
     if (q) { reply_to = q.id; reply_excerpt = String(q.body || '').slice(0, 120); reply_from = q.from_user; }
   }
+  const client_uid = (req.body && req.body.client_uid) ? String(req.body.client_uid).slice(0, 64) : null;
   const id = uuid();
   const at = nowS();
-  await qrun(`INSERT INTO chat_messages (id, tenant_id, from_user, to_user, body, created_at, reply_to, reply_excerpt, reply_from) VALUES (?,?,?,?,?,?,?,?,?)`,
-    [id, tenant_id, me, to, body.slice(0, 4000), at, reply_to, reply_excerpt, reply_from]);
-  const msg = { id, tenant_id, from_user: me, to_user: to, body: body.slice(0, 4000), created_at: at, read_at: null, reply_to, reply_excerpt, reply_from };
+  // Idempotent: a queued-then-retried message (same client_uid) inserts once.
+  const ins = await qrun(
+    `INSERT INTO chat_messages (id, tenant_id, from_user, to_user, body, created_at, reply_to, reply_excerpt, reply_from, client_uid)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT (tenant_id, client_uid) WHERE client_uid IS NOT NULL DO NOTHING`,
+    [id, tenant_id, me, to, body.slice(0, 4000), at, reply_to, reply_excerpt, reply_from, client_uid]);
+  if (!ins.rowCount && client_uid) {
+    // Already delivered on a previous attempt — return the stored row, don't re-push.
+    const ex = await qone(`SELECT * FROM chat_messages WHERE tenant_id=? AND client_uid=?`, [tenant_id, client_uid]);
+    if (ex) return res.json({ ...ex, created_at: Number(ex.created_at), read_at: ex.read_at ? Number(ex.read_at) : null });
+  }
+  const msg = { id, tenant_id, from_user: me, to_user: to, body: body.slice(0, 4000), created_at: at, read_at: null, reply_to, reply_excerpt, reply_from, client_uid };
   sendToUsers(tenant_id, [to, me], 'chat.message', msg);   // recipient + sender's other tabs
 
   // If the recipient is offline, drop a notification into their in-app inbox

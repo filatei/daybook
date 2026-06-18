@@ -7,6 +7,7 @@ import Modal from './components/Modal.jsx';
 import ConfirmDialog from './components/ConfirmDialog.jsx';
 import Toast from './components/Toast.jsx';
 import InstallLanding, { isStandalone } from './components/InstallLanding.jsx';
+import './chatOutbox.js';   // registers offline-message auto-flush on app boot
 
 // Views (lazy-ish — just plain imports for now; split later if bundle grows)
 import Dashboard from './views/Dashboard.jsx';

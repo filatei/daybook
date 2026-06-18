@@ -502,6 +502,10 @@ async function migrate() {
     ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to      TEXT;
     ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_excerpt TEXT;
     ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_from    TEXT;
+    -- Idempotency for offline replay: a client-generated id so a message sent
+    -- twice (queued then retried) is stored once.
+    ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS client_uid TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_uid ON chat_messages(tenant_id, client_uid) WHERE client_uid IS NOT NULL;
   `);
 
   // Cutover quarantine — fido orders rejected during migration (no usable

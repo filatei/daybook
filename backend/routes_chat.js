@@ -113,9 +113,15 @@ router.post('/send', requireAuth, async (req, res) => {
   const body = ((req.body && req.body.body) || '').toString().trim();
   if (!to || !body) return res.status(400).json({ error: 'recipient and message required' });
   if (to === me) return res.status(400).json({ error: 'cannot message yourself' });
-  // Recipient must be a member of this tenant.
-  const member = await qone(`SELECT 1 FROM memberships WHERE tenant_id = ? AND user_id = ? AND status = 'ACTIVE'`, [tenant_id, to]);
-  if (!member) return res.status(404).json({ error: 'recipient not found' });
+  // Recipient must be a member of this tenant (any status — you can still reply
+  // to a disabled member) OR someone you already have a conversation with.
+  const member = await qone(`SELECT 1 FROM memberships WHERE tenant_id = ? AND user_id = ?`, [tenant_id, to]);
+  if (!member) {
+    const convo = await qone(
+      `SELECT 1 FROM chat_messages WHERE tenant_id = ? AND ((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)) LIMIT 1`,
+      [tenant_id, me, to, to, me]);
+    if (!convo) return res.status(404).json({ error: 'recipient not found' });
+  }
   // Optional reply/quote: the quoted message must belong to this conversation.
   let reply_to = null, reply_excerpt = null, reply_from = null;
   const replyId = req.body && req.body.reply_to;

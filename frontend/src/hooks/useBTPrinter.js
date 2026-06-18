@@ -32,24 +32,6 @@ const DIVIDER        = ENC.encode('--------------------------------\n');
 const NEWLINES       = new Uint8Array([LF, LF, LF]);
 
 /**
- * Build ESC/POS Code 128 barcode command for a receipt number string.
- * Uses Code Set B (ASCII), GS k 0x49 n [data] (new-style length prefix).
- * Barcode height: 64 dots; HRI (human-readable) below; module width: 2.
- */
-function barcodeCode128(numStr) {
-  // Subset B prefix: 0x7B, 0x42 = "{B"
-  const payload = new Uint8Array([0x7B, 0x42, ...Array.from(numStr).map((c) => c.charCodeAt(0))]);
-  return new Uint8Array([
-    GS, 0x68, 64,        // GS h — barcode height 64 dots
-    GS, 0x48, 0x02,      // GS H — HRI below barcode
-    GS, 0x77, 0x02,      // GS w — module width 2
-    GS, 0x6B, 0x49,      // GS k 73 — Code 128 (new format)
-    payload.length,      // n bytes
-    ...payload,
-  ]);
-}
-
-/**
  * Build ESC/POS QR code (GS ( k, model 2) for a receipt-number string.
  * QR scans omnidirectionally and tolerates smudging better than a 1-D barcode.
  */
@@ -67,10 +49,6 @@ function qrEscPos(str, moduleSize = 7) {
 }
 
 const t = (s) => ENC.encode(s);
-
-// Pad/truncate to fixed column width
-const rpad = (s, n) => String(s).slice(0, n).padEnd(n, ' ');
-const lpad = (s, n) => String(s).slice(0, n).padStart(n, ' ');
 
 // Two-column row at given total width
 function twoCol(left, right, width = 32) {

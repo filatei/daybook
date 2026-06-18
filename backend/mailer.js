@@ -344,7 +344,6 @@ async function sendExpenseNotice({ to, tenantName, brand = '#2563eb', expense = 
 // Render the operator-keyed operations into report HTML (only non-empty groups).
 function opsHtml(ops) {
   if (!ops || typeof ops !== 'object') return '';
-  const num = (n) => (n === '' || n == null) ? '' : Number(n).toLocaleString();
   const has = (o) => o && Object.values(o).some((v) => v !== '' && v != null && v !== 0);
   const kv = (label, obj, rows) => !has(obj) ? '' :
     `<div style="font-weight:800;margin:8px 0 4px">${esc(label)}</div>

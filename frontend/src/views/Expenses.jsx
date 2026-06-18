@@ -285,7 +285,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [wf, setWf] = useState(expense.wf_state || 'DRAFT');
   const [actions, setActions] = useState([]);
-  const [log, setLog] = useState([]);
+  const [, setLog] = useState([]);
   const [acting, setActing] = useState('');
 
   let items = [];

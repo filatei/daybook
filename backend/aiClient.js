@@ -57,7 +57,7 @@ async function callOpenAICompat(url, key, model, system, messages, maxTokens) {
   if (key) headers.Authorization = `Bearer ${key}`;
   const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ model, max_tokens: maxTokens, messages: oai }) });
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
+    await res.text().catch(() => '');   // drain body
     throw new AIError('AI service returned an error. Please try again.', 'openai_error', res.status);
   }
   const data = await res.json().catch(() => ({}));

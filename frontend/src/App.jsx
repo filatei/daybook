@@ -29,7 +29,7 @@ import Profit from './views/Profit.jsx';
 import Activity from './views/Activity.jsx';
 
 function Inner() {
-  const { user, tab, go, login, logout, toast, setTenant, setSites, tenant, tenants, openModal, closeModal } = useStore();
+  const { user, tab, go, login, logout, toast, setSites, tenant, tenants, openModal, closeModal } = useStore();
   const role = useRole();
   const [booting, setBooting] = useState(true);
 

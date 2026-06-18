@@ -57,7 +57,7 @@ function MoveForm({ item, sites, siteBound, onSaved, onClose }) {
   const [f, setF] = useState({ qty: '', unit_cost: '', vendor: '', site_id: sites[0]?.id || '', date: today(), note: '', create_payable: false });
   const [itemId, setItemId] = useState(item?.id || null);   // when picked from typeahead
   const [itemName, setItemName] = useState(item?.name || '');
-  const [unit, setUnit] = useState(item?.unit || 'unit');
+  const [unit] = useState(item?.unit || 'unit');
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const fetchVendors = useCallback(async (q) => {

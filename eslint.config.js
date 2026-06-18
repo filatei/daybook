@@ -32,7 +32,7 @@ module.exports = [
       globals: { ...globals.node, fetch: 'readonly', URL: 'readonly', URLSearchParams: 'readonly', Blob: 'readonly' },
     },
     rules: {
-      'no-unused-vars': ['warn', { args: 'none', ignoreRestSiblings: true, caughtErrors: 'none' }],
+      'no-unused-vars': ['error', { args: 'none', ignoreRestSiblings: true, caughtErrors: 'none', varsIgnorePattern: '^_' }],
       'no-empty': ['warn', { allowEmptyCatch: true }],
       'no-constant-condition': ['warn', { checkLoops: false }],
     },
@@ -57,10 +57,14 @@ module.exports = [
       // every render → React remounts them → inputs lose focus / flicker (the
       // Day-ops "one number at a time" bug). Error so it can never ship again.
       'react/no-unstable-nested-components': ['error', { allowAsProps: true }],
+      // Mark identifiers used in JSX as "used" so no-unused-vars stops
+      // false-flagging components that are only referenced inside JSX.
+      'react/jsx-uses-vars': 'error',
+      'react/jsx-uses-react': 'error',
       'react/jsx-key': 'warn',
       'react/jsx-no-undef': 'error',
       'react/no-unknown-property': 'warn',
-      'no-unused-vars': ['warn', { args: 'none', ignoreRestSiblings: true, caughtErrors: 'none', varsIgnorePattern: '^React$' }],
+      'no-unused-vars': ['error', { args: 'none', ignoreRestSiblings: true, caughtErrors: 'none', varsIgnorePattern: '^(React|_)' }],
       'no-empty': ['warn', { allowEmptyCatch: true }],
       'no-constant-condition': ['warn', { checkLoops: false }],
     },

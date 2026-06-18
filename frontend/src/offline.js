@@ -1,7 +1,7 @@
 // Offline-first POS: queue sales locally when the network drops and replay them
 // on reconnect. The server dedupes on client_uid, so replaying is safe (a sale
 // sent twice is recorded once). MT5's "keep working when the link is down" trait.
-import { api, scoped, isNetErr } from './api.js';
+import { api, isNetErr } from './api.js';
 
 const KEY = 'daybook_pos_outbox';
 

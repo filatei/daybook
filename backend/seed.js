@@ -13,7 +13,7 @@
 'use strict';
 
 const { v4: uuid } = require('uuid');
-const { qone, qall, qrun } = require('./db');
+const { qone, qrun } = require('./db');
 
 const TENANTS = [
   { slug: 'fido', name: 'Fido Water', brand_color: '#0ea5e9', industry: 'Water production',

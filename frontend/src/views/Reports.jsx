@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';

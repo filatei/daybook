@@ -11,7 +11,6 @@ export default function More() {
   const active = useActiveTenant();
   const isMgr = role && atLeast(role, 'SITE_MANAGER');          // Manager+
   const isAcct = role && atLeast(role, 'ACCOUNTANT');           // Accountant+
-  const isSnrAcct = role && atLeast(role, 'SNR_ACCOUNTANT');    // Snr Accountant+
   const isSec = role && atLeast(role, 'SECRETARY');             // Secretary+
 
   const items = [

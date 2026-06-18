@@ -15,7 +15,7 @@ const path = require('path');
 const multer = require('multer');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
-const { requireAuth, contextFor, accessibleTenants, requestedTenant, atLeast, siteBound } = require('./auth');
+const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
 const { notifyExpenseEvent } = require('./notify_expense');
 
 const router = express.Router();

@@ -1047,7 +1047,6 @@ async function aiContext(req) {
 async function daybookMetric(tenant_id, ctx, input) {
   const args = [tenant_id]; let siteF = '';
   if (siteBound(ctx)) { siteF = ' AND site_id=$2'; args.push(ctx.site_id); }
-  const n = args.length;
   const dateW = (col) => {
     let w = ''; let i = args.length;
     if (input.from) { i++; w += ` AND ${col}>=$${i}`; args.push(input.from); }

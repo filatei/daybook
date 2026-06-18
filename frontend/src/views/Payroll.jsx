@@ -221,8 +221,7 @@ function PayrollSection({ title, rows, qtyLabel }) {
 
 function MidMonthTab({ onSaved }) {
   const { tenant, toast } = useStore();
-  const role = useRole();
-  const isGM = role && atLeast(role, 'GENERAL_MANAGER');
+  useRole();
   const [month, setMonth] = useState(thisMonth());
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);

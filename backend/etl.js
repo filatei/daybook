@@ -25,7 +25,7 @@
 'use strict';
 
 const { v4: uuid } = require('uuid');
-const { initDb, qone, qall, qrun, withTransaction } = require('./db');
+const { initDb, qone, qall, qrun} = require('./db');
 
 // ── CLI args ───────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);

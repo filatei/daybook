@@ -63,7 +63,6 @@ const check = (n, c, x) => { if (c) { pass++; console.log('  ✅ ' + n); } else 
   check('new user has no workspaces', meEmpty.json.tenants.length === 0);
   const onboard = await api('POST', '/api/onboard', { token: acmeUser, body: { name: 'Acme Water', industry: 'Bottling' } });
   check('onboard creates tenant + admin', onboard.status === 201 && onboard.json.tenants.length === 1 && onboard.json.tenants[0].role === 'ADMIN', onboard.json);
-  const acme = onboard.json.tenants[0];
 
   // ── tenant isolation: acme admin cannot read fido ──
   const cross = await api('GET', `/api/sites?tenant=${fido.id}`, { token: acmeUser });

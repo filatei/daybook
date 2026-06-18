@@ -16,15 +16,11 @@ function Stat({ k, v, accent }) {
   );
 }
 
-// Day-operations detail (bags, rolls, crates, water, NEPA hours, generators, RO,
-// materials…) — the numbers the site keyed in. Shown in the archive detail so a
-// reviewer sees the full report, not just a "captured" note.
-function DayOpsView({ ops }) {
-  if (!ops || typeof ops !== 'object') return null;
-  const has = (o) => o && Object.values(o).some((v) => v !== '' && v != null && v !== 0);
-  const txt = (v) => v != null && String(v).trim() !== '';
-
-  const KV = ({ title, obj, rows }) => !has(obj) ? null : (
+const opsHas = (o) => o && Object.values(o).some((v) => v !== '' && v != null && v !== 0);
+// Module-level so its identity is stable across renders (no remount/flicker).
+function KV({ title, obj, rows }) {
+  if (!opsHas(obj)) return null;
+  return (
     <div style={{ marginTop: 8 }}>
       <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{title}</div>
       {rows.map(([label, key]) => (obj[key] === '' || obj[key] == null) ? null : (
@@ -34,7 +30,14 @@ function DayOpsView({ ops }) {
       ))}
     </div>
   );
+}
 
+// Day-operations detail (bags, rolls, crates, water, NEPA hours, generators, RO,
+// materials…) — the numbers the site keyed in. Shown in the archive detail so a
+// reviewer sees the full report, not just a "captured" note.
+function DayOpsView({ ops }) {
+  if (!ops || typeof ops !== 'object') return null;
+  const txt = (v) => v != null && String(v).trim() !== '';
   const gens = Array.isArray(ops.generators) ? ops.generators.filter((g) => g && g.name) : [];
   const ros = Array.isArray(ops.ro) ? ops.ro.filter((r) => r && (r.unit || r.pure !== '' || r.waste !== '')) : [];
 

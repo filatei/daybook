@@ -45,7 +45,9 @@ jobs:
           node --check backend/routes_expenses.js
           node --check backend/routes_logistics.js
           node --check backend/routes_payroll.js
-      - name: Lint (non-blocking — warnings only for now)
+      - name: Lint — error-level rules BLOCK (e.g. no-unstable-nested-components, the focus-loss bug)
+        run: npx eslint . --quiet
+      - name: Lint (full — warnings non-blocking for now)
         continue-on-error: true
         run: npx eslint .
       - name: TypeScript check (scaffolding — non-blocking until conversion)

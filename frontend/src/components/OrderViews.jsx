@@ -14,6 +14,15 @@ const Backdrop = ({ onClose, children, z = 120 }) => (
   </div>
 );
 
+// Module-level (stable identity → no remount/flicker).
+function Row({ k, v }) {
+  return v ? (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '4px 0', fontSize: 13.5 }}>
+      <span style={{ color: 'var(--muted)' }}>{k}</span><span style={{ fontWeight: 600, textAlign: 'right' }}>{v}</span>
+    </div>
+  ) : null;
+}
+
 // Full order detail — customer, entry person, site, time, payment, line items.
 export function OrderDetailModal({ order, orderId, onClose }) {
   const [o, setO] = useState(order || null);
@@ -22,12 +31,6 @@ export function OrderDetailModal({ order, orderId, onClose }) {
     if (order || !orderId) return;
     api(scoped(`/pos/orders/${orderId}`)).then(setO).catch(() => setO(null)).finally(() => setLoading(false));
   }, [order, orderId]);
-
-  const Row = ({ k, v }) => v ? (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '4px 0', fontSize: 13.5 }}>
-      <span style={{ color: 'var(--muted)' }}>{k}</span><span style={{ fontWeight: 600, textAlign: 'right' }}>{v}</span>
-    </div>
-  ) : null;
 
   return (
     <Backdrop onClose={onClose} z={130}>
@@ -66,13 +69,11 @@ export function OrderDetailModal({ order, orderId, onClose }) {
 
 // Non-cash sales grouped by POS terminal / transfer bank → tap a group to drill
 // into its orders.  `query` carries the date-range (+ optional site) filter.
-export function BankBreakdownModal({ title, query, onClose, onPick }) {
-  const [rows, setRows] = useState(null);
-  useEffect(() => { api(scoped(`/pos/banks?${query}`)).then(setRows).catch(() => setRows([])); }, [query]);
-  const pos = (rows || []).filter((r) => r.kind === 'POS');
-  const tr = (rows || []).filter((r) => r.kind === 'TRANSFER');
-  const labelOf = (r) => r.terminal || r.bank || 'Unspecified';
-  const Group = ({ heading, list, icon }) => list.length === 0 ? null : (
+const labelOf = (r) => r.terminal || r.bank || 'Unspecified';
+// Module-level (stable identity). Takes onPick as a prop instead of closing over it.
+function BankGroup({ heading, list, icon, onPick }) {
+  if (list.length === 0) return null;
+  return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.5px', margin: '6px 0 2px' }}>{icon} {heading}</div>
       {list.map((r, i) => (
@@ -90,6 +91,13 @@ export function BankBreakdownModal({ title, query, onClose, onPick }) {
       ))}
     </div>
   );
+}
+
+export function BankBreakdownModal({ title, query, onClose, onPick }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { api(scoped(`/pos/banks?${query}`)).then(setRows).catch(() => setRows([])); }, [query]);
+  const pos = (rows || []).filter((r) => r.kind === 'POS');
+  const tr = (rows || []).filter((r) => r.kind === 'TRANSFER');
   return (
     <Backdrop onClose={onClose}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -98,7 +106,7 @@ export function BankBreakdownModal({ title, query, onClose, onPick }) {
       </div>
       {rows === null ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
         : rows.length === 0 ? <div className="empty"><div className="ic">💳</div><p>No transfer/POS sales in this period</p></div>
-          : <><Group heading="POS terminals" list={pos} icon="💳" /><Group heading="Transfer banks" list={tr} icon="🏦" /></>}
+          : <><BankGroup heading="POS terminals" list={pos} icon="💳" onPick={onPick} /><BankGroup heading="Transfer banks" list={tr} icon="🏦" onPick={onPick} /></>}
     </Backdrop>
   );
 }

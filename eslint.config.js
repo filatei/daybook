@@ -53,6 +53,10 @@ module.exports = [
       // Hooks correctness — these prevent real, subtle React bugs.
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
+      // Components defined INSIDE another component's render get a new identity
+      // every render → React remounts them → inputs lose focus / flicker (the
+      // Day-ops "one number at a time" bug). Error so it can never ship again.
+      'react/no-unstable-nested-components': ['error', { allowAsProps: true }],
       'react/jsx-key': 'warn',
       'react/jsx-no-undef': 'error',
       'react/no-unknown-property': 'warn',

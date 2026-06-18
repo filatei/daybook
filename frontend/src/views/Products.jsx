@@ -8,6 +8,22 @@ import { api, scoped, ngn } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import { ProductForm } from './Admin.jsx';
 
+// Module-level (stable identity → no remount/flicker). onOpen passed as a prop.
+function ProductRow({ p, dim, onOpen }) {
+  return (
+    <button onClick={() => onOpen(p)}
+      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left', opacity: dim ? 0.55 : 1 }}>
+      <div className="av" style={{ fontSize: 20 }}>🛒</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 700 }}>{p.name}</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{ngn(p.price)}{p.unit ? ` · ${p.unit}` : ''}{p.category ? ` · ${p.category}` : ''}{p.track_stock ? ` · ${p.stock_qty} in stock` : ''}</div>
+      </div>
+      <span style={{ fontWeight: 800 }}>{ngn(p.price)}</span>
+      <span style={{ color: 'var(--muted)' }}>›</span>
+    </button>
+  );
+}
+
 export default function Products() {
   const { openModal, closeModal, tenant } = useStore();
   const role = useRole();
@@ -26,18 +42,6 @@ export default function Products() {
   const active = (products || []).filter((p) => p.status !== 'INACTIVE');
   const inactive = (products || []).filter((p) => p.status === 'INACTIVE');
 
-  const Row = ({ p, dim }) => (
-    <button key={p.id} onClick={() => openForm(p)}
-      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left', opacity: dim ? 0.55 : 1 }}>
-      <div className="av" style={{ fontSize: 20 }}>🛒</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontWeight: 700 }}>{p.name}</div>
-        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{ngn(p.price)}{p.unit ? ` · ${p.unit}` : ''}{p.category ? ` · ${p.category}` : ''}{p.track_stock ? ` · ${p.stock_qty} in stock` : ''}</div>
-      </div>
-      <span style={{ fontWeight: 800 }}>{ngn(p.price)}</span>
-      <span style={{ color: 'var(--muted)' }}>›</span>
-    </button>
-  );
 
   return (
     <div>
@@ -55,7 +59,7 @@ export default function Products() {
         <div className="empty"><div className="ic">🛒</div><p>No products yet — add your first product</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {active.map((p) => <Row key={p.id} p={p} />)}
+          {active.map((p) => <ProductRow key={p.id} p={p} onOpen={openForm} />)}
         </div>
       )}
 
@@ -63,7 +67,7 @@ export default function Products() {
         <>
           <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.5px', margin: '18px 0 8px' }}>Inactive</div>
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            {inactive.map((p) => <Row key={p.id} p={p} dim />)}
+            {inactive.map((p) => <ProductRow key={p.id} p={p} dim onOpen={openForm} />)}
           </div>
         </>
       )}

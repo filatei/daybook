@@ -198,6 +198,27 @@ function RunsTab() {
 
 // ── Mid-month: auto piece-worker payroll (1st–15th) from production ───────────
 const thisMonth = () => today().slice(0, 7);
+// Module-level (stable identity → no remount/flicker).
+function PayrollSection({ title, rows, qtyLabel }) {
+  return (
+    <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid var(--line)', background: '#f8fafc' }}>
+        <strong>{title} ({rows.length})</strong>
+        <strong>{ngn(rows.reduce((a, l) => a + l.commission, 0))}</strong>
+      </div>
+      {rows.length === 0 ? <div style={{ padding: 14, fontSize: 13, color: 'var(--muted)' }}>None with production this period</div>
+        : rows.map((l) => (
+          <div key={l.staff_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8 }}>
+              {l.full_name}<span style={{ color: 'var(--muted)' }}> · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
+            </span>
+            <strong>{ngn(l.commission)}</strong>
+          </div>
+        ))}
+    </div>
+  );
+}
+
 function MidMonthTab({ onSaved }) {
   const { tenant, toast } = useStore();
   const role = useRole();
@@ -222,24 +243,6 @@ function MidMonthTab({ onSaved }) {
     setBusy(false);
   };
 
-  const Section = ({ title, rows, qtyLabel }) => (
-    <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid var(--line)', background: '#f8fafc' }}>
-        <strong>{title} ({rows.length})</strong>
-        <strong>{ngn(rows.reduce((a, l) => a + l.commission, 0))}</strong>
-      </div>
-      {rows.length === 0 ? <div style={{ padding: 14, fontSize: 13, color: 'var(--muted)' }}>None with production this period</div>
-        : rows.map((l) => (
-          <div key={l.staff_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
-            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8 }}>
-              {l.full_name}<span style={{ color: 'var(--muted)' }}> · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
-            </span>
-            <strong>{ngn(l.commission)}</strong>
-          </div>
-        ))}
-    </div>
-  );
-
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12 }}>
@@ -263,8 +266,8 @@ function MidMonthTab({ onSaved }) {
                 <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{data.count} staff · {data.from} → {data.to}</span>
                 <span style={{ fontWeight: 800, fontSize: 18 }}>{ngn(data.total)}</span>
               </div>
-              <Section title="Baggers" rows={data.baggers} qtyLabel="bagged" />
-              <Section title="Loaders" rows={data.loaders} qtyLabel="loaded" />
+              <PayrollSection title="Baggers" rows={data.baggers} qtyLabel="bagged" />
+              <PayrollSection title="Loaders" rows={data.loaders} qtyLabel="loaded" />
             </>
           )}
     </div>

@@ -107,7 +107,20 @@ export function BankBreakdownModal({ title, query, onClose, onPick }) {
 export function OrdersListModal({ title, query, onClose }) {
   const [rows, setRows] = useState(null);
   const [sel, setSel] = useState(null);
+  const [q, setQ] = useState('');
+  const [showUndated, setShowUndated] = useState(false);   // hide timestamp-less orders by default
   useEffect(() => { api(scoped(`/pos/orders?${query}`)).then(setRows).catch(() => setRows([])); }, [query]);
+
+  const all = rows || [];
+  const undatedCount = all.filter((o) => !o.at).length;
+  const needle = q.trim().toLowerCase();
+  const shown = all.filter((o) => {
+    if (!showUndated && !o.at) return false;                  // hide undated unless toggled
+    if (!needle) return true;
+    return String(o.order_no || '').toLowerCase().includes(needle)
+      || (o.customer || '').toLowerCase().includes(needle)
+      || (o.entry_by || '').toLowerCase().includes(needle);
+  });
 
   return (
     <>
@@ -116,18 +129,31 @@ export function OrdersListModal({ title, query, onClose }) {
           <strong>{title || 'Orders'}</strong>
           <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={onClose}>✕</button>
         </div>
+        <input className="input" placeholder="Search order #, customer or cashier…" value={q}
+          onChange={(e) => setQ(e.target.value)} style={{ marginBottom: 8 }} autoFocus />
         {rows === null ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
-          : rows.length === 0 ? <div className="empty"><div className="ic">🧾</div><p>No orders</p></div>
-            : rows.map((o) => (
-              <button key={o.id} onClick={() => setSel(o)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700 }}>{o.order_no ? `#${o.order_no}` : '—'} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer || 'Walk-in'}</span></div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o.entry_by ? ` · ${o.entry_by}` : ''} · {fmt(o.at)}</div>
-                </div>
-                <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.amount)}</div>
-                <span style={{ color: 'var(--muted)' }}>›</span>
-              </button>
-            ))}
+          : all.length === 0 ? <div className="empty"><div className="ic">🧾</div><p>No orders</p></div>
+            : (
+              <>
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>{shown.length} shown</div>
+                {shown.map((o) => (
+                  <button key={o.id} onClick={() => setSel(o)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700 }}>{o.order_no ? `#${o.order_no}` : '—'} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer || 'Walk-in'}</span></div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o.entry_by ? ` · ${o.entry_by}` : ''}{o.at ? ` · ${fmt(o.at)}` : ' · no timestamp'}</div>
+                    </div>
+                    <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.amount)}</div>
+                    <span style={{ color: 'var(--muted)' }}>›</span>
+                  </button>
+                ))}
+                {shown.length === 0 && <div className="empty"><div className="ic">🔍</div><p>No match</p></div>}
+                {undatedCount > 0 && (
+                  <button className="btn btn-ghost btn-sm" style={{ marginTop: 10, width: '100%' }} onClick={() => setShowUndated((v) => !v)}>
+                    {showUndated ? `Hide ${undatedCount} undated order${undatedCount > 1 ? 's' : ''}` : `Show ${undatedCount} undated order${undatedCount > 1 ? 's' : ''}`}
+                  </button>
+                )}
+              </>
+            )}
       </Backdrop>
       {sel && <OrderDetailModal order={sel} onClose={() => setSel(null)} />}
     </>

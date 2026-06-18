@@ -259,6 +259,13 @@ label.fl { display: block; font-size: 13px; font-weight: 600; color: var(--muted
   display: inline-grid; place-items: center; line-height: 1;
 }
 .chat-badge.nav { position: absolute; top: -3px; right: -3px; border: 2px solid var(--brand); }
+.chat-reply-btn {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 15px; padding: 4px 6px; border-radius: 8px; opacity: 0; transition: opacity .12s;
+}
+.chat-row:hover .chat-reply-btn { opacity: 1; }
+.chat-reply-btn:hover { background: var(--line); color: var(--ink); }
+@media (max-width: 767px) { .chat-reply-btn { opacity: .6; } }   /* always tappable on touch */
 
 /* ── Toast ─────────────────────────────────────────────────────────────────── */
 .toast {

@@ -1027,7 +1027,7 @@ router.delete('/recipients/:id', requireAuth, needTenant('ADMIN'), async (req, r
 router.get('/mail/health', requireAuth, async (_req, res) => res.json(await verifyConnection()));
 
 // ── AI ASSISTANT ──────────────────────────────────────────────────────────────
-router.get('/ai/health', requireAuth, (_req, res) => res.json({ configured: aiConfigured() }));
+router.get('/ai/health', requireAuth, needTenant('ADMIN'), (_req, res) => res.json({ configured: aiConfigured() }));
 
 async function aiContext(req) {
   const s = await scope(req);
@@ -1066,7 +1066,7 @@ async function daybookMetric(tenant_id, ctx, input) {
   }
 }
 
-router.post('/ai/chat', requireAuth, async (req, res) => {
+router.post('/ai/chat', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const question = (req.body && req.body.message || '').toString().slice(0, 4000);
   if (!question.trim()) return res.status(400).json({ error: 'message required' });
   const history = Array.isArray(req.body.history) ? req.body.history.slice(-8) : [];

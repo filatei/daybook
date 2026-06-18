@@ -78,7 +78,7 @@ router.get('/thread/:userId', requireAuth, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 300);
   const rows = await qall(
     `SELECT * FROM (
-        SELECT id, from_user, to_user, body, created_at, read_at FROM chat_messages
+        SELECT id, from_user, to_user, body, created_at, read_at, reply_to, reply_excerpt, reply_from FROM chat_messages
          WHERE tenant_id = ? AND ((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?))
          ORDER BY created_at DESC LIMIT ?
      ) t ORDER BY created_at ASC`,
@@ -103,11 +103,21 @@ router.post('/send', requireAuth, async (req, res) => {
   // Recipient must be a member of this tenant.
   const member = await qone(`SELECT 1 FROM memberships WHERE tenant_id = ? AND user_id = ? AND status = 'ACTIVE'`, [tenant_id, to]);
   if (!member) return res.status(404).json({ error: 'recipient not found' });
+  // Optional reply/quote: the quoted message must belong to this conversation.
+  let reply_to = null, reply_excerpt = null, reply_from = null;
+  const replyId = req.body && req.body.reply_to;
+  if (replyId) {
+    const q = await qone(
+      `SELECT id, body, from_user FROM chat_messages
+        WHERE id = ? AND tenant_id = ? AND ((from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?))`,
+      [replyId, tenant_id, me, to, to, me]);
+    if (q) { reply_to = q.id; reply_excerpt = String(q.body || '').slice(0, 120); reply_from = q.from_user; }
+  }
   const id = uuid();
   const at = nowS();
-  await qrun(`INSERT INTO chat_messages (id, tenant_id, from_user, to_user, body, created_at) VALUES (?,?,?,?,?,?)`,
-    [id, tenant_id, me, to, body.slice(0, 4000), at]);
-  const msg = { id, tenant_id, from_user: me, to_user: to, body: body.slice(0, 4000), created_at: at, read_at: null };
+  await qrun(`INSERT INTO chat_messages (id, tenant_id, from_user, to_user, body, created_at, reply_to, reply_excerpt, reply_from) VALUES (?,?,?,?,?,?,?,?,?)`,
+    [id, tenant_id, me, to, body.slice(0, 4000), at, reply_to, reply_excerpt, reply_from]);
+  const msg = { id, tenant_id, from_user: me, to_user: to, body: body.slice(0, 4000), created_at: at, read_at: null, reply_to, reply_excerpt, reply_from };
   sendToUsers(tenant_id, [to, me], 'chat.message', msg);   // recipient + sender's other tabs
 
   // If the recipient is offline, drop a notification into their in-app inbox

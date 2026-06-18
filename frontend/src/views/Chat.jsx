@@ -13,7 +13,11 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  const [replyTo, setReplyTo] = useState(null);   // message being replied to
   const endRef = useRef(null);
+  const inputRef = useRef(null);
+
+  const nameOfUser = (uid) => uid === me ? 'You' : (active?.name || 'them');
 
   useBackHandler(!!active, () => setActive(null));   // hardware back: thread → roster
 
@@ -63,13 +67,17 @@ export default function Chat() {
     if (!body || !active || sending) return;
     setSending(true);
     setDraft('');
+    const reply = replyTo;
+    setReplyTo(null);
     try {
-      const msg = await api(scoped('/chat/send'), { method: 'POST', body: { to: active.id, body } });
+      const msg = await api(scoped('/chat/send'), { method: 'POST', body: { to: active.id, body, reply_to: reply?.id || undefined } });
       setMessages((m) => m.some((x) => x.id === msg.id) ? m : [...m, msg]);
       setUsers((list) => (list || []).map((x) => x.id === active.id ? { ...x, last_at: msg.created_at } : x).sort((a, b) => (b.last_at || 0) - (a.last_at || 0)));
-    } catch (e) { toast(e.message || 'Send failed', 'err'); setDraft(body); }
+    } catch (e) { toast(e.message || 'Send failed', 'err'); setDraft(body); setReplyTo(reply); }
     setSending(false);
   };
+
+  const startReply = (m) => { setReplyTo(m); inputRef.current?.focus(); };
 
   // ── Roster (conversation list) ──────────────────────────────────────────────
   if (!active) {
@@ -118,21 +126,39 @@ export default function Chat() {
         {messages.map((m) => {
           const mine = m.from_user === me;
           return (
-            <div key={m.id} style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '78%' }}>
-              <div style={{ background: mine ? 'var(--brand)' : '#f1f5f9', color: mine ? '#fff' : 'var(--ink)', padding: '8px 12px', borderRadius: 14, borderBottomRightRadius: mine ? 4 : 14, borderBottomLeftRadius: mine ? 14 : 4, fontSize: 14, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                {m.body}
+            <div key={m.id} className="chat-row" style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '82%', display: 'flex', flexDirection: mine ? 'row-reverse' : 'row', alignItems: 'center', gap: 4 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ background: mine ? 'var(--brand)' : '#f1f5f9', color: mine ? '#fff' : 'var(--ink)', padding: '8px 12px', borderRadius: 14, borderBottomRightRadius: mine ? 4 : 14, borderBottomLeftRadius: mine ? 14 : 4, fontSize: 14, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {m.reply_to && (
+                    <div style={{ borderLeft: `3px solid ${mine ? 'rgba(255,255,255,.6)' : 'var(--brand)'}`, padding: '2px 8px', marginBottom: 5, fontSize: 12, opacity: .85, background: mine ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.04)', borderRadius: 6 }}>
+                      <div style={{ fontWeight: 700 }}>{nameOfUser(m.reply_from)}</div>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.reply_excerpt}</div>
+                    </div>
+                  )}
+                  {m.body}
+                </div>
+                <div style={{ fontSize: 10.5, color: 'var(--muted)', textAlign: mine ? 'right' : 'left', marginTop: 2 }}>
+                  {clockOf(m.created_at)}{mine ? (m.read_at ? ' · read' : ' · sent') : ''}
+                </div>
               </div>
-              <div style={{ fontSize: 10.5, color: 'var(--muted)', textAlign: mine ? 'right' : 'left', marginTop: 2 }}>
-                {clockOf(m.created_at)}{mine ? (m.read_at ? ' · read' : ' · sent') : ''}
-              </div>
+              <button className="chat-reply-btn" title="Reply" onClick={() => startReply(m)}>↩</button>
             </div>
           );
         })}
         <div ref={endRef} />
       </div>
 
+      {replyTo && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderLeft: '3px solid var(--brand)', background: 'var(--brand-l)', borderRadius: 8, margin: '6px 0' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 700 }}>Replying to {nameOfUser(replyTo.from_user)}</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{replyTo.body}</div>
+          </div>
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 8px' }} onClick={() => setReplyTo(null)}>✕</button>
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 8, paddingTop: 8, borderTop: '1px solid var(--line)' }}>
-        <input className="input" placeholder="Message…" value={draft}
+        <input ref={inputRef} className="input" placeholder="Message…" value={draft}
           onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
         <button className="btn" style={{ width: 'auto', padding: '0 18px' }} onClick={send} disabled={sending || !draft.trim()}>{sending ? <span className="spin" /> : 'Send'}</button>
       </div>

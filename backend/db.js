@@ -497,6 +497,11 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_chat_pair   ON chat_messages(tenant_id, from_user, to_user, created_at);
     CREATE INDEX IF NOT EXISTS idx_chat_unread ON chat_messages(tenant_id, to_user, read_at);
+    -- Reply/quote: the message this one replies to (+ a denormalised snippet so
+    -- the quote renders even when the original is outside the loaded window).
+    ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to      TEXT;
+    ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_excerpt TEXT;
+    ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_from    TEXT;
   `);
 
   // Cutover quarantine — fido orders rejected during migration (no usable

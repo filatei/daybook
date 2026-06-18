@@ -483,6 +483,24 @@ async function migrate() {
     ALTER TABLE tenants    ADD COLUMN IF NOT EXISTS report_email_all TEXT;
   `);
 
+  // Cutover quarantine — fido orders rejected during migration (no usable
+  // timestamp or no Fido order id) are recorded here instead of imported, so
+  // they're auditable and can be cleaned in Fido rather than carried into Postgres.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS etl_quarantine (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT,
+      source      TEXT NOT NULL,
+      ext_id      TEXT NOT NULL,
+      reason      TEXT NOT NULL,
+      site        TEXT,
+      amount      NUMERIC,
+      raw         JSONB,
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      UNIQUE(source, ext_id)
+    );
+  `);
+
   // Widen the role CHECK to the full ladder: Gateman/Supervisor (gate-only),
   // Secretary, Accountant, Snr Accountant, (Site) Manager, General Manager, Admin.
   const ROLE_LIST = "'ADMIN','GENERAL_MANAGER','SITE_MANAGER','SNR_ACCOUNTANT','ACCOUNTANT','SECRETARY','SUPERVISOR','GATEMAN','GATE'";

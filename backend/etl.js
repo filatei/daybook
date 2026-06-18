@@ -368,7 +368,22 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
   const SALE_STATUS = ['DELIVERED', 'PAID', 'LOADED', 'COMPLETED'];
   const match = { createdAt: { $gte: from, $lte: to }, status: { $in: SALE_STATUS } };
   const total = await mongoDB.collection('fidoorders').countDocuments(match);
-  const stats = { scanned: 0, inserted: 0, duplicate: 0, skipped: 0, errors: 0 };
+  const stats = { scanned: 0, inserted: 0, duplicate: 0, skipped: 0, errors: 0, quarantined: 0 };
+
+  // A fido order is fit to migrate only if it has a usable timestamp AND a Fido
+  // order id. Rejects are recorded in etl_quarantine (auditable) and NOT imported.
+  const fidoOrderNo = (o) => (o.fidoOrderId ?? o.orderId ?? null);
+  const quarantine = async (reason, order, siteName) => {
+    stats.quarantined++;
+    if (DRY_RUN) return;
+    try {
+      await qrun(
+        `INSERT INTO etl_quarantine (id,tenant_id,source,ext_id,reason,site,amount,raw)
+         VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (source,ext_id) DO UPDATE SET reason=EXCLUDED.reason`,
+        [uuid(), null, 'fidoorders', String(order._id), reason, siteName || order.site || null,
+          num(order.txn_amount), JSON.stringify({ order_no: fidoOrderNo(order), status: order.status, paymentMethod: order.paymentMethod })]);
+    } catch (e) { if (stats.errors <= 5) console.warn('\n[ETL] quarantine error:', e.message.slice(0, 120)); }
+  };
 
   if (DRY_RUN) {
     stats.scanned = total;
@@ -400,7 +415,11 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
     const site = resolveSiteByName(nameMap, norm, order.site);
     if (!site) { stats.skipped++; continue; }
 
-    const saleDate = dateStr(order.createdAt); if (!saleDate) { stats.skipped++; continue; }
+    // Quarantine (don't import) errant orders: no usable timestamp, or no Fido
+    // order id. These are the id-less / undated rows seen in the live list.
+    const saleDate = dateStr(order.createdAt);
+    if (!saleDate) { await quarantine('NO_TIMESTAMP', order, site.name); continue; }
+    if (fidoOrderNo(order) == null) { await quarantine('NO_ORDER_ID', order, site.name); continue; }
     const total_amount = num(order.txn_amount);
     const rawPm = clean((order.paymentMethod || 'CASH').toUpperCase()) || 'CASH';
     // Incentive (monthly bonus, no cash collected) is bucketed apart from sales/cash.
@@ -453,8 +472,22 @@ async function etlOrders(mongoDB, { nameMap, oidMap, norm }) {
       stats.errors++;
       if (stats.errors <= 5) console.warn('\n[ETL] orders error:', e.message.slice(0, 120));
     }
-    progress('orders', stats.scanned, total, `  inserted=${stats.inserted} dup=${stats.duplicate}`);
+    progress('orders', stats.scanned, total, `  inserted=${stats.inserted} dup=${stats.duplicate} quar=${stats.quarantined}`);
   }
+
+  // Sweep undated orders that fall outside ANY date range (they have no
+  // createdAt at all, so the ranged cursor never sees them) into quarantine so
+  // the audit list of errant Fido rows is complete.
+  if (!DRY_RUN) {
+    const undated = mongoDB.collection('fidoorders')
+      .find({ status: { $in: SALE_STATUS }, $or: [{ createdAt: { $exists: false } }, { createdAt: null }] })
+      .batchSize(BATCH_SIZE);
+    for await (const order of undated) {
+      const site = resolveSiteByName(nameMap, norm, order.site);
+      await quarantine('NO_TIMESTAMP', order, site ? site.name : order.site);
+    }
+  }
+
   done('orders', stats);
   return stats;
 }

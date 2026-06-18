@@ -299,6 +299,15 @@ router.patch('/sites/:id', requireAuth, async (req, res) => {
   res.json(await siteById(site.id));
 });
 
+// Cutover audit — fido orders rejected during migration (no timestamp / no
+// order id). Read-only; lets Admin/GM/Snr Accountant see what was NOT imported.
+router.get('/etl/quarantine', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const rows = await qall('SELECT id, source, ext_id, reason, site, amount, raw, created_at FROM etl_quarantine ORDER BY created_at DESC LIMIT 1000');
+  const byReason = {};
+  for (const r of rows) byReason[r.reason] = (byReason[r.reason] || 0) + 1;
+  res.json({ total: rows.length, byReason, rows: rows.map((r) => ({ ...r, raw: typeof r.raw === 'string' ? J(r.raw, {}) : (r.raw || {}) })) });
+});
+
 // ── REPORT EMAIL RECIPIENTS ─────────────────────────────────────────────────
 // Admin / General Manager / Snr Accountant set where each site's daily report
 // is emailed (+ the report's creator), and the all-sites roll-up address.

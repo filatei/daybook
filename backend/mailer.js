@@ -496,4 +496,39 @@ async function sendTest({ to }) {
 function safeParse(s, fallback) { try { return s ? JSON.parse(s) : fallback; } catch { return fallback; } }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-module.exports = { sendDailyReport, sendGeneratedReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, sendContactMessage, enqueueEmail, drainOutbox, startOutboxWorker, verifyConnection, sendTest, FROM };
+// Compliance expiry alert — a digest of licenses/certificates expiring soon or
+// already expired. `items` = [{title, issuer, expiry_date, days, status}].
+async function sendComplianceAlert({ tenant, to, items }) {
+  const name = (tenant && tenant.name) || 'Company';
+  const brand = (tenant && tenant.brand_color) || '#b91c1c';
+  const row = (it) => {
+    const tag = it.status === 'EXPIRED' ? `<span style="color:#b91c1c;font-weight:700">EXPIRED</span>`
+      : `<span style="color:#92400e;font-weight:700">${it.days} day${it.days === 1 ? '' : 's'} left</span>`;
+    return `<tr>
+      <td style="padding:6px 10px;border-bottom:1px solid #eee">${esc(it.title)}${it.issuer ? `<br><span style="color:#6b7280;font-size:12px">${esc(it.issuer)}</span>` : ''}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #eee;white-space:nowrap">${esc(it.expiry_date || '')}</td>
+      <td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right">${tag}</td>
+    </tr>`;
+  };
+  const subject = `⚠️ ${name} — ${items.length} compliance document${items.length === 1 ? '' : 's'} need attention`;
+  const html = `
+  <div style="font-family:Segoe UI,Arial,sans-serif;max-width:600px;margin:auto;color:#1f2937">
+    <div style="background:${brand};color:#fff;padding:18px 22px;border-radius:10px 10px 0 0">
+      <div style="font-size:13px;letter-spacing:2px;opacity:.85">DAYBOOK · COMPLIANCE</div>
+      <div style="font-size:20px;font-weight:800">Licenses / certificates need attention</div>
+    </div>
+    <div style="border:1px solid #e5e7eb;border-top:none;border-radius:0 0 10px 10px;padding:20px">
+      <p>${esc(name)} has documents expiring soon or already expired:</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <thead><tr style="text-align:left;color:#6b7280"><th style="padding:6px 10px">Document</th><th style="padding:6px 10px">Expires</th><th style="padding:6px 10px;text-align:right">Status</th></tr></thead>
+        <tbody>${items.map(row).join('')}</tbody>
+      </table>
+      <p style="margin-top:16px"><a href="${PUBLIC_URL}" style="background:${brand};color:#fff;text-decoration:none;font-weight:700;padding:10px 22px;border-radius:9px;display:inline-block">Open Compliance vault</a></p>
+      <p style="color:#9ca3af;font-size:12px;margin-top:14px">Renew and upload the new document in Daybook → More → Compliance.</p>
+    </div>
+  </div>`;
+  const r = await sendOrQueue({ to: Array.isArray(to) ? to.join(', ') : to, subject, html, tenant_id: tenant && tenant.id, kind: 'compliance' });
+  return { queued: r.queued, subject, to };
+}
+
+module.exports = { sendDailyReport, sendGeneratedReport, sendInvite, sendMidMonthPayroll, sendExpenseNotice, sendContactMessage, sendComplianceAlert, enqueueEmail, drainOutbox, startOutboxWorker, verifyConnection, sendTest, FROM };

@@ -2559,5 +2559,6 @@ router.use('/inventory', require('./routes_inventory'));
 router.use('/logistics', require('./routes_logistics'));
 router.use('/payroll',   require('./routes_payroll'));
 router.use('/chat',      require('./routes_chat'));
+router.use('/compliance', require('./routes_compliance'));
 
 module.exports = router;

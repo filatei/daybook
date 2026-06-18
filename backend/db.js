@@ -508,6 +508,31 @@ async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_uid ON chat_messages(tenant_id, client_uid) WHERE client_uid IS NOT NULL;
   `);
 
+  // Compliance vault — government/regulator letters, licenses, certificates,
+  // permits. Tracks issuer, reference, issue/expiry dates → expiry reminders.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS compliance_docs (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL,
+      site_id       TEXT,                 -- null = company-wide
+      doc_type      TEXT,                 -- LICENSE | CERTIFICATE | PERMIT | LETTER | OTHER
+      title         TEXT NOT NULL,
+      issuer        TEXT,                 -- NAFDAC, SON, State Govt, LGA…
+      reference_no  TEXT,
+      issue_date    TEXT,                 -- YYYY-MM-DD
+      expiry_date   TEXT,                 -- YYYY-MM-DD (null = no expiry)
+      notes         TEXT,
+      file_name     TEXT,
+      stored_name   TEXT,
+      mime          TEXT,
+      size          INTEGER,
+      reminded_stage INTEGER DEFAULT 0,   -- 0 none,1=30d,2=14d,3=7d,4=expired
+      uploaded_by   TEXT,
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS idx_compliance_tenant ON compliance_docs(tenant_id, expiry_date);
+  `);
+
   // Cutover quarantine — fido orders rejected during migration (no usable
   // timestamp or no Fido order id) are recorded here instead of imported, so
   // they're auditable and can be cleaned in Fido rather than carried into Postgres.

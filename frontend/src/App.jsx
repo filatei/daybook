@@ -30,6 +30,7 @@ import Inventory from './views/Inventory.jsx';
 import Profit from './views/Profit.jsx';
 import Activity from './views/Activity.jsx';
 import Chat from './views/Chat.jsx';
+import Compliance from './views/Compliance.jsx';
 
 function Inner() {
   const { user, tab, go, login, logout, toast, setSites, tenant, tenants, openModal, closeModal } = useStore();
@@ -138,6 +139,7 @@ function Inner() {
         {tab === 'profit'     && <Profit />}
         {tab === 'activity'   && <Activity />}
         {tab === 'chat'       && <Chat />}
+        {tab === 'compliance' && <Compliance />}
         <footer className="app-footer">
           © {new Date().getFullYear()} Torama Technologies ·{' '}
           <a role="button" tabIndex={0} style={{ cursor: 'pointer' }} onClick={() => openModal(<ContactForm onClose={closeModal} />)}>Contact us</a> ·{' '}

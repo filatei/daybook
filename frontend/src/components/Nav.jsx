@@ -104,7 +104,7 @@ export default function Nav() {
     ].filter((t) => t.show);
 
   // "More" is the active highlight for any destination that lives inside it.
-  const MORE_TABS = ['more', 'gate', 'payroll', 'generators'];
+  const MORE_TABS = ['more', 'gate', 'payroll', 'generators', 'compliance'];
   const isActive = (id) => id === 'more' ? MORE_TABS.includes(tab) : tab === id;
 
   return (

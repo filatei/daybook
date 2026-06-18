@@ -17,6 +17,7 @@ export default function More() {
     { id: 'messages',   icon: '✉️', label: 'Site Messages', desc: role && atLeast(role, 'ADMIN') ? 'Private messages from site users' : 'Send a private note to the admin', show: !!active },
     { id: 'gate',       icon: '🚧', label: 'Gate & Loading', desc: 'Scan receipts, mark loaded & released', show: isSec && !!active },
     { id: 'documents',  icon: '📁', label: 'Documents',  desc: 'Incident reports & daily logs',           show: isSec },
+    { id: 'compliance', icon: '🏛️', label: 'Compliance', desc: 'Licenses, certificates & permits + expiry alerts', show: isSec },
     { id: 'inventory',  icon: '📦', label: 'Inventory',  desc: 'Stock items, receive/issue, low-stock',     show: isSec },
     { id: 'profit',     icon: '📈', label: 'Profit & Loss', desc: 'Revenue − expenses by site & period',      show: isMgr },
     { id: 'reconcile',  icon: '🏦', label: 'Reconcile',  desc: 'Transfers, POS & cash deposits',          show: isAcct },

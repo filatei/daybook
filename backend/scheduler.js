@@ -21,7 +21,9 @@ const path = require('path');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
 const sales = require('./salesSource');
-const { sendDailyReport } = require('./mailer');
+const { sendDailyReport, sendComplianceAlert } = require('./mailer');
+
+const REPORTS_INBOX = process.env.REPORTS_INBOX || 'dailyreports@torama.money';
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../data/uploads');
 
@@ -155,9 +157,69 @@ async function midMonthAll() {
   return { runs, month };
 }
 
+// ── Compliance expiry reminders ────────────────────────────────────────────────
+// Daily: alert when a license/certificate is 30/14/7 days from expiry, or expired.
+// `reminded_stage` (0→4) escalates and prevents re-sending the same bucket daily.
+function complianceStage(days) {
+  if (days == null) return 0;
+  if (days <= 0) return 4;       // expired
+  if (days <= 7) return 3;
+  if (days <= 14) return 2;
+  if (days <= 30) return 1;
+  return 0;
+}
+async function checkComplianceExpiries() {
+  const tz = process.env.SYNC_TZ || 'Africa/Lagos';
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: tz });
+  const todayMs = new Date(`${today}T00:00:00`).getTime();
+  const rows = await qall(`SELECT * FROM compliance_docs WHERE expiry_date IS NOT NULL`).catch(() => []);
+  const byTenant = {};
+  for (const d of rows) {
+    const days = Math.round((new Date(`${d.expiry_date}T00:00:00`).getTime() - todayMs) / 86400000);
+    const stage = complianceStage(days);
+    if (stage > 0 && stage > (d.reminded_stage || 0)) {
+      (byTenant[d.tenant_id] = byTenant[d.tenant_id] || []).push({
+        id: d.id, title: d.title, issuer: d.issuer, expiry_date: d.expiry_date, days,
+        status: days <= 0 ? 'EXPIRED' : 'EXPIRING', stage,
+      });
+    }
+  }
+  let alerted = 0;
+  for (const [tenant_id, items] of Object.entries(byTenant)) {
+    try {
+      const tenant = await qone('SELECT id,name,brand_color,report_email_all FROM tenants WHERE id=?', [tenant_id]);
+      if (!tenant) continue;
+      // In-app: notify Admin + General Manager.
+      const admins = await qall(
+        `SELECT DISTINCT u.id, u.email FROM memberships m JOIN users u ON u.id=m.user_id
+          WHERE m.tenant_id=? AND m.status='ACTIVE' AND m.role IN ('ADMIN','GENERAL_MANAGER')`, [tenant_id]);
+      for (const a of admins) {
+        await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
+          [uuid(), tenant_id, a.id, 'compliance', `${items.length} compliance document(s) need attention`,
+            items.slice(0, 3).map((i) => `${i.title} — ${i.status === 'EXPIRED' ? 'expired' : i.days + 'd left'}`).join('; '), 'compliance']).catch(() => {});
+      }
+      // Email: Admin/GM addresses + the all-sites report inbox.
+      const to = [...new Set([...admins.map((a) => a.email), tenant.report_email_all || REPORTS_INBOX].filter(Boolean))];
+      if (to.length) await sendComplianceAlert({ tenant, to, items }).catch((e) => console.error('[compliance] email:', e.message));
+      // Mark each as reminded at its current stage so it won't re-alert until it escalates.
+      for (const it of items) await qrun('UPDATE compliance_docs SET reminded_stage=? WHERE id=?', [it.stage, it.id]).catch(() => {});
+      alerted += items.length;
+    } catch (e) { console.error('[compliance]', tenant_id, e.message); }
+  }
+  if (alerted) console.log(`[compliance] sent reminders for ${alerted} document(s)`);
+  return { alerted };
+}
+
 function start() {
   const cron = require('node-cron');
   const tz = process.env.SYNC_TZ || 'Africa/Lagos';
+
+  // Compliance expiry reminders — always on, daily at 07:00.
+  const ccron = process.env.COMPLIANCE_CRON || '0 7 * * *';
+  if (cron.validate(ccron)) {
+    cron.schedule(ccron, () => { checkComplianceExpiries().catch((e) => console.error('[compliance] failed:', e.message)); }, { timezone: tz });
+    console.log(`[compliance] expiry reminders scheduled '${ccron}' (${tz})`);
+  }
 
   // Mid-month payroll auto-draft (opt-in) — runs on the 15th.
   if (process.env.PAYROLL_MIDMONTH_ENABLED === '1') {
@@ -203,4 +265,4 @@ function start() {
   console.log(`[sync] nightly POS sync scheduled '${expr}' (${tz})${process.env.SYNC_EMAIL === '1' ? ' + email' : ''}`);
 }
 
-module.exports = { syncDay, enforceTrials, midMonthAll, start };
+module.exports = { syncDay, enforceTrials, midMonthAll, checkComplianceExpiries, start };

@@ -477,6 +477,10 @@ async function migrate() {
     ALTER TABLE pos_sales  ADD COLUMN IF NOT EXISTS ext_id TEXT;
     ALTER TABLE customers  ADD COLUMN IF NOT EXISTS ext_id TEXT;
     ALTER TABLE sites      ADD COLUMN IF NOT EXISTS ext_mongo_id TEXT;
+    -- Daily-report routing: each site's report goes to this address (+ the
+    -- report's creator); the all-sites roll-up goes to tenants.report_email_all.
+    ALTER TABLE sites      ADD COLUMN IF NOT EXISTS report_email TEXT;
+    ALTER TABLE tenants    ADD COLUMN IF NOT EXISTS report_email_all TEXT;
   `);
 
   // Widen the role CHECK to the full ladder: Gateman/Supervisor (gate-only),

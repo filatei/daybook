@@ -147,6 +147,66 @@ function EditMemberForm({ member, sites = [], onSave, onRemove, onClose }) {
 }
 
 // ── Settings (face match strictness) ─────────────────────────────────────────
+// Admin / GM / Snr Accountant set where each site's daily report is emailed
+// (the report's creator is always added automatically), plus the all-sites
+// roll-up address. No hardcoding — these drive report delivery.
+function ReportEmailsTab() {
+  const { toast, tenant } = useStore();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    api(scoped('/report-recipients'))
+      .then((r) => setData({ ...r, sites: r.sites || [] }))
+      .catch((e) => toast(e.message || 'Could not load', 'err'))
+      .finally(() => setLoading(false));
+  }, [tenant]);
+
+  const setSite = (id, v) => setData((p) => ({ ...p, sites: p.sites.map((s) => s.id === id ? { ...s, report_email: v } : s) }));
+  const save = async () => {
+    setSaving(true);
+    try {
+      const sitesMap = Object.fromEntries(data.sites.map((s) => [s.id, (s.report_email || '').trim()]));
+      const r = await api(scoped('/report-recipients'), { method: 'PATCH', body: { sites: sitesMap, all_sites: (data.all_sites || '').trim() } });
+      setData({ ...r, sites: r.sites || [] });
+      toast('Report emails saved ✓', 'ok');
+    } catch (e) { toast(e.message || 'Save failed', 'err'); }
+    setSaving(false);
+  };
+
+  if (loading) return <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>;
+  if (!data) return <div className="empty"><div className="ic">📧</div><p>Could not load report emails</p></div>;
+
+  return (
+    <div>
+      <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>
+        Each site's daily report is emailed to its address below — the person who generated the report is always copied automatically. Separate multiple addresses with commas.
+      </p>
+
+      <div className="card" style={{ padding: '4px 0', overflow: 'hidden' }}>
+        {data.sites.map((s) => (
+          <div key={s.id} style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
+            <label className="fl" style={{ marginTop: 0 }}>{s.name} <span style={{ color: 'var(--muted)', fontWeight: 400 }}>· {s.code}</span></label>
+            <input className="input" type="email" inputMode="email" placeholder="e.g. site@torama.money"
+              value={s.report_email || ''} onChange={(e) => setSite(s.id, e.target.value)} />
+          </div>
+        ))}
+        <div style={{ padding: '10px 14px', background: 'var(--brand-l)' }}>
+          <label className="fl" style={{ marginTop: 0 }}>🌍 All-sites roll-up report</label>
+          <input className="input" type="email" inputMode="email" placeholder={data.default_all || 'dailyreports@torama.money'}
+            value={data.all_sites || ''} onChange={(e) => setData((p) => ({ ...p, all_sites: e.target.value }))} />
+        </div>
+      </div>
+
+      <button className="btn" style={{ marginTop: 14, width: '100%' }} onClick={save} disabled={saving}>
+        {saving ? <span className="spin" /> : 'Save report emails'}
+      </button>
+    </div>
+  );
+}
+
 function SettingsTab() {
   const { toast, tenant } = useStore();
   const [thr, setThr] = useState(0.55);
@@ -316,6 +376,7 @@ export default function Admin() {
   const role = useRole();
   const isAdmin = atLeast(role, 'ADMIN');
   const isGM    = atLeast(role, 'GENERAL_MANAGER');
+  const isSnr   = atLeast(role, 'SNR_ACCOUNTANT');   // Snr Accountant + GM + Admin
   const isMgr   = atLeast(role, 'SITE_MANAGER');
   const myMembership = (tenants || []).find((t) => t.id === tenant);
   const mySiteId = myMembership?.site_id || null;
@@ -401,10 +462,11 @@ export default function Admin() {
         {isGM && <button className={`seg-b${tab === 'sites'    ? ' on' : ''}`} onClick={() => setTab('sites')}>🏗️ Sites</button>}
         <button className={`seg-b${tab === 'members'  ? ' on' : ''}`} onClick={() => setTab('members')}>👥 Members</button>
         {isGM && <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>}
+        {isSnr && <button className={`seg-b${tab === 'reportmail' ? ' on' : ''}`} onClick={() => setTab('reportmail')}>📧 Report emails</button>}
         {isAdmin && <button className={`seg-b${tab === 'settings' ? ' on' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>}
       </div>
 
-      {tab === 'settings' ? <SettingsTab /> : loading ? (
+      {tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

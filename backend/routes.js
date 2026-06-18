@@ -1091,7 +1091,7 @@ ${JSON.stringify(ctx)}`;
     if (sc.ctx) {
       const tenant_id = sc.ctx.tenant_id;
       let allowed = (await qall('SELECT code FROM sites WHERE tenant_id=?', [tenant_id])).map((s) => s.code);
-      if (sc.siteBound(ctx)) { const me = await siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
+      if (siteBound(sc.ctx)) { const me = await siteById(sc.ctx.site_id); allowed = me ? [me.code] : []; }
       const pos = await posEnabled(tenant_id);
       const resolveSites = (input) => {
         if (!input.site) return allowed;

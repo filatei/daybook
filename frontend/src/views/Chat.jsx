@@ -16,6 +16,7 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [replyTo, setReplyTo] = useState(null);   // message being replied to
+  const [search, setSearch] = useState('');
   const endRef = useRef(null);
   const inputRef = useRef(null);
   const lpTimer = useRef(null);   // long-press timer (mobile reply)
@@ -124,14 +125,21 @@ export default function Chat() {
 
   // ── Roster (conversation list) ──────────────────────────────────────────────
   if (!active) {
+    const q = search.trim().toLowerCase();
+    const shown = q ? (users || []).filter((u) => (u.name || '').toLowerCase().includes(q) || (u.site_name || '').toLowerCase().includes(q)) : (users || []);
     return (
       <div>
         <div className="section-title" style={{ marginTop: 0 }}>💬 Chat</div>
+        {users && users.length > 0 && (
+          <input className="input" placeholder="Search teammates…" value={search}
+            onChange={(e) => setSearch(e.target.value)} style={{ marginBottom: 12 }} />
+        )}
         {users === null ? <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
           : users.length === 0 ? <div className="empty"><div className="ic">💬</div><p>No teammates to chat with yet</p></div>
-            : (
+            : shown.length === 0 ? <div className="empty"><div className="ic">🔍</div><p>No match for “{search}”</p></div>
+              : (
               <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-                {users.map((u) => (
+                {shown.map((u) => (
                   <button key={u.id} onClick={() => openThread(u)}
                     style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
                     <div style={{ position: 'relative' }}>

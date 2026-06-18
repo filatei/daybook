@@ -53,10 +53,23 @@ router.get('/users', requireAuth, async (req, res) => {
   const unreadBy = Object.fromEntries(unread.map((r) => [r.from_user, r.n]));
   const lastBy = Object.fromEntries(last.map((r) => [r.other, Number(r.last_at)]));
   const online = new Set(usersOnline(tenant_id));
-  const list = rows.map((u) => ({
+
+  // Always surface anyone I have a conversation with OR who has sent me an unread
+  // message, even if they're no longer an active member — otherwise an unread
+  // count could exist with no row to open (the "1 unread but nothing shows" bug).
+  const known = new Set(rows.map((u) => u.id));
+  const extraIds = [...new Set([...last.map((r) => r.other), ...unread.map((r) => r.from_user)])]
+    .filter((id) => id && !known.has(id));
+  let extra = [];
+  if (extraIds.length) {
+    extra = await qall(`SELECT id, name, email FROM users WHERE id IN (${extraIds.map(() => '?').join(',')})`, extraIds);
+  }
+  const all = [...rows, ...extra.map((u) => ({ ...u, role: null, site_name: null }))];
+
+  const list = all.map((u) => ({
     id: u.id, name: u.name || u.email, role: u.role, site_name: u.site_name || null,
     online: online.has(u.id), unread: unreadBy[u.id] || 0, last_at: lastBy[u.id] || null,
-  })).sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
+  })).sort((a, b) => (b.unread - a.unread) || ((b.last_at || 0) - (a.last_at || 0)));
   res.json({ users: list, online: [...online] });
 });
 

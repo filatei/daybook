@@ -63,7 +63,10 @@ function attach(server) {
 
       // Resume: replay missed events (scoped), capped so a long-dead client gets
       // a fresh baseline rather than a huge backlog.
-      const where = ['tenant_id=?', 'seq>?'], args = [tenant, lastSeq];
+      // Replay durable STATE events only (gate/loading resume). Live-ticker
+      // notifications like sale.created are ephemeral — never replay them or
+      // they reappear as phantom "live sales" on every reconnect.
+      const where = ['tenant_id=?', 'seq>?', "type <> 'sale.created'"], args = [tenant, lastSeq];
       if (site_id) { where.push('(site_id=? OR site_id IS NULL)'); args.push(site_id); }
       const missed = await qall(`SELECT seq, site_id, type, payload, created_at FROM events WHERE ${where.join(' AND ')} ORDER BY seq LIMIT 1000`, args);
       for (const m of missed) ws.send(JSON.stringify({ t: 'event', seq: Number(m.seq), tenant_id: tenant, site_id: m.site_id, type: m.type, payload: m.payload, created_at: Number(m.created_at) }));

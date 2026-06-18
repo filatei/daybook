@@ -259,28 +259,35 @@ function QuarantinePanel() {
 // timestamp (errant rows from before the cutover quarantine rule existed).
 function PurgeErrantCard() {
   const { toast, tenant, confirm } = useStore();
-  const [count, setCount] = useState(null);
+  const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
-    api(scoped('/pos/errant')).then((r) => setCount(r.count)).catch(() => setCount(0));
+    api(scoped('/pos/errant')).then(setData).catch(() => setData({ count: 0, phantomEvents: 0 }));
   }, [tenant]);
   useEffect(() => { load(); }, [load]);
 
-  if (count === null || count === 0) return null;   // nothing errant → hide
+  if (!data) return null;
+  const count = data.count || 0;
+  const phantom = data.phantomEvents || 0;
+  if (count === 0 && phantom === 0) return null;   // nothing to clean → hide
 
   const purge = async () => {
-    if (!await confirm({ title: `Purge ${count} errant order${count > 1 ? 's' : ''}?`, message: 'These orders have no order number or no timestamp. They will be recorded in the migration quarantine and permanently removed from Daybook. This cannot be undone.', confirmText: 'Purge', danger: true })) return;
+    if (!await confirm({ title: 'Purge errant data?', message: `${count} imported order(s) with no order number or timestamp, and ${phantom} phantom live-sale event(s), will be permanently removed. Orders are kept in the migration quarantine for audit. This cannot be undone.`, confirmText: 'Purge', danger: true })) return;
     setBusy(true);
-    try { const r = await api(scoped('/pos/purge-errant'), { method: 'POST', body: {} }); toast(`Purged ${r.purged} errant order${r.purged === 1 ? '' : 's'} ✓`, 'ok'); load(); }
+    try { const r = await api(scoped('/pos/purge-errant'), { method: 'POST', body: {} }); toast(`Purged ${r.purged} order(s) · cleared ${r.eventsCleared || 0} phantom event(s) ✓`, 'ok'); load(); }
     catch (e) { toast(e.message || 'Purge failed', 'err'); }
     setBusy(false);
   };
 
   return (
     <div className="card" style={{ marginBottom: 14, borderLeft: '3px solid var(--err)' }}>
-      <div className="section-title" style={{ marginTop: 0 }}>⚠️ Errant orders in Daybook</div>
-      <p className="sub">{count} imported order{count > 1 ? 's have' : ' has'} no order number or no timestamp. Purge to remove them — they're kept in the migration quarantine for audit.</p>
-      <button className="btn" style={{ background: 'var(--err)' }} onClick={purge} disabled={busy}>{busy ? <span className="spin" /> : `Purge ${count} errant order${count > 1 ? 's' : ''}`}</button>
+      <div className="section-title" style={{ marginTop: 0 }}>⚠️ Errant data in Daybook</div>
+      <p className="sub">
+        {count > 0 && <>{count} imported order{count > 1 ? 's' : ''} with no order number or timestamp. </>}
+        {phantom > 0 && <>{phantom} phantom “live sale” event{phantom > 1 ? 's' : ''} that replay on the dashboard. </>}
+        Purge to remove them (orders kept in the migration quarantine for audit).
+      </p>
+      <button className="btn" style={{ background: 'var(--err)' }} onClick={purge} disabled={busy}>{busy ? <span className="spin" /> : 'Purge errant data'}</button>
     </div>
   );
 }

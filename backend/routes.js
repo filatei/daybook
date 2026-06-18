@@ -45,7 +45,7 @@ const sales = require('./salesSource');
 const scheduler = require('./scheduler');
 const payments = require('./payments');
 const ls = require('./lemonsqueezy');
-const { emitEvent } = require('./realtime');
+const { emitEvent, broadcastLive } = require('./realtime');
 
 const router = express.Router();
 
@@ -308,7 +308,9 @@ router.get('/pos/errant', requireAuth, needTenant('ADMIN'), async (req, res) => 
     `SELECT id, receipt_no, total amount, sale_date, customer_name, ext_id
        FROM pos_sales WHERE tenant_id=? AND ${ERRANT_POS_WHERE} ORDER BY created_at NULLS FIRST LIMIT 500`,
     [req.ctx.tenant_id]);
-  res.json({ count: rows.length, rows });
+  let phantomEvents = 0;
+  try { const e = await qone(`SELECT COUNT(*)::int n FROM events WHERE tenant_id=? AND type='sale.created'`, [req.ctx.tenant_id]); phantomEvents = e ? e.n : 0; } catch { /* events table may differ */ }
+  res.json({ count: rows.length, phantomEvents, rows });
 });
 
 // Quarantine then permanently delete errant pos_sales rows (Admin only).
@@ -331,8 +333,12 @@ router.post('/pos/purge-errant', requireAuth, needTenant('ADMIN'), async (req, r
       purged = del.rowCount != null ? del.rowCount : rows.length;
     } catch (e) { return res.status(409).json({ error: 'Some orders are referenced elsewhere and could not be deleted: ' + e.message }); }
   }
-  await audit(req.ctx.tenant_id, req.user.id, 'DELETE', 'pos_purge_errant', req.ctx.tenant_id, { purged });
-  res.json({ purged });
+  // Also clear any persisted sale.created notifications that replay as phantom
+  // "live sales" on the dashboard.
+  let eventsCleared = 0;
+  try { const e = await qrun(`DELETE FROM events WHERE tenant_id=? AND type='sale.created'`, [req.ctx.tenant_id]); eventsCleared = e.rowCount || 0; } catch { /* events table may differ */ }
+  await audit(req.ctx.tenant_id, req.user.id, 'DELETE', 'pos_purge_errant', req.ctx.tenant_id, { purged, eventsCleared });
+  res.json({ purged, eventsCleared });
 });
 
 // Cutover audit — fido orders rejected during migration (no timestamp / no
@@ -1783,7 +1789,9 @@ router.post('/pos/sales', requireAuth, needTenant('SECRETARY'), async (req, res)
     await qrun('INSERT INTO inventory_moves (id,tenant_id,product_id,site_id,type,qty,ref,created_by) VALUES (?,?,?,?,?,?,?,?)',
       [uuid(), req.ctx.tenant_id, l.product_id, site_id, 'SALE', -l.qty, 'receipt#' + nextNo, req.user.id]);
   }
-  emitEvent(req.ctx.tenant_id, site_id, 'sale.created', { sale_id: id, receipt_no: nextNo, total, customer_name: b.customer_name || null, payment_method: (b.payment_method || 'CASH').toUpperCase(), status });
+  // Live-ticker notification only — ephemeral (NOT persisted), so it never
+  // replays on reconnect and resurrects as a phantom "live sale".
+  broadcastLive(req.ctx.tenant_id, site_id, 'sale.created', { sale_id: id, receipt_no: nextNo, total, customer_name: b.customer_name || null, payment_method: (b.payment_method || 'CASH').toUpperCase(), status, at: nowS() });
   audit(req.ctx.tenant_id, req.user.id, 'SALE', 'pos_sale', id, { receipt_no: nextNo, total });
   res.status(201).json(await qone('SELECT * FROM pos_sales WHERE id=?', [id]));
 });

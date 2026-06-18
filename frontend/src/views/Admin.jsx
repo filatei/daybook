@@ -207,6 +207,84 @@ function ReportEmailsTab() {
   );
 }
 
+// Cutover audit — fido orders that were NOT migrated because they had no
+// timestamp or no order id. Read-only list so admins can clean them in Fido.
+function QuarantinePanel() {
+  const { tenant } = useStore();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    setLoading(true);
+    api(scoped('/etl/quarantine'))
+      .then(setData).catch(() => setData({ total: 0, byReason: {}, rows: [] }))
+      .finally(() => setLoading(false));
+  }, [tenant]);
+
+  if (loading) return null;
+  if (!data || data.total === 0) return null;   // hide until a cutover quarantines something
+
+  const REASON = { NO_TIMESTAMP: 'No timestamp', NO_ORDER_ID: 'No order id' };
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="section-title" style={{ marginTop: 0 }}>🧹 Migration quarantine</div>
+      <p className="sub">Fido orders not imported at cutover because they had no usable timestamp or no order id. They are excluded from Daybook — clean them in Fido if needed.</p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <span className="badge" style={{ background: '#fef3c7', color: '#92400e' }}>{data.total} total</span>
+        {Object.entries(data.byReason).map(([k, n]) => (
+          <span key={k} className="badge" style={{ background: '#f1f5f9', color: '#475569' }}>{REASON[k] || k}: {n}</span>
+        ))}
+      </div>
+      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setOpen((v) => !v)}>
+        {open ? 'Hide list' : 'Show list'}
+      </button>
+      {open && (
+        <div style={{ marginTop: 10, maxHeight: 300, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 10 }}>
+          {data.rows.map((r) => (
+            <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '8px 12px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600 }}>{r.raw?.order_no ? `#${r.raw.order_no}` : `id ${r.ext_id.slice(-8)}`} <span style={{ color: 'var(--muted)', fontWeight: 400 }}>· {r.site || '—'}</span></div>
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>{REASON[r.reason] || r.reason}{r.raw?.paymentMethod ? ` · ${r.raw.paymentMethod}` : ''}</div>
+              </div>
+              <div style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>{ngn(r.amount || 0)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Purge already-imported Postgres orders that have no order number or no
+// timestamp (errant rows from before the cutover quarantine rule existed).
+function PurgeErrantCard() {
+  const { toast, tenant, confirm } = useStore();
+  const [count, setCount] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    api(scoped('/pos/errant')).then((r) => setCount(r.count)).catch(() => setCount(0));
+  }, [tenant]);
+  useEffect(() => { load(); }, [load]);
+
+  if (count === null || count === 0) return null;   // nothing errant → hide
+
+  const purge = async () => {
+    if (!await confirm({ title: `Purge ${count} errant order${count > 1 ? 's' : ''}?`, message: 'These orders have no order number or no timestamp. They will be recorded in the migration quarantine and permanently removed from Daybook. This cannot be undone.', confirmText: 'Purge', danger: true })) return;
+    setBusy(true);
+    try { const r = await api(scoped('/pos/purge-errant'), { method: 'POST', body: {} }); toast(`Purged ${r.purged} errant order${r.purged === 1 ? '' : 's'} ✓`, 'ok'); load(); }
+    catch (e) { toast(e.message || 'Purge failed', 'err'); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 14, borderLeft: '3px solid var(--err)' }}>
+      <div className="section-title" style={{ marginTop: 0 }}>⚠️ Errant orders in Daybook</div>
+      <p className="sub">{count} imported order{count > 1 ? 's have' : ' has'} no order number or no timestamp. Purge to remove them — they're kept in the migration quarantine for audit.</p>
+      <button className="btn" style={{ background: 'var(--err)' }} onClick={purge} disabled={busy}>{busy ? <span className="spin" /> : `Purge ${count} errant order${count > 1 ? 's' : ''}`}</button>
+    </div>
+  );
+}
+
 function SettingsTab() {
   const { toast, tenant } = useStore();
   const [thr, setThr] = useState(0.55);
@@ -269,6 +347,8 @@ function SettingsTab() {
         </div>
       )}
     </div>
+    <PurgeErrantCard />
+    <QuarantinePanel />
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="section-title" style={{ marginTop: 0 }}>🏭 Finished goods</div>
       <p className="sub">Pick the product that the daily <b>bagged</b> count produces. Bagging adds to that product's per-site stock; sales draw it down (Inventory → Finished goods).</p>

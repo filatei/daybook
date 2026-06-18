@@ -299,6 +299,42 @@ router.patch('/sites/:id', requireAuth, async (req, res) => {
   res.json(await siteById(site.id));
 });
 
+// Errant Postgres orders already imported before the quarantine rule existed:
+// pos_sales rows with no order number (receipt_no) or no timestamp.
+const ERRANT_POS_WHERE = '(receipt_no IS NULL OR created_at IS NULL OR sale_date IS NULL)';
+
+router.get('/pos/errant', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const rows = await qall(
+    `SELECT id, receipt_no, total amount, sale_date, customer_name, ext_id
+       FROM pos_sales WHERE tenant_id=? AND ${ERRANT_POS_WHERE} ORDER BY created_at NULLS FIRST LIMIT 500`,
+    [req.ctx.tenant_id]);
+  res.json({ count: rows.length, rows });
+});
+
+// Quarantine then permanently delete errant pos_sales rows (Admin only).
+router.post('/pos/purge-errant', requireAuth, needTenant('ADMIN'), async (req, res) => {
+  const rows = await qall(
+    `SELECT id, receipt_no, total, sale_date, created_at, ext_id, customer_name
+       FROM pos_sales WHERE tenant_id=? AND ${ERRANT_POS_WHERE}`, [req.ctx.tenant_id]);
+  for (const r of rows) {
+    const reason = (r.receipt_no == null) ? 'PURGED_NO_ORDER_ID' : 'PURGED_NO_TIMESTAMP';
+    await qrun(
+      `INSERT INTO etl_quarantine (id,tenant_id,source,ext_id,reason,site,amount,raw)
+       VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (source,ext_id) DO NOTHING`,
+      [uuid(), req.ctx.tenant_id, 'pos_sales', String(r.ext_id || r.id), reason, null, r.total,
+        JSON.stringify({ order_no: r.receipt_no, customer: r.customer_name, sale_date: r.sale_date })]).catch(() => {});
+  }
+  let purged = 0;
+  if (rows.length) {
+    try {
+      const del = await qrun(`DELETE FROM pos_sales WHERE tenant_id=? AND ${ERRANT_POS_WHERE}`, [req.ctx.tenant_id]);
+      purged = del.rowCount != null ? del.rowCount : rows.length;
+    } catch (e) { return res.status(409).json({ error: 'Some orders are referenced elsewhere and could not be deleted: ' + e.message }); }
+  }
+  await audit(req.ctx.tenant_id, req.user.id, 'DELETE', 'pos_purge_errant', req.ctx.tenant_id, { purged });
+  res.json({ purged });
+});
+
 // Cutover audit — fido orders rejected during migration (no timestamp / no
 // order id). Read-only; lets Admin/GM/Snr Accountant see what was NOT imported.
 router.get('/etl/quarantine', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {

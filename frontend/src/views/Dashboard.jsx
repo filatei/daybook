@@ -113,7 +113,13 @@ export default function Dashboard() {
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: connected ? '#16a34a' : '#94a3b8', boxShadow: connected ? '0 0 0 4px rgba(22,163,74,.18)' : 'none', display: 'inline-block' }} />
               LIVE SALES{connected ? '' : ' (reconnecting…)'}
             </span>
-            <span style={{ fontWeight: 800 }}>{ngn(live.total)} <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>· {live.count}</span></span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontWeight: 800 }}>{ngn(live.total)} <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>· {live.count}</span></span>
+              {live.count > 0 && (
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px', fontSize: 12 }}
+                  onClick={() => setLive({ total: 0, count: 0, feed: [] })}>Clear</button>
+              )}
+            </span>
           </div>
           {live.feed.length > 0 && (
             <div style={{ marginTop: 8 }}>

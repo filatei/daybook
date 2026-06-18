@@ -873,8 +873,15 @@ router.post('/reports/generate/email', requireAuth, needTenant('SECRETARY'), asy
   // tenant's all-sites address. Creator ("sender") always included.
   const site = out.site_id ? await siteById(out.site_id) : null;
   const to = reportRecipients({ tenant, site, senderEmail: req.user.email });
+  // Include any files attached to the saved report for this site+date.
+  let attachments = [];
+  if (out.site_id) {
+    const rep = await qone('SELECT id FROM daily_reports WHERE tenant_id=? AND site_id=? AND report_date=?', [req.ctx.tenant_id, out.site_id, date]);
+    if (rep) attachments = (await qall('SELECT * FROM documents WHERE report_id=?', [rep.id]))
+      .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));
+  }
   try {
-    const sent = await sendGeneratedReport({ tenant, date, report: out, incidents: (b.incidents || '').trim(), to });
+    const sent = await sendGeneratedReport({ tenant, date, report: out, incidents: (b.incidents || '').trim(), to, attachments });
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
       [uuid(), req.ctx.tenant_id, to.join(','), sent.subject, sent.queued ? 'QUEUED' : 'SENT']).catch(() => {});
     res.json({ ok: true, to, queued: !!sent.queued });
@@ -965,6 +972,7 @@ router.get('/documents', requireAuth, async (req, res) => {
   }
   if (category) { where.push('d.category=?'); args.push(category); }
   if (site) { where.push('d.site_id=?'); args.push(site); }
+  if (req.query.report_id) { where.push('d.report_id=?'); args.push(req.query.report_id); }
   const sql = `SELECT d.*, s.name site_name, u.name uploader FROM documents d
     LEFT JOIN sites s ON s.id=d.site_id LEFT JOIN users u ON u.id=d.uploaded_by
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY d.created_at DESC LIMIT 500`;

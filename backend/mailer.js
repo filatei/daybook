@@ -375,7 +375,7 @@ function opsHtml(ops) {
  * Email a generated daily report (single site OR the all-sites roll-up).
  * @param opts { tenant, date, report:{scope,site_name,summary,bySite}, incidents, to }
  */
-async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
+async function sendGeneratedReport({ tenant, date, report, incidents, to, attachments = [] }) {
   const brand = (tenant && tenant.brand_color) || '#2563eb';
   const name = (tenant && tenant.name) || 'Company';
   const s = report.summary || {};
@@ -445,9 +445,16 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to }) {
       <p style="color:#9ca3af;font-size:12px;margin-top:18px">Auto-generated from Daybook sales, production and expenses for ${esc(date)}.</p>
     </div>
   </div>`;
-  // No attachments → use the persistent outbox so a relay throttle (421) is
-  // retried for hours instead of failing the request. Returns queued=true when
-  // it couldn't send immediately so the UI can say "queued" rather than "sent".
+  // With file attachments → send inline (the queue can't persist file payloads),
+  // deliver() still retries transient failures. Without → use the durable outbox
+  // so a relay throttle (421) is retried for hours instead of failing.
+  if (attachments && attachments.length) {
+    const info = await deliver({
+      from: FROM, to: Array.isArray(to) ? to.join(', ') : to, subject, html,
+      attachments: attachments.map((a) => ({ filename: a.filename || path.basename(a.path), path: a.path })),
+    });
+    return { messageId: info.messageId, subject, to };
+  }
   const r = await sendOrQueue({ to: Array.isArray(to) ? to.join(', ') : to, subject, html, tenant_id: tenant && tenant.id, kind: 'report' });
   return { messageId: r.messageId, queued: r.queued, subject, to };
 }

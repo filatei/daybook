@@ -1,11 +1,90 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { api, scoped, ngn, today } from '../api.js';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import ReceiptPreview from '../components/ReceiptPreview.jsx';
 import OpsForm from './OpsForm.jsx';
 
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
+
+// Files attached to a daily report. Saved with the report and included as email
+// attachments whenever the report is emailed (the email routes pull documents by
+// report_id). Shown in the report editor and the read-only archive detail.
+function ReportAttachments({ reportId, siteId, canEdit = true }) {
+  const { toast } = useStore();
+  const [docs, setDocs] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  const load = useCallback(() => {
+    if (!reportId) return;
+    api(scoped(`/documents?report_id=${reportId}`)).then((r) => setDocs(Array.isArray(r) ? r : [])).catch(() => setDocs([]));
+  }, [reportId]);
+  useEffect(() => { load(); }, [load]);
+
+  const onPick = async (e) => {
+    const files = [...(e.target.files || [])];
+    if (!files.length) return;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      files.forEach((f) => fd.append('files', f));
+      fd.append('report_id', reportId);
+      fd.append('category', 'DAILY_REPORT');
+      if (siteId) fd.append('site_id', siteId);
+      await api(scoped('/documents'), { method: 'POST', form: fd });
+      toast(`Attached ${files.length} file${files.length > 1 ? 's' : ''} ✓`, 'ok');
+      load();
+    } catch (err) { toast(err.message || 'Upload failed', 'err'); }
+    setBusy(false);
+    if (fileRef.current) fileRef.current.value = '';
+  };
+
+  const download = async (d) => {
+    try {
+      const res = await fetch(`/api/documents/${d.id}/download`, { headers: { Authorization: 'Bearer ' + getToken() } });
+      if (!res.ok) throw new Error('Download failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = d.file_name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } catch (e) { toast(e.message || 'Could not download', 'err'); }
+  };
+  const remove = async (d) => {
+    try { await api(scoped(`/documents/${d.id}`), { method: 'DELETE' }); load(); }
+    catch (e) { toast(e.message || 'Could not remove', 'err'); }
+  };
+
+  const fmtSize = (n) => !n ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+
+  if (!reportId) {
+    return <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>📎 Save the report first, then you can attach files.</div>;
+  }
+  return (
+    <div style={{ marginTop: 12 }}>
+      <label className="fl" style={{ marginTop: 0 }}>📎 Attachments <span style={{ color: 'var(--muted)', fontWeight: 400 }}>· emailed with the report</span></label>
+      {docs.length === 0 && <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 6 }}>No files attached.</div>}
+      {docs.map((d) => (
+        <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', border: '1px solid var(--line)', borderRadius: 9, marginBottom: 6 }}>
+          <button onClick={() => download(d)} title="Download" style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
+            <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📄 {d.file_name}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>{fmtSize(d.size)}{d.uploader ? ` · ${d.uploader}` : ''}</div>
+          </button>
+          {canEdit && <button title="Remove" onClick={() => remove(d)} style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 7, width: 28, height: 28, cursor: 'pointer' }}>✕</button>}
+        </div>
+      ))}
+      {canEdit && (
+        <>
+          <input ref={fileRef} type="file" multiple onChange={onPick} style={{ display: 'none' }} />
+          <button className="btn btn-ghost btn-sm" style={{ width: '100%' }} onClick={() => fileRef.current?.click()} disabled={busy}>
+            {busy ? <span className="spin" /> : '＋ Attach file'}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
 
 function Stat({ k, v, accent }) {
   return (
@@ -243,6 +322,7 @@ function ReportDetail({ report, canEdit, onEdit, onClose }) {
               <div style={{ fontSize: 13, whiteSpace: 'pre-wrap', color: 'var(--ink)' }}>{report.notes}</div>
             </div>
           )}
+          <ReportAttachments reportId={report.id} siteId={report.site_id} canEdit={canEdit} />
           <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
             <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
             <button className="btn btn-ghost" style={{ flex: 1 }} onClick={emailReport} disabled={emailing}>{emailing ? <><span className="spin" /> Sending…</> : '✉️ Email'}</button>
@@ -352,6 +432,8 @@ function ReportForm({ report, sites, onSave, onClose }) {
       <div style={{ background: 'var(--brand-l)', borderRadius: 12, padding: '10px 14px', margin: '12px 0', fontWeight: 700 }}>
         Total Sales: {ngn(totalSales)}
       </div>
+
+      <ReportAttachments reportId={report?.id} siteId={report?.site_id || f.site_id} />
 
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={() => save(false)} disabled={saving}>Save draft</button>

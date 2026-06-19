@@ -172,6 +172,74 @@ function DayOpsView({ ops }) {
   );
 }
 
+// Bag (finished water) stock — day running balance with the LESS breakdown
+// matching the site's paper report. Lets a manager set the opening B/F once.
+function BagReportCard({ bagReport: r, siteId }) {
+  const { toast } = useStore();
+  const role = useRole();
+  const canSeed = role && atLeast(role, 'SITE_MANAGER');
+  const [openSeed, setOpenSeed] = useState(false);
+  const [qty, setQty] = useState('');
+  const [asOf, setAsOf] = useState(today());
+  const [saving, setSaving] = useState(false);
+  const n = (v) => (Number(v) || 0).toLocaleString();
+  const line = (k, v, opts = {}) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0', ...opts }}>
+      <span style={{ color: 'var(--muted)' }}>{k}</span><span>{v}</span>
+    </div>
+  );
+  const saveSeed = async () => {
+    setSaving(true);
+    try {
+      await api(scoped('/reports/fg-opening'), { method: 'PUT', body: { site: siteId, opening_qty: Number(qty) || 0, as_of_date: asOf } });
+      toast('Opening stock set ✓ — regenerate to update', 'ok');
+      setOpenSeed(false);
+      window.dispatchEvent(new CustomEvent('fg-opening-saved'));
+    } catch (e) { toast(e.message || 'Save failed', 'err'); }
+    setSaving(false);
+  };
+  const ded = (r.sold || 0) + (r.extra || 0) + (r.staff || 0) + (r.incentive || 0) + (r.leakage || 0);
+  return (
+    <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+      <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — {r.product || 'bags'}</div>
+      {line('Bags B/F (opening)', n(r.opening))}
+      {line('Produced', n(r.produced))}
+      {line('Total', n(r.total), { fontWeight: 700 })}
+      <div style={{ fontSize: 12, color: 'var(--muted)', margin: '4px 0 0' }}>Less:</div>
+      {line('Sales', n(r.sold))}
+      {(r.extra || 0) > 0 && line('Extra / bonus', n(r.extra))}
+      {(r.staff || 0) > 0 && line('Staff water', n(r.staff))}
+      {(r.incentive || 0) > 0 && line('Incentive', n(r.incentive))}
+      {(r.leakage || 0) > 0 && line('Leakage', n(r.leakage))}
+      {line('Total deductions', `(${n(ded)})`, { color: 'var(--err)' })}
+      {line('Available', n(r.available), { fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 4, marginTop: 2 })}
+
+      {!r.seeded ? (
+        <div style={{ marginTop: 8, fontSize: 12 }}>
+          <div style={{ color: 'var(--err)' }}>⚠️ Opening stock (B/F) not set — balance starts from today.</div>
+          {canSeed && siteId && !openSeed && <button className="btn btn-ghost btn-sm" style={{ marginTop: 6 }} onClick={() => setOpenSeed(true)}>Set opening B/F</button>}
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>Running balance since {r.as_of}. Available = B/F + produced − (sales + extra + staff + incentive + leakage).{canSeed && siteId && !openSeed ? <> · <a role="button" tabIndex={0} style={{ cursor: 'pointer', color: 'var(--brand)' }} onClick={() => setOpenSeed(true)}>adjust B/F</a></> : null}</div>
+      )}
+
+      {openSeed && (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end', marginTop: 8, flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 110px' }}>
+            <label className="fl" style={{ marginTop: 0, fontSize: 11 }}>Opening bags (B/F)</label>
+            <input type="number" inputMode="numeric" className="input" value={qty} onChange={(e) => setQty(e.target.value)} />
+          </div>
+          <div style={{ flex: '1 1 130px' }}>
+            <label className="fl" style={{ marginTop: 0, fontSize: 11 }}>As of date</label>
+            <input type="date" className="input" value={asOf} max={today()} onChange={(e) => setAsOf(e.target.value)} />
+          </div>
+          <button className="btn btn-sm" style={{ width: 'auto', padding: '0 14px' }} onClick={saveSeed} disabled={saving}>{saving ? <span className="spin" /> : 'Save'}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Rich read-only body of a generated/saved daily report — shared by the
 // Generate modal and the archive detail view so they always render identically.
 function GeneratedReportBody({ gen }) {
@@ -207,17 +275,7 @@ function GeneratedReportBody({ gen }) {
         </div>
       )}
 
-      {s.bagReport && (
-        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — {s.bagReport.product || 'bags'}</div>
-          {[['Opening', s.bagReport.opening], ['Production', s.bagReport.produced], ['Total', s.bagReport.total], ['Sales', s.bagReport.sold], ['Available', s.bagReport.available]].map(([k, v]) => (
-            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0', ...(k === 'Total' || k === 'Available' ? { fontWeight: 700 } : {}) }}>
-              <span style={{ color: 'var(--muted)' }}>{k}</span><span>{(v || 0).toLocaleString()}</span>
-            </div>
-          ))}
-          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>Available = opening + production − sales. Add leakage/staff water under incidents if needed.</div>
-        </div>
-      )}
+      {s.bagReport && <BagReportCard bagReport={s.bagReport} siteId={gen.site_id} />}
 
       {(s.diesel > 0 || s.expenses > 0) && (
         <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--muted)', margin: '8px 2px' }}>
@@ -470,6 +528,12 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
     } catch (e) { toast(e.message || 'Could not generate', 'err'); }
     setLoading(false);
   };
+  // Re-generate after the opening B/F is set so the stock figures update.
+  useEffect(() => {
+    const h = () => { if (gen) generate(); };
+    window.addEventListener('fg-opening-saved', h);
+    return () => window.removeEventListener('fg-opening-saved', h);
+  });
 
   const emailReport = async () => {
     if (emailing) return;   // ignore repeat taps — send exactly once

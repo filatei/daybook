@@ -746,32 +746,73 @@ async function siteProdExp(ctx, site, date) {
 // Derive the finished-bag day report for one site/day from production + FG logs
 // and POS bag sales (the bagged product). Manual adjustments (leakage, staff
 // water, extra) aren't tracked, so available = opening + produced − sold.
+// Bag (finished Pure Water) stock for one site on one day, as a RUNNING BALANCE
+// anchored to a seed opening: B/F = seed + (produced − deductions) over
+// [as_of_date .. yesterday]; Available = B/F + produced(today) − deductions(today).
+// Deductions = POS sales + incentive + day-ops extra/staff/leakage. This avoids
+// subtracting years of imported sales from only recent production.
 async function bagDayReport(ctx, siteId, date) {
   const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [ctx.tenant_id]);
   const baggedId = t && t.bagged_product_id;
   if (!baggedId) return null;
   const pr = await qone('SELECT name, unit FROM products WHERE id=?', [baggedId]);
   if (!pr) return null;
-  // produced = logged fg_production + auto bags_bagged
-  const fg = await qone("SELECT COALESCE(SUM(qty),0) total, COALESCE(SUM(CASE WHEN prod_date=? THEN qty ELSE 0 END),0) today FROM fg_production WHERE tenant_id=? AND site_id=? AND product_id=?", [date, ctx.tenant_id, siteId, baggedId]);
-  const bg = await qone("SELECT COALESCE(SUM(bags_bagged),0) total, COALESCE(SUM(CASE WHEN work_date=? THEN bags_bagged ELSE 0 END),0) today FROM production WHERE tenant_id=? AND site_id=?", [date, ctx.tenant_id, siteId]);
-  const producedTotal = Number(fg.total) + Number(bg.total);
-  const producedToday = Number(fg.today) + Number(bg.today);
-  // sold = bag-product qty in POS line items
-  let soldTotal = 0, soldToday = 0;
-  try {
-    const r = await qone(
-      `SELECT COALESCE(SUM((elem->>'qty')::numeric),0) total,
-              COALESCE(SUM(CASE WHEN p.sale_date=? THEN (elem->>'qty')::numeric ELSE 0 END),0) today
-         FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
-        WHERE p.tenant_id=? AND p.site_id=? AND COALESCE(p.payment_method,'') <> 'INCENTIVE'
-          AND p.items_json IS NOT NULL AND left(p.items_json,1)='[' AND lower(elem->>'name')=lower(?)`,
-      [date, ctx.tenant_id, siteId, pr.name]);
-    soldTotal = Number(r.total) || 0; soldToday = Number(r.today) || 0;
-  } catch { /* malformed json */ }
-  const opening = Math.round(((producedTotal - producedToday) - (soldTotal - soldToday)) * 100) / 100;
-  const available = Math.round((producedTotal - soldTotal) * 100) / 100;
-  return { product: pr.name, opening, produced: producedToday, total: Math.round((opening + producedToday) * 100) / 100, sold: soldToday, available };
+
+  // Seed opening. Without one, anchor to today (B/F 0) so nothing imported leaks
+  // in — the site sets the real B/F once via PUT /reports/fg-opening.
+  const seedRow = await qone('SELECT opening_qty, as_of_date FROM fg_opening WHERE tenant_id=? AND site_id=? AND product_id=?', [ctx.tenant_id, siteId, baggedId]);
+  const seed = seedRow ? Number(seedRow.opening_qty) || 0 : 0;
+  const asOf = (seedRow && seedRow.as_of_date && seedRow.as_of_date <= date) ? seedRow.as_of_date : date;
+  const num = (v) => Number(v) || 0;
+  const sumPair = (total, today) => ({ total: num(total), today: num(today), before: num(total) - num(today) });
+
+  // Produced in the window, split today vs before.
+  const fg = await qone("SELECT COALESCE(SUM(qty),0) total, COALESCE(SUM(CASE WHEN prod_date=? THEN qty ELSE 0 END),0) today FROM fg_production WHERE tenant_id=? AND site_id=? AND product_id=? AND prod_date>=? AND prod_date<=?", [date, ctx.tenant_id, siteId, baggedId, asOf, date]);
+  const bg = await qone("SELECT COALESCE(SUM(bags_bagged),0) total, COALESCE(SUM(CASE WHEN work_date=? THEN bags_bagged ELSE 0 END),0) today FROM production WHERE tenant_id=? AND site_id=? AND work_date>=? AND work_date<=?", [date, ctx.tenant_id, siteId, asOf, date]);
+  const produced = { total: num(fg.total) + num(bg.total), today: num(fg.today) + num(bg.today) };
+  produced.before = produced.total - produced.today;
+
+  // POS sales + incentive of the bag product, windowed.
+  const posQty = async (incentive) => {
+    try {
+      const r = await qone(
+        `SELECT COALESCE(SUM((elem->>'qty')::numeric),0) total,
+                COALESCE(SUM(CASE WHEN p.sale_date=? THEN (elem->>'qty')::numeric ELSE 0 END),0) today
+           FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
+          WHERE p.tenant_id=? AND p.site_id=? AND p.sale_date>=? AND p.sale_date<=?
+            AND COALESCE(p.payment_method,'') ${incentive ? '=' : '<>'} 'INCENTIVE'
+            AND p.items_json IS NOT NULL AND left(p.items_json,1)='[' AND lower(elem->>'name')=lower(?)`,
+        [date, ctx.tenant_id, siteId, asOf, date, pr.name]);
+      return sumPair(r.total, r.today);
+    } catch { return { total: 0, today: 0, before: 0 }; }
+  };
+  const sales = await posQty(false);
+  const incentive = await posQty(true);
+
+  // Day-ops bag adjustments (extra/bonus, staff water, leakage) across the window.
+  const opsRows = await qall("SELECT ops_date, data FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date>=? AND ops_date<=?", [ctx.tenant_id, siteId, asOf, date]);
+  const adj = { extra: { total: 0, today: 0 }, staff: { total: 0, today: 0 }, leakage: { total: 0, today: 0 } };
+  for (const r of opsRows) {
+    const b = (J(r.data, {}).bags) || {};
+    const e = num(b.extra), s = num(b.staff_water), l = num(b.leakage);
+    adj.extra.total += e; adj.staff.total += s; adj.leakage.total += l;
+    if (r.ops_date === date) { adj.extra.today += e; adj.staff.today += s; adj.leakage.today += l; }
+  }
+  const before = (o) => o.total - o.today;
+
+  const deductBefore = sales.before + incentive.before + before(adj.extra) + before(adj.staff) + before(adj.leakage);
+  const deductToday = sales.today + incentive.today + adj.extra.today + adj.staff.today + adj.leakage.today;
+  const rnd = (n) => Math.round(n * 100) / 100;
+
+  const opening = rnd(seed + produced.before - deductBefore);   // B/F
+  const total = rnd(opening + produced.today);
+  const available = rnd(total - deductToday);
+  return {
+    product: pr.name, opening, produced: produced.today, total,
+    sold: sales.today, extra: adj.extra.today, staff: adj.staff.today, incentive: incentive.today, leakage: adj.leakage.today,
+    deductions: rnd(deductToday), available,
+    seeded: !!seedRow, as_of: asOf,
+  };
 }
 
 // Build the full generated report (one site, or all sites aggregated).
@@ -919,6 +960,30 @@ router.put('/reports/ops', requireAuth, needTenant('SECRETARY'), async (req, res
      ON CONFLICT (tenant_id,site_id,ops_date) DO UPDATE SET data=EXCLUDED.data, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at`,
     [uuid(), req.ctx.tenant_id, site_id, date, JSON.stringify(data), req.user.id, nowS()]);
   res.json({ ok: true, site_id, ops_date: date });
+});
+
+// Finished-goods opening stock (B/F) seed — set ONCE per site so the bag running
+// balance starts from a real shelf count rather than all-time imported sales.
+router.get('/reports/fg-opening', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : req.query.site;
+  const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [req.ctx.tenant_id]);
+  if (!site_id || !t || !t.bagged_product_id) return res.json({ opening_qty: null, as_of_date: null, has_product: !!(t && t.bagged_product_id) });
+  const row = await qone('SELECT opening_qty, as_of_date FROM fg_opening WHERE tenant_id=? AND site_id=? AND product_id=?', [req.ctx.tenant_id, site_id, t.bagged_product_id]);
+  res.json({ opening_qty: row ? Number(row.opening_qty) : null, as_of_date: row ? row.as_of_date : null, has_product: true });
+});
+router.put('/reports/fg-opening', requireAuth, needTenant('SITE_MANAGER'), async (req, res) => {
+  const b = req.body || {};
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site;
+  if (!site_id) return res.status(400).json({ error: 'pick a site' });
+  const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [req.ctx.tenant_id]);
+  if (!t || !t.bagged_product_id) return res.status(400).json({ error: 'set the bagged product in Settings first' });
+  const qty = Number(b.opening_qty) || 0;
+  const asOf = b.as_of_date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  await qrun(
+    `INSERT INTO fg_opening (tenant_id,site_id,product_id,opening_qty,as_of_date,updated_by,updated_at) VALUES (?,?,?,?,?,?,?)
+     ON CONFLICT (tenant_id,site_id,product_id) DO UPDATE SET opening_qty=EXCLUDED.opening_qty, as_of_date=EXCLUDED.as_of_date, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at`,
+    [req.ctx.tenant_id, site_id, t.bagged_product_id, qty, asOf, req.user.id, nowS()]);
+  res.json({ opening_qty: qty, as_of_date: asOf });
 });
 
 router.post('/reports/:id/email', requireAuth, async (req, res) => {

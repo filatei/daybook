@@ -508,6 +508,21 @@ async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_uid ON chat_messages(tenant_id, client_uid) WHERE client_uid IS NOT NULL;
   `);
 
+  // Finished-goods opening stock (B/F) seed — anchors the running bag-stock
+  // balance to a start date so it isn't computed from all-time imported sales.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS fg_opening (
+      tenant_id   TEXT NOT NULL,
+      site_id     TEXT NOT NULL,
+      product_id  TEXT NOT NULL,
+      opening_qty DOUBLE PRECISION DEFAULT 0,
+      as_of_date  TEXT NOT NULL,          -- YYYY-MM-DD; flows counted from here
+      updated_by  TEXT,
+      updated_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      PRIMARY KEY (tenant_id, site_id, product_id)
+    );
+  `);
+
   // Compliance vault — government/regulator letters, licenses, certificates,
   // permits. Tracks issuer, reference, issue/expiry dates → expiry reminders.
   await pool.query(`

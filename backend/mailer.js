@@ -413,10 +413,14 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to, attach
       </table>
       ${s.bagReport ? `<div style="font-weight:800;margin:6px 0">Production — ${esc(s.bagReport.product || 'bags')}</div>
       <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
-        ${row('Opening', (s.bagReport.opening || 0).toLocaleString())}
-        ${row('Production', (s.bagReport.produced || 0).toLocaleString())}
+        ${row('Bags B/F (opening)', (s.bagReport.opening || 0).toLocaleString())}
+        ${row('Produced', (s.bagReport.produced || 0).toLocaleString())}
         ${row('Total', (s.bagReport.total || 0).toLocaleString(), true)}
-        ${row('Sales', (s.bagReport.sold || 0).toLocaleString())}
+        ${row('Less — Sales', (s.bagReport.sold || 0).toLocaleString())}
+        ${(s.bagReport.extra || 0) ? row('Less — Extra / bonus', (s.bagReport.extra).toLocaleString()) : ''}
+        ${(s.bagReport.staff || 0) ? row('Less — Staff water', (s.bagReport.staff).toLocaleString()) : ''}
+        ${(s.bagReport.incentive || 0) ? row('Less — Incentive', (s.bagReport.incentive).toLocaleString()) : ''}
+        ${(s.bagReport.leakage || 0) ? row('Less — Leakage', (s.bagReport.leakage).toLocaleString()) : ''}
         ${row('Available', (s.bagReport.available || 0).toLocaleString(), true)}
       </table>` : ''}
       ${dist ? `<div style="font-weight:800;margin:6px 0">Sales distribution</div>

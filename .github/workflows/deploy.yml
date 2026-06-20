@@ -60,7 +60,7 @@ jobs:
           username: ${{ secrets.LINODE_USER }}
           key: ${{ secrets.LINODE_SSH_KEY }}
           port: ${{ secrets.LINODE_SSH_PORT }}
-          source: "docker-compose.yml,infra/apache/daybook.torama.money.conf,infra/systemd/daybook.service,infra/systemd/daybook-mongo-tunnel.service,scripts/deploy.sh,scripts/server-setup.sh,scripts/remote-install.sh,scripts/bootstrap.sh,scripts/etl.sh"
+          source: "docker-compose.yml,infra/apache/daybook.torama.money.conf,infra/caddy/Caddyfile,infra/systemd/daybook.service,infra/systemd/daybook-mongo-tunnel.service,scripts/deploy.sh,scripts/server-setup.sh,scripts/remote-install.sh,scripts/bootstrap.sh,scripts/etl.sh"
           target: "/opt/daybook/backend"
 
       # The server's /opt/daybook/backend/.env is the single source of truth for

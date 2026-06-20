@@ -1,0 +1,42 @@
+# Daybook's own ingress. Cloudflare proxies daybook.torama.money to this Caddy
+# on :2083 (via a Cloudflare Origin Rule that sets the origin port), so Daybook
+# never touches the shared Apache. The Node app serves BOTH the PWA frontend and
+# the API (and a /ws realtime gateway) on port 8090 in the container.
+#
+# 2083 is one of Cloudflare's proxy-compatible HTTPS origin ports
+# (443, 2053, 2083, 2087, 2096, 8443).
+
+{
+	admin off
+	servers {
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+	}
+}
+
+daybook.torama.money:2083 {
+	tls /etc/caddy/origin/cert.pem /etc/caddy/origin/key.pem
+
+	encode gzip
+
+	# Allow large uploads (documents, receipts, spreadsheets) — matches the
+	# Apache LimitRequestBody 30 MiB.
+	request_body {
+		max_size 30MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# Caddy upgrades WebSockets (/ws) transparently, so one reverse_proxy covers
+	# both the PWA/API and the realtime gateway.
+	reverse_proxy daybook:8090 {
+		flush_interval -1
+		header_up X-Forwarded-Proto https
+		header_up Host {host}
+	}
+}

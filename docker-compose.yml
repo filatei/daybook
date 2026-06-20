@@ -59,9 +59,29 @@ services:
       timeout: 5s
       retries: 3
 
+  # Dedicated ingress — Cloudflare proxies daybook.torama.money here on :2083
+  # (Origin Rule sets the port), bypassing the shared Apache. See CLOUDFLARE-INGRESS.md.
+  caddy:
+    image: caddy:2-alpine
+    container_name: daybook-caddy
+    restart: always
+    depends_on:
+      - daybook
+    ports:
+      - "2083:2083"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/daybook/origin:/etc/caddy/origin:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - daybook
+
 volumes:
   pgdata:
   daybookdata:
+  caddy_data:
+  caddy_config:
 
 networks:
   daybook:

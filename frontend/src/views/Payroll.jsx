@@ -3,6 +3,13 @@ import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// "Kpansia B80 · Okutukutu B40" — the per-site split behind a worker's bag total.
+const siteSplitLabel = (bySite) => (bySite || []).map((s) => {
+  const parts = [];
+  if (s.loaded > 0) parts.push(`L${s.loaded}`);
+  if (s.bagged > 0) parts.push(`B${s.bagged}`);
+  return `${s.site_name} ${parts.join('/')}`;
+}).join(' · ');
 const ymd = (d) => d.toISOString().slice(0, 10);
 const eom = (y, m) => ymd(new Date(y, m, 0));
 const dl = async (path, name) => {
@@ -113,6 +120,9 @@ function RunTab({ sites, onSaved }) {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.full_name}</div>
                   <div style={{ fontSize: 11, color: 'var(--muted)' }}>{l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`} · {ngn(l.gross)}</div>
+                  {(l.by_site || []).length > 1 && (
+                    <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{siteSplitLabel(l.by_site)}</div>
+                  )}
                 </div>
                 <input type="number" className="input" style={{ padding: '6px 8px', textAlign: 'right' }} value={l.deduction} onChange={(e) => setDed(i, e.target.value)} title="Deduction" />
                 <div style={{ textAlign: 'right', fontWeight: 700 }}>{ngn(net(l))}</div>
@@ -209,8 +219,13 @@ function PayrollSection({ title, rows, qtyLabel }) {
       {rows.length === 0 ? <div style={{ padding: 14, fontSize: 13, color: 'var(--muted)' }}>None with production this period</div>
         : rows.map((l) => (
           <div key={l.staff_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
-            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8 }}>
-              {l.full_name}<span style={{ color: 'var(--muted)' }}> · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
+            <span style={{ minWidth: 0, paddingRight: 8 }}>
+              <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {l.full_name}<span style={{ color: 'var(--muted)' }}> · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
+              </span>
+              {(l.by_site || []).length > 1 && (
+                <span style={{ display: 'block', fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{siteSplitLabel(l.by_site)}</span>
+              )}
             </span>
             <strong>{ngn(l.commission)}</strong>
           </div>

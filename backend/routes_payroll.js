@@ -422,6 +422,8 @@ async function computeLines(tenant_id, from, to, site) {
   const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g FROM production
     WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
   const prodBy = {}; for (const p of prod) prodBy[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  // Per-site split behind each worker's total (where the bags were actually done).
+  const bySite = await siteSplit(tenant_id, from, to);
   // Outstanding (unsettled) advances up to the period end.
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id=? AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [tenant_id, to]);
@@ -439,8 +441,29 @@ async function computeLines(tenant_id, from, to, site) {
     else gross = days * (s.daily_rate || 0);   // daily wage
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
       days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
+      by_site: bySite[s.id] || [],
       advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
   }).filter((l) => l.gross > 0 || l.days_present > 0 || l.bags_loaded > 0 || l.bags_bagged > 0 || l.advance > 0);
+}
+
+// Per-worker, per-site production split for a period. Returns
+// { [staff_id]: [{ site_id, site_name, loaded, bagged }, ...] }, only sites with
+// nonzero bags, ordered by name. Used to show the breakdown behind each total.
+async function siteSplit(tenant_id, from, to) {
+  const rows = await qall(`SELECT p.staff_id, p.site_id, COALESCE(si.name,'—') site_name,
+      COALESCE(SUM(p.bags_loaded),0) loaded, COALESCE(SUM(p.bags_bagged),0) bagged
+    FROM production p LEFT JOIN sites si ON si.id = p.site_id
+    WHERE p.tenant_id=? AND p.work_date BETWEEN ? AND ?
+    GROUP BY p.staff_id, p.site_id, si.name
+    HAVING COALESCE(SUM(p.bags_loaded),0) > 0 OR COALESCE(SUM(p.bags_bagged),0) > 0
+    ORDER BY si.name`, [tenant_id, from, to]);
+  const by = {};
+  for (const r of rows) {
+    (by[r.staff_id] = by[r.staff_id] || []).push({
+      site_id: r.site_id, site_name: r.site_name, loaded: Number(r.loaded), bagged: Number(r.bagged),
+    });
+  }
+  return by;
 }
 
 // ── Compute a payroll for a period (preview, not saved) — Snr Accountant+ ───────
@@ -573,6 +596,7 @@ async function computePieceLines(tenant_id, from, to, site) {
   const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
     FROM production WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
   const by = {}; for (const p of prod) by[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  const bySite = await siteSplit(tenant_id, from, to);
   const lines = [];
   for (const s of staff) {
     const pb = by[s.id] || { l: 0, g: 0 };
@@ -587,6 +611,7 @@ async function computePieceLines(tenant_id, from, to, site) {
       staff_id: s.id, ext_id: s.ext_people_id || '', ...nm, full_name: s.full_name,
       location: s.site_name || '', account: [s.bank_name, s.bank_account].filter(Boolean).join('-'),
       bags_loaded: pb.l, bags_bagged: pb.g, qty: designation === 'LOADER' ? pb.l : pb.g,
+      by_site: bySite[s.id] || [],
       commission, designation,
     });
   }

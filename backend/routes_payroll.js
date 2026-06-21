@@ -336,41 +336,76 @@ router.patch('/pay-config/:id', requireAuth, async (req, res) => {
 });
 
 // ── Daily production entry (bags loaded / bagged) — Supervisor (Site Manager+) ──
+// Production is recorded PER WORK-SITE: a worker who bags/loads at more than one
+// site in a day gets one row per site, credited to the site where the work was
+// actually done. The entry screen is therefore scoped to a single site.
+function recordingSite(c, req) {
+  // Site-bound users always record for their own site; HQ/Admin pick one.
+  return siteBound(c) ? c.site_id : (req.query.site || req.body?.site_id || null);
+}
 router.get('/production', requireAuth, async (req, res) => {
   const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
   const date = (req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
-  const where = ['s.tenant_id=?', "s.status='ACTIVE'"], args = [date, c.tenant_id];
-  if (siteBound(c)) { where.push('s.site_id=?'); args.push(c.site_id); }
-  else if (req.query.site) { where.push('s.site_id=?'); args.push(req.query.site); }
-  res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.staff_type, s.site_id,
-    COALESCE(p.bags_loaded,0) bags_loaded, COALESCE(p.bags_bagged,0) bags_bagged
-    FROM staff s LEFT JOIN production p ON p.staff_id=s.id AND p.work_date=?
-    WHERE ${where.join(' AND ')} ORDER BY s.full_name`, args));
+  const siteId = recordingSite(c, req);
+  // Per-site entry needs a site. HQ users without one selected get an empty list
+  // (the UI prompts them to pick a site first).
+  if (!siteId) return res.json([]);
+  // Show the site's own roster PLUS any visitor who already has production logged
+  // here today. Bags shown are this site's figures only.
+  res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.staff_type,
+      s.site_id primary_site_id, ps.name primary_site_name,
+      (s.site_id = ?) AS is_home,
+      COALESCE(p.bags_loaded,0) bags_loaded, COALESCE(p.bags_bagged,0) bags_bagged
+    FROM staff s
+    LEFT JOIN sites ps ON ps.id = s.site_id
+    LEFT JOIN production p ON p.staff_id = s.id AND p.work_date = ? AND p.site_id = ?
+    WHERE s.tenant_id = ? AND s.status='ACTIVE' AND (s.site_id = ? OR p.id IS NOT NULL)
+    ORDER BY (s.site_id = ?) DESC, s.full_name`,
+    [siteId, date, siteId, c.tenant_id, siteId, siteId]));
+});
+// Search active staff (any site) to pull a visiting worker into a site's sheet.
+router.get('/production/staff-search', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
+  const q = `%${(req.query.q || '').trim().toLowerCase()}%`;
+  res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.staff_type,
+      s.site_id primary_site_id, ps.name primary_site_name
+    FROM staff s LEFT JOIN sites ps ON ps.id = s.site_id
+    WHERE s.tenant_id = ? AND s.status='ACTIVE' AND LOWER(s.full_name) LIKE ?
+    ORDER BY s.full_name LIMIT 20`, [c.tenant_id, q]));
 });
 router.post('/production', requireAuth, async (req, res) => {
   const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
   const b = req.body || {};
   const st = await qone('SELECT * FROM staff WHERE id=?', [b.staff_id]);
   if (!st || st.tenant_id !== c.tenant_id) return res.status(400).json({ error: 'invalid staff' });
-  if (siteBound(c) && st.site_id !== c.site_id) return res.status(403).json({ error: 'forbidden' });
+  // Work-site: site-bound users record at their own site; HQ names the site.
+  const siteId = siteBound(c) ? c.site_id : (b.site_id || null);
+  if (!siteId) return res.status(400).json({ error: 'site_id (work location) required' });
+  const site = await qone('SELECT id FROM sites WHERE id=? AND tenant_id=?', [siteId, c.tenant_id]);
+  if (!site) return res.status(400).json({ error: 'invalid site' });
   const date = (b.work_date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   const loaded = +b.bags_loaded || 0, bagged = +b.bags_bagged || 0;
   await qrun(`INSERT INTO production (id,tenant_id,site_id,staff_id,work_date,bags_loaded,bags_bagged,recorded_by,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?)
-    ON CONFLICT (tenant_id,staff_id,work_date) DO UPDATE SET
+    ON CONFLICT (tenant_id,staff_id,work_date,site_id) DO UPDATE SET
       bags_loaded=EXCLUDED.bags_loaded, bags_bagged=EXCLUDED.bags_bagged, recorded_by=EXCLUDED.recorded_by, updated_at=EXCLUDED.updated_at`,
-    [uuid(), c.tenant_id, st.site_id, st.id, date, loaded, bagged, req.user.id, nowS()]);
+    [uuid(), c.tenant_id, siteId, st.id, date, loaded, bagged, req.user.id, nowS()]);
 
   // A bagger/loader who bagged/loaded anything is counted present for the day.
-  // Auto-create their attendance clock-in (without clobbering a real one); remove
-  // the auto record if the counts go back to zero.
+  // Auto-create their attendance clock-in (without clobbering a real one); only
+  // remove the auto record if they have NO production at ANY site that day.
   if (loaded + bagged > 0) {
     await qrun(`INSERT INTO attendance (id,tenant_id,site_id,staff_id,work_date,clock_in,source,captured_by)
       VALUES (?,?,?,?,?,?, 'PRODUCTION', ?) ON CONFLICT (tenant_id,staff_id,work_date) DO NOTHING`,
-      [uuid(), c.tenant_id, st.site_id, st.id, date, nowS(), req.user.id]);
+      [uuid(), c.tenant_id, siteId, st.id, date, nowS(), req.user.id]);
   } else {
-    await qrun("DELETE FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=? AND source='PRODUCTION'",
+    const anyProd = await qone(
+      'SELECT 1 FROM production WHERE tenant_id=? AND staff_id=? AND work_date=? AND (bags_loaded>0 OR bags_bagged>0) LIMIT 1',
       [c.tenant_id, st.id, date]);
+    if (!anyProd) {
+      await qrun("DELETE FROM attendance WHERE tenant_id=? AND staff_id=? AND work_date=? AND source='PRODUCTION'",
+        [c.tenant_id, st.id, date]);
+    }
   }
   res.json({ ok: true });
 });

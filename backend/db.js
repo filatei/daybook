@@ -1211,6 +1211,24 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_fg_prod ON fg_production(tenant_id, product_id);
   `);
+
+  // ── Phase 11: per-site production. A bagger/loader may work at more than one
+  // site in a day; each site's bagged/loaded count is recorded against the site
+  // where the work actually happened (legitimate site credit). Payroll still
+  // sums a worker's production across all sites. This replaces the old
+  // one-row-per-worker-per-day model (which forced everything onto the worker's
+  // primary site) with one row per worker PER SITE per day.
+  await pool.query(
+    `ALTER TABLE production DROP CONSTRAINT IF EXISTS production_tenant_id_staff_id_work_date_key`,
+  );
+  await pool.query(
+    `UPDATE production SET site_id = (SELECT site_id FROM staff WHERE staff.id = production.staff_id)
+       WHERE site_id IS NULL`,
+  );
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_production_staff_site_day
+       ON production(tenant_id, staff_id, work_date, site_id)`,
+  );
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };

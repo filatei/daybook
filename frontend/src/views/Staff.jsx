@@ -399,27 +399,48 @@ function AttendanceReport({ siteFilter }) {
 }
 
 // ── Daily production entry (bags loaded / bagged) ─────────────────────────────
-function ProductionGrid({ siteFilter }) {
+function ProductionGrid({ siteFilter, sites = [], siteBound = false }) {
   const { tenant, toast } = useStore();
   const [date, setDate] = useState(today());
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState('');
   const [showAll, setShowAll] = useState(false);   // default: baggers & loaders only
+  const [addQ, setAddQ] = useState('');            // visitor-search box
+  const [addResults, setAddResults] = useState([]);
+
+  // HQ/Admin must pick a site before recording (production is now per work-site).
+  const needSite = !siteBound && !siteFilter;
+  const siteName = siteFilter ? (sites.find((s) => s.id === siteFilter)?.name || 'this site') : 'your site';
 
   const load = useCallback(async () => {
+    if (needSite) { setRows([]); setLoading(false); return; }
     setLoading(true);
     try { const p = new URLSearchParams({ date }); if (siteFilter) p.set('site', siteFilter); setRows(await api(scoped(`/payroll/production?${p}`))); }
     catch { setRows([]); }
     setLoading(false);
-  }, [tenant, date, siteFilter]);
+  }, [tenant, date, siteFilter, needSite]);
   useEffect(() => { load(); }, [load]);
 
   const setVal = (id, k, v) => setRows((p) => p.map((r) => (r.staff_id === id ? { ...r, [k]: v } : r)));
   const save = async (r) => {
-    try { await api(scoped('/payroll/production'), { method: 'POST', body: { staff_id: r.staff_id, work_date: date, bags_loaded: +r.bags_loaded || 0, bags_bagged: +r.bags_bagged || 0 } }); }
+    try { await api(scoped('/payroll/production'), { method: 'POST', body: { staff_id: r.staff_id, work_date: date, bags_loaded: +r.bags_loaded || 0, bags_bagged: +r.bags_bagged || 0, site_id: siteFilter || undefined } }); }
     catch (e) { toast(e.message, 'err'); }
   };
+
+  // Visitor search — pull a worker from another site into this site's sheet.
+  const searchAdd = useCallback(async (text) => {
+    setAddQ(text);
+    if (!text.trim()) { setAddResults([]); return; }
+    try { const p = new URLSearchParams({ q: text }); if (siteFilter) p.set('site', siteFilter); setAddResults(await api(scoped(`/payroll/production/staff-search?${p}`))); }
+    catch { setAddResults([]); }
+  }, [siteFilter]);
+  const addWorker = (s) => {
+    setAddQ(''); setAddResults([]);
+    if (rows.some((r) => r.staff_id === s.staff_id)) { toast(`${s.full_name} is already listed`, 'err'); return; }
+    setRows((p) => [...p, { ...s, is_home: false, bags_loaded: 0, bags_bagged: 0 }]);
+  };
+
   // Totals reflect all production contributors (baggers & loaders), not the filter.
   const totL = rows.reduce((s, r) => s + (+r.bags_loaded || 0), 0);
   const totB = rows.reduce((s, r) => s + (+r.bags_bagged || 0), 0);
@@ -427,16 +448,39 @@ function ProductionGrid({ siteFilter }) {
   const term = q.trim().toLowerCase();
   const shown = rows.filter((r) => (showAll || isPiece(r)) && (!term || (r.full_name || '').toLowerCase().includes(term)));
 
+  if (needSite) {
+    return (
+      <div className="empty"><div className="ic">🏤</div>
+        <p>Pick a site above to record production.</p>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Each site&apos;s bagged/loaded counts are credited to that site.</p>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <input type="date" className="input" style={{ flex: '0 1 150px' }} value={date} max={today()} onChange={(e) => setDate(e.target.value)} />
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Loaded {totL} · Bagged {totB}</span>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Recording at <b>{siteName}</b> · Loaded {totL} · Bagged {totB}</span>
       </div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <input className="input" style={{ flex: '1 1 160px' }} placeholder="🔍 Search staff by name" value={q} onChange={(e) => setQ(e.target.value)} />
         <button className={`btn btn-ghost btn-sm${!showAll ? ' on' : ''}`} style={{ width: 'auto', padding: '0 12px' }} onClick={() => setShowAll(false)}>Baggers & loaders</button>
         <button className={`btn btn-ghost btn-sm${showAll ? ' on' : ''}`} style={{ width: 'auto', padding: '0 12px' }} onClick={() => setShowAll(true)}>All staff</button>
+      </div>
+      {/* Add a visiting worker (primary at another site) who worked here today. */}
+      <div style={{ position: 'relative', marginBottom: 10 }}>
+        <input className="input" style={{ width: '100%' }} placeholder="➕ Add a worker from another site (covering this site today)" value={addQ} onChange={(e) => searchAdd(e.target.value)} />
+        {addResults.length > 0 && (
+          <div className="card" style={{ position: 'absolute', zIndex: 20, left: 0, right: 0, marginTop: 4, padding: 4, maxHeight: 220, overflowY: 'auto' }}>
+            {addResults.map((s) => (
+              <div key={s.staff_id} onClick={() => addWorker(s)} style={{ padding: '7px 8px', cursor: 'pointer', borderBottom: '1px solid var(--line)' }}>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{s.full_name}</div>
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>{(s.staff_type && s.staff_type !== 'REGULAR' ? s.staff_type.toLowerCase() : (s.role_title || 'staff'))} · primary: {s.primary_site_name || '—'}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px', gap: 6, fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', padding: '0 2px 4px' }}>
         <span>Staff</span><span style={{ textAlign: 'center' }}>Loaded</span><span style={{ textAlign: 'center' }}>Bagged</span>
@@ -449,7 +493,10 @@ function ProductionGrid({ siteFilter }) {
             <div key={r.staff_id} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px', gap: 6, alignItems: 'center', padding: '4px 0', borderBottom: '1px solid var(--line)' }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.full_name}</div>
-                <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.staff_type && r.staff_type !== 'REGULAR' ? r.staff_type.toLowerCase() : (r.role_title || 'staff')}</div>
+                <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+                  {r.staff_type && r.staff_type !== 'REGULAR' ? r.staff_type.toLowerCase() : (r.role_title || 'staff')}
+                  {r.is_home === false && <span style={{ color: 'var(--accent, #b26a00)' }}> · visiting from {r.primary_site_name || 'another site'}</span>}
+                </div>
               </div>
               <input className="input" type="number" inputMode="numeric" style={{ padding: '7px 6px', textAlign: 'center' }} value={r.bags_loaded}
                 onChange={(e) => setVal(r.staff_id, 'bags_loaded', e.target.value)} onBlur={() => save(r)} onFocus={(e) => e.target.select()} />
@@ -459,7 +506,7 @@ function ProductionGrid({ siteFilter }) {
           ))}
         </div>
       )}
-      <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Counts save as you leave each field. These feed payroll for loaders &amp; baggers.</p>
+      <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Counts save as you leave each field, credited to <b>{siteName}</b>. A worker can be recorded at more than one site in a day; payroll totals all their bags across sites.</p>
     </div>
   );
 }
@@ -543,7 +590,7 @@ export default function Staff() {
         </select>
       )}
 
-      {mode === 'badge' ? <BadgeClock /> : mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} /> : (
+      {mode === 'badge' ? <BadgeClock /> : mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} sites={sites} siteBound={siteBound} /> : (
       <>
       <div className="stat-grid" style={{ marginBottom: 14 }}>
         <button className={`stat${presentOnly ? '' : ' accent'}`} onClick={() => setPresentOnly((v) => !v)}

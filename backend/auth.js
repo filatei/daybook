@@ -20,7 +20,9 @@ const { qone, qall } = require('./db');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
-const TOKEN_TTL = '12h';
+// Sessions persist until the user explicitly signs out (logout clears the
+// cookie server-side). Long-lived by default; override with SESSION_TTL.
+const TOKEN_TTL = process.env.SESSION_TTL || '365d';
 const _gclient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // ── Google ID token verification ──────────────────────────────────────────────

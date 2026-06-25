@@ -189,7 +189,8 @@ router.delete('/testplan/:id', requireAuth, async (req, res) => {
 async function loginResponse(res, req, user) {
   await qrun('UPDATE users SET last_login=? WHERE id=?', [nowS(), user.id]);
   const token = signSession(user);
-  res.cookie('daybook_token', token, { httpOnly: true, sameSite: 'Lax', secure: req.secure, maxAge: 12 * 3600 * 1000 });
+  // Persist the session until explicit logout (cookie cleared by /auth/logout).
+  res.cookie('daybook_token', token, { httpOnly: true, sameSite: 'Lax', secure: req.secure, maxAge: 365 * 24 * 3600 * 1000 });
   return res.json({ token, user: publicUser(user), tenants: await accessibleTenants(user) });
 }
 

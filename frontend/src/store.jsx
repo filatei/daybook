@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
-import { setToken, setActiveTenant } from './api.js';
+import { setToken, setActiveTenant, api } from './api.js';
 
 const Ctx = createContext(null);
 
@@ -136,6 +136,9 @@ export function StoreProvider({ children }) {
   }, []);
 
   const logout = useCallback(() => {
+    // Clear the httpOnly session cookie server-side too — otherwise a long-lived
+    // cookie would silently re-authenticate on the next reload.
+    api('/auth/logout', { method: 'POST' }).catch(() => {});
     localStorage.removeItem('daybook_token');
     localStorage.removeItem('daybook_tenant');
     setToken(null);

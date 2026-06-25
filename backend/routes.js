@@ -850,6 +850,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
   // grand total, and a stock compilation (packing bags + rolls) from each site's
   // day-ops. Addresses "total stocks used & available" and "bags sold & available".
   let bagBySite = null, bagTotals = null, stockTotals = null;
+  let gensBySite = null, roTotals = null, incidentsBySite = null;
   if (wantAll) {
     bagBySite = [];
     bagTotals = { product: null, opening: 0, produced: 0, total: 0, sold: 0, available: 0 };
@@ -861,9 +862,12 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       bagTotals.opening += br.opening; bagTotals.produced += br.produced;
       bagTotals.total += br.total; bagTotals.sold += br.sold; bagTotals.available += br.available;
     }
-    const oRows = await qall('SELECT data FROM ops_daily WHERE tenant_id=? AND ops_date=?', [ctx.tenant_id, date]);
+    const oRows = await qall('SELECT o.data, s.name site_name FROM ops_daily o JOIN sites s ON s.id=o.site_id WHERE o.tenant_id=? AND o.ops_date=? ORDER BY s.name', [ctx.tenant_id, date]);
     if (oRows.length) {
       stockTotals = { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0, rolls_used_count: 0, rolls_available_count: 0 };
+      gensBySite = [];                 // generator status grouped by site
+      roTotals = { pure: 0, waste: 0 };
+      incidentsBySite = [];            // [{ site, text }] for the combined incidence list
       for (const o of oRows) {
         const dd = J(o.data, {}) || {}; const pk = dd.packing || {}, rl = dd.rolls || {};
         stockTotals.packing_available += Number(pk.available) || 0;
@@ -873,6 +877,12 @@ async function buildGeneratedReport(ctx, date, siteArg) {
         stockTotals.rolls_used_count += Number(rl.used_count) || 0;
         stockTotals.rolls_available_count += Number(rl.available_count) || 0;
         stockTotals.sites++;
+        const gens = Array.isArray(dd.generators) ? dd.generators.filter((g) => g && g.name) : [];
+        if (gens.length) gensBySite.push({ site: o.site_name, gens });
+        const ros = Array.isArray(dd.ro) ? dd.ro : [];
+        for (const r of ros) { roTotals.pure += Number(r.pure) || 0; roTotals.waste += Number(r.waste) || 0; }
+        const inc = (dd.incident || '').trim();
+        if (inc) incidentsBySite.push({ site: o.site_name, text: inc });
       }
     }
   }
@@ -887,6 +897,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
       bagReport, ops, bagBySite, bagTotals, stockTotals,
+      gensBySite, roTotals, incidentsBySite,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
     // Single-site reports are saveable/submittable; the all-sites roll-up is view/email only.
@@ -1035,6 +1046,77 @@ router.put('/diesel', requireAuth, needTenant('SECRETARY'), async (req, res) => 
 router.delete('/diesel/:id', requireAuth, needTenant('SECRETARY'), async (req, res) => {
   await qrun('DELETE FROM diesel_logs WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   res.json({ ok: true });
+});
+
+// ── CONSOLIDATED end-of-day report (Snr Accountant / GM / Admin only) ────────
+// Auto-aggregates the all-sites roll-up + that day's diesel, and merges any
+// manually entered/overridden figures (imprest balance, NEPA alarm, etc.).
+function lagosToday() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+}
+async function consolidatedPayload(ctx, date) {
+  const auto = await buildGeneratedReport(ctx, date, 'ALL');
+  const dieselRow = await qone(
+    'SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(amount),0) amount FROM diesel_logs WHERE tenant_id=? AND log_date=?',
+    [ctx.tenant_id, date]);
+  const saved = await qone('SELECT * FROM consolidated_reports WHERE tenant_id=? AND report_date=?', [ctx.tenant_id, date]);
+  const manual = saved ? J(saved.manual, {}) : {};
+  return {
+    report_date: date,
+    auto: auto.error ? null : auto,
+    diesel: { litres: Number(dieselRow.litres) || 0, amount: Number(dieselRow.amount) || 0 },
+    manual,
+    status: saved ? saved.status : 'DRAFT',
+    emailed_at: saved ? saved.emailed_at : null,
+  };
+}
+
+router.get('/reports/consolidated', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const date = req.query.date || lagosToday();
+  res.json(await consolidatedPayload(req.ctx, date));
+});
+
+router.put('/reports/consolidated', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || lagosToday();
+  const manual = (b.manual && typeof b.manual === 'object') ? b.manual : {};
+  const status = b.status === 'FINAL' ? 'FINAL' : 'DRAFT';
+  await qrun(
+    `INSERT INTO consolidated_reports (id,tenant_id,report_date,manual,status,created_by,updated_at)
+     VALUES (?,?,?,?,?,?,?)
+     ON CONFLICT (tenant_id,report_date) DO UPDATE SET
+       manual=EXCLUDED.manual, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at`,
+    [uuid(), req.ctx.tenant_id, date, JSON.stringify(manual), status, req.user.id, nowS()]);
+  res.json({ ok: true, report_date: date, status });
+});
+
+router.post('/reports/consolidated/email', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || lagosToday();
+  const payload = await consolidatedPayload(req.ctx, date);
+  if (!payload.auto) return res.status(400).json({ error: 'nothing to report for this date' });
+  const tenant = await tenantById(req.ctx.tenant_id);
+  const to = reportRecipients({ tenant, site: null, senderEmail: req.user.email });
+  // Fold the manual financial lines + combined incidents into the email's notes
+  // block (reuses the all-sites generated-report template).
+  const m = payload.manual || {};
+  const ngn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG');
+  const lines = [];
+  if (m.imprest_balance != null && m.imprest_balance !== '') lines.push(`Imprest balance: ${ngn(m.imprest_balance)}`);
+  if (m.nepa_alarm != null && m.nepa_alarm !== '') lines.push(`NEPA alarm: ${ngn(m.nepa_alarm)}`);
+  if (payload.diesel.amount) lines.push(`Diesel (entered): ${payload.diesel.litres} L · ${ngn(payload.diesel.amount)}`);
+  if (m.notes) lines.push('', String(m.notes));
+  const incidents = [(b.incidents || '').trim(), lines.join('\n')].filter(Boolean).join('\n\n');
+  try {
+    const sent = await sendGeneratedReport({ tenant, date, report: payload.auto, incidents, to, attachments: [] });
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, to.join(','), sent.subject, sent.queued ? 'QUEUED' : 'SENT']).catch(() => {});
+    await qrun('UPDATE consolidated_reports SET emailed_at=?, updated_at=? WHERE tenant_id=? AND report_date=?',
+      [nowS(), nowS(), req.ctx.tenant_id, date]).catch(() => {});
+    res.json({ ok: true, to, queued: !!sent.queued });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'email failed' });
+  }
 });
 
 // Finished-goods opening stock (B/F) seed — set ONCE per site so the bag running

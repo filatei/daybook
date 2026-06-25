@@ -12,6 +12,7 @@ export default function More() {
   const isMgr = role && atLeast(role, 'SITE_MANAGER');          // Manager+
   const isAcct = role && atLeast(role, 'ACCOUNTANT');           // Accountant+
   const isSec = role && atLeast(role, 'SECRETARY');             // Secretary+
+  const isSnr = role && atLeast(role, 'SNR_ACCOUNTANT');        // Snr Accountant / GM / Admin
 
   const items = [
     { id: 'messages',   icon: '✉️', label: 'Site Messages', desc: role && atLeast(role, 'ADMIN') ? 'Private messages from site users' : 'Send a private note to the admin', show: !!active },
@@ -26,6 +27,7 @@ export default function More() {
     { id: 'badges',     icon: '🪪', label: 'Staff Badges', desc: 'Design & print scannable ID badges',        show: isSec },
     { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',       show: isSec },
     { id: 'diesel',     icon: '⛽', label: 'Diesel',     desc: 'Daily diesel per site — litres, rate & amount', show: isSec },
+    { id: 'consolidated', icon: '🧾', label: 'Consolidated report', desc: 'All-sites end-of-day total — auto + manual, email', show: isSnr },
     { id: 'terminals',  icon: '💳', label: 'POS Terminals', desc: 'Banks & POS machines for card sales',     show: isMgr },
     { id: 'products',   icon: '🛒', label: 'Products',    desc: 'Catalogue & prices used at the till',       show: isMgr },
   ].filter((i) => i.show);

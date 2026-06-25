@@ -812,6 +812,22 @@ async function migrate() {
       UNIQUE(tenant_id, site_id, log_date)
     );
 
+    -- CONSOLIDATED end-of-day report — the Snr Accountant's all-sites total.
+    -- Auto-aggregated figures are recomputed on read; the manual column holds
+    -- hand-entered/overridden values (imprest balance, NEPA alarm, other lines).
+    CREATE TABLE IF NOT EXISTS consolidated_reports (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      report_date TEXT NOT NULL,
+      manual      TEXT,
+      status      TEXT DEFAULT 'DRAFT',
+      created_by  TEXT,
+      emailed_at  BIGINT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      updated_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      UNIQUE(tenant_id, report_date)
+    );
+
     -- Daybook test-plan submissions (from /testplan.html) so results are viewable
     -- in-app / at any site, not just emailed.
     CREATE TABLE IF NOT EXISTS testplan_results (

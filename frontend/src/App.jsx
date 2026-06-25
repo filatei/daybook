@@ -23,6 +23,7 @@ import More from './views/More.jsx';
 import Payroll from './views/Payroll.jsx';
 import Generators from './views/Generators.jsx';
 import Diesel from './views/Diesel.jsx';
+import Consolidated from './views/Consolidated.jsx';
 import Terminals from './views/Terminals.jsx';
 import Products from './views/Products.jsx';
 import SiteMessages from './views/SiteMessages.jsx';
@@ -133,6 +134,7 @@ function Inner() {
         {tab === 'payroll'    && <Payroll />}
         {tab === 'generators' && <Generators />}
         {tab === 'diesel'     && <Diesel />}
+        {tab === 'consolidated' && <Consolidated />}
         {tab === 'terminals'  && <Terminals />}
         {tab === 'products'   && <Products />}
         {tab === 'messages'   && <SiteMessages />}

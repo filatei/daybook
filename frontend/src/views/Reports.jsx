@@ -275,7 +275,10 @@ function BagReportCard({ bagReport: r, siteId }) {
 
 // Rich read-only body of a generated/saved daily report — shared by the
 // Generate modal and the archive detail view so they always render identically.
-function GeneratedReportBody({ gen }) {
+function GeneratedReportBody({ gen, ov = null }) {
+  // When the user is correcting stock totals, show their live values.
+  const ovPacking = ov && ov.packing_available !== '' ? Number(ov.packing_available) : null;
+  const ovRollsKg = ov && ov.rolls_available_kg !== '' ? Number(ov.rolls_available_kg) : null;
   const s = gen?.summary;
   if (!gen || !s) return null;
   return (
@@ -345,7 +348,7 @@ function GeneratedReportBody({ gen }) {
           </div>
           {gen.summary.stockTotals && (
             <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 6 }}>
-              Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {(gen.summary.stockTotals.packing_available || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg) · avail {(gen.summary.stockTotals.rolls_available_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_available_kg || 0).toLocaleString()}kg)
+              Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {((ovPacking != null ? ovPacking : gen.summary.stockTotals.packing_available) || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg) · avail {(gen.summary.stockTotals.rolls_available_count || 0).toLocaleString()} ({((ovRollsKg != null ? ovRollsKg : gen.summary.stockTotals.rolls_available_kg) || 0).toLocaleString()}kg)
             </div>
           )}
         </div>
@@ -551,13 +554,23 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
   const [incidents, setIncidents] = useState('');
   const [saving, setSaving] = useState(false);
   const [emailing, setEmailing] = useState(false);
+  // Manual corrections for the two stock figures that can't be auto-derived.
+  const [ov, setOv] = useState({ packing_available: '', rolls_available_kg: '' });
 
   const generate = async () => {
     setLoading(true); setGen(null);
     try {
       const qs = new URLSearchParams({ date });
       if (!siteBound && siteId) qs.set('site', siteId);
-      setGen(await api(scoped(`/reports/generate?${qs}`)));
+      const g = await api(scoped(`/reports/generate?${qs}`));
+      setGen(g);
+      const st = g?.summary?.stockTotals;
+      if (g?.scope === 'ALL') {
+        setOv({
+          packing_available: st?.packing_available ?? '',
+          rolls_available_kg: st?.rolls_available_kg ?? '',
+        });
+      }
     } catch (e) { toast(e.message || 'Could not generate', 'err'); }
     setLoading(false);
   };
@@ -572,6 +585,10 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
     if (emailing) return;   // ignore repeat taps — send exactly once
     setEmailing(true);
     try {
+      // Auto-save the manual stock corrections first so the emailed report uses them.
+      if (gen?.scope === 'ALL') {
+        await api(scoped('/reports/stock-override'), { method: 'PUT', body: { date, packing_available: ov.packing_available, rolls_available_kg: ov.rolls_available_kg } }).catch(() => {});
+      }
       const r = await api(scoped('/reports/generate/email'), { method: 'POST', body: { date, site: siteId, incidents: incidents.trim() } });
       const who = (r.to || []).join(', ');
       if (r.queued) toast(`Report queued — sending shortly to ${who}`, 'info');
@@ -621,7 +638,26 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
 
         {gen && s && (
           <>
-            <GeneratedReportBody gen={gen} />
+            <GeneratedReportBody gen={gen} ov={gen.scope === 'ALL' ? ov : null} />
+
+            {gen.scope === 'ALL' && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Correct stock totals</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>The auto figures below can be off — enter the real totals; they’re saved and used in the email.</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <label className="fl">Total available packing bags</label>
+                    <input type="number" inputMode="decimal" className="input" value={ov.packing_available}
+                      onChange={(e) => setOv((p) => ({ ...p, packing_available: e.target.value }))} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label className="fl">Total available rolls (kg)</label>
+                    <input type="number" inputMode="decimal" className="input" value={ov.rolls_available_kg}
+                      onChange={(e) => setOv((p) => ({ ...p, rolls_available_kg: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+            )}
 
             <label className="fl">Incidents / notes</label>
             <textarea className="input" rows={3} value={incidents} onChange={(e) => setIncidents(e.target.value)}

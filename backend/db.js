@@ -828,6 +828,18 @@ async function migrate() {
       UNIQUE(tenant_id, report_date)
     );
 
+    -- Manual corrections for the all-sites generated report's stock totals that
+    -- can't be derived reliably (total available packing bags & rolls in kg).
+    CREATE TABLE IF NOT EXISTS daily_stock_overrides (
+      tenant_id          TEXT NOT NULL,
+      report_date        TEXT NOT NULL,
+      packing_available  DOUBLE PRECISION,
+      rolls_available_kg DOUBLE PRECISION,
+      updated_by         TEXT,
+      updated_at         BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      PRIMARY KEY (tenant_id, report_date)
+    );
+
     -- Daybook test-plan submissions (from /testplan.html) so results are viewable
     -- in-app / at any site, not just emailed.
     CREATE TABLE IF NOT EXISTS testplan_results (

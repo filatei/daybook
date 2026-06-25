@@ -891,6 +891,15 @@ async function buildGeneratedReport(ctx, date, siteArg) {
         if (inc) incidentsBySite.push({ site: o.site_name, text: inc });
       }
     }
+    // Apply the accountant's manual corrections for the two figures that can't be
+    // derived reliably (total available packing bags & rolls in kg).
+    const ov = await qone('SELECT packing_available, rolls_available_kg FROM daily_stock_overrides WHERE tenant_id=? AND report_date=?', [ctx.tenant_id, date]);
+    if (ov && (ov.packing_available != null || ov.rolls_available_kg != null)) {
+      stockTotals = stockTotals || { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0, rolls_used_count: 0, rolls_available_count: 0 };
+      if (ov.packing_available != null) stockTotals.packing_available = Number(ov.packing_available);
+      if (ov.rolls_available_kg != null) stockTotals.rolls_available_kg = Number(ov.rolls_available_kg);
+      stockTotals.overridden = true;
+    }
   }
 
   return {
@@ -921,6 +930,22 @@ router.get('/reports/generate', requireAuth, needTenant('SECRETARY'), async (req
   const out = await buildGeneratedReport(req.ctx, date, req.query.site);
   if (out.error) return res.status(400).json({ error: out.error });
   res.json(out);
+});
+
+// Save the manual all-sites stock corrections (total available packing bags &
+// rolls kg) so the generated report + email use them. Auto-saved before emailing.
+router.put('/reports/stock-override', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const toNum = (v) => (v === '' || v == null ? null : Number(v));
+  await qrun(
+    `INSERT INTO daily_stock_overrides (tenant_id,report_date,packing_available,rolls_available_kg,updated_by,updated_at)
+     VALUES (?,?,?,?,?,?)
+     ON CONFLICT (tenant_id,report_date) DO UPDATE SET
+       packing_available=EXCLUDED.packing_available, rolls_available_kg=EXCLUDED.rolls_available_kg,
+       updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at`,
+    [req.ctx.tenant_id, date, toNum(b.packing_available), toNum(b.rolls_available_kg), req.user.id, nowS()]);
+  res.json({ ok: true, report_date: date });
 });
 
 // Email the generated report (single site or the all-sites roll-up) to the

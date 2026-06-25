@@ -739,8 +739,13 @@ async function siteProdExp(ctx, site, date) {
   const totalLoaded = loaders.reduce((a, r) => a + r.loaded, 0);
   const totalBagged = baggers.reduce((a, r) => a + r.bagged, 0);
   const exp = await qone("SELECT COALESCE(SUM(amount),0) total, COALESCE(SUM(CASE WHEN category='DIESEL' THEN amount ELSE 0 END),0) diesel FROM expenses WHERE tenant_id=? AND site_id=? AND expense_date=?", [ctx.tenant_id, site.id, date]);
-  const diesel = Number(exp.diesel) || 0;
-  return { loaders, baggers, totalLoaded, totalBagged, diesel, expenses: (Number(exp.total) || 0) - diesel };
+  const expDiesel = Number(exp.diesel) || 0;
+  // Diesel now lives in diesel_logs (one entry per site/day). Prefer it; fall
+  // back to any legacy DIESEL-category expense when no diesel_logs row exists.
+  const dz = await qone('SELECT COALESCE(SUM(amount),0) amount FROM diesel_logs WHERE tenant_id=? AND site_id=? AND log_date=?', [ctx.tenant_id, site.id, date]);
+  const diesel = Number(dz.amount) > 0 ? Number(dz.amount) : expDiesel;
+  // expenses always excludes the DIESEL category so diesel is never double-counted.
+  return { loaders, baggers, totalLoaded, totalBagged, diesel, expenses: (Number(exp.total) || 0) - expDiesel };
 }
 
 // Derive the finished-bag day report for one site/day from production + FG logs

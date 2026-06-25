@@ -9,9 +9,12 @@ const EMPTY = () => ({
   crates: { c50_available: '', c50_sold: '', c60_available: '', c75_available: '', dispenser_available: '' },
   water: { ph: '', tds: '' },
   power: { nepa_hours: '' },   // hours of NEPA / public-utility power for the day
+  blown: { opening: '', blown: '', available: '' },   // blown PET bottles
   generators: [],
   ro: [],
   materials: '',
+  incident: '',               // overnight/today incidents (modem, CCTV, inverter…)
+  weather: '',                // morning weather note
   expired_docs: '',
 });
 const GEN_STATUS = ['WORKING', 'NOT WORKING', 'UNDER REPAIR', 'REPAIRED NOT TESTED'];
@@ -47,6 +50,7 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
   const [gens, setGens] = useState([]);   // generators registered for this site
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [submittedAt, setSubmittedAt] = useState(null);
   const [step, setStep] = useState(0);
   // Hardware Back steps back through the wizard instead of closing the form.
   useBackHandler(step > 0, () => setStep((s) => Math.max(0, s - 1)));
@@ -73,19 +77,21 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
         else base[k] = m[k] ?? base[k];
       }
       setD(base);
-    } catch { setD(EMPTY()); }
+      setSubmittedAt(r.submitted_at || null);
+    } catch { setD(EMPTY()); setSubmittedAt(null); }
     setLoading(false);
   }, [date, siteId, siteBound]);
   useEffect(() => { load(); }, [load]);
 
   const setG = (group, key, v) => setD((p) => ({ ...p, [group]: { ...p[group], [key]: v } }));
 
-  const save = async () => {
+  // submit=true marks the morning report as officially sent; false saves a draft.
+  const save = async (submit = false) => {
     if (!siteBound && !siteId) return toast('Pick a site', 'err');
     setSaving(true);
     try {
-      await api(scoped('/reports/ops'), { method: 'PUT', body: { date, site: siteId, data: d } });
-      toast('Operations saved ✓', 'ok'); onClose();
+      await api(scoped('/reports/ops'), { method: 'PUT', body: { date, site: siteId, data: d, submit } });
+      toast(submit ? 'Morning report submitted ✓' : 'Draft saved ✓', 'ok'); onClose();
     } catch (e) { toast(e.message || 'Save failed', 'err'); }
     setSaving(false);
   };
@@ -101,6 +107,11 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
       <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>
         Step {step + 1} of {STEPS.length} · {STEPS[step]}
       </p>
+      {submittedAt && (
+        <div style={{ fontSize: 12, color: 'var(--ok, #16a34a)', fontWeight: 700, marginBottom: 8 }}>
+          ✓ Submitted {new Date(submittedAt * 1000).toLocaleString('en-NG', { timeZone: 'Africa/Lagos' })}
+        </div>
+      )}
 
       {/* Progress bar */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 14 }}>
@@ -234,7 +245,16 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
                 ))}
                 <button className="btn btn-ghost btn-sm" onClick={() => setD((p) => ({ ...p, ro: [...p.ro, { unit: '', pure: '', waste: '' }] }))}>＋ Add RO unit</button>
               </div>
-              <label className="fl" style={{ marginTop: 12 }}>Materials supplied to other locations</label>
+              <Group title="Blown bottles">
+                <Num label="Opening" value={d.blown.opening} onChange={(v) => setG('blown', 'opening', v)} />
+                <Num label="Blown" value={d.blown.blown} onChange={(v) => setG('blown', 'blown', v)} />
+                <Num label="Available" value={d.blown.available} onChange={(v) => setG('blown', 'available', v)} />
+              </Group>
+              <label className="fl" style={{ marginTop: 12 }}>Weather (this morning)</label>
+              <input className="input" value={d.weather} onChange={(e) => setD((p) => ({ ...p, weather: e.target.value }))} placeholder="e.g. cloudy this morning" />
+              <label className="fl">Incidents</label>
+              <textarea className="input" rows={3} value={d.incident} onChange={(e) => setD((p) => ({ ...p, incident: e.target.value }))} placeholder="MTN modem, inverter, CCTV, power, equipment…" />
+              <label className="fl">Materials supplied to other locations</label>
               <textarea className="input" rows={2} value={d.materials} onChange={(e) => setD((p) => ({ ...p, materials: e.target.value }))} />
               <label className="fl">Expired documents</label>
               <textarea className="input" rows={2} value={d.expired_docs} onChange={(e) => setD((p) => ({ ...p, expired_docs: e.target.value }))} />
@@ -249,12 +269,16 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
             {step < last ? (
               <button className="btn" style={{ flex: 2 }} onClick={next} disabled={step === 0 && !siteBound && !siteId}>Next ›</button>
             ) : (
-              <button className="btn" style={{ flex: 2 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Save operations'}</button>
+              <button className="btn" style={{ flex: 2 }} onClick={() => save(true)} disabled={saving}>{saving ? <span className="spin" /> : (submittedAt ? 'Re-submit report' : 'Submit report')}</button>
             )}
           </div>
-          {step < last && (
-            <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={save} disabled={saving || (!siteBound && !siteId)}>
-              {saving ? <span className="spin" /> : 'Save & finish now'}
+          {step === last ? (
+            <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={() => save(false)} disabled={saving || (!siteBound && !siteId)}>
+              {saving ? <span className="spin" /> : 'Save draft (don’t submit)'}
+            </button>
+          ) : (
+            <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={() => save(false)} disabled={saving || (!siteBound && !siteId)}>
+              {saving ? <span className="spin" /> : 'Save draft now'}
             </button>
           )}
         </>

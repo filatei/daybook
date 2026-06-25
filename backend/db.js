@@ -791,6 +791,26 @@ async function migrate() {
       updated_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
       UNIQUE(tenant_id, site_id, ops_date)
     );
+    -- Morning-report submission state: a site "submits" the day's ops report
+    -- (vs just saving a draft) so the owner can see who has/hasn't reported.
+    ALTER TABLE ops_daily ADD COLUMN IF NOT EXISTS submitted_at BIGINT;
+    ALTER TABLE ops_daily ADD COLUMN IF NOT EXISTS submitted_by TEXT;
+
+    -- DIESEL — one daily diesel-consumption entry per site (litres × rate = amount).
+    CREATE TABLE IF NOT EXISTS diesel_logs (
+      id             TEXT PRIMARY KEY,
+      tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+      site_id        TEXT NOT NULL REFERENCES sites(id),
+      log_date       TEXT NOT NULL,
+      litres         DOUBLE PRECISION DEFAULT 0,
+      rate_per_litre DOUBLE PRECISION DEFAULT 0,
+      amount         DOUBLE PRECISION DEFAULT 0,
+      note           TEXT,
+      recorded_by    TEXT REFERENCES users(id),
+      created_at     BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      updated_at     BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      UNIQUE(tenant_id, site_id, log_date)
+    );
 
     -- Daybook test-plan submissions (from /testplan.html) so results are viewable
     -- in-app / at any site, not just emailed.

@@ -25,6 +25,7 @@ export default function More() {
     { id: 'staff',      icon: '👷', label: 'Staff',      desc: 'Clock-in, badge & face, attendance',        show: isSec },
     { id: 'badges',     icon: '🪪', label: 'Staff Badges', desc: 'Design & print scannable ID badges',        show: isSec },
     { id: 'generators', icon: '🔌', label: 'Generators', desc: 'Assets, diesel fills & maintenance',       show: isSec },
+    { id: 'diesel',     icon: '⛽', label: 'Diesel',     desc: 'Daily diesel per site — litres, rate & amount', show: isSec },
     { id: 'terminals',  icon: '💳', label: 'POS Terminals', desc: 'Banks & POS machines for card sales',     show: isMgr },
     { id: 'products',   icon: '🛒', label: 'Products',    desc: 'Catalogue & prices used at the till',       show: isMgr },
   ].filter((i) => i.show);

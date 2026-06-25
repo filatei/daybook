@@ -7,6 +7,39 @@ import OpsForm from './OpsForm.jsx';
 
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
 
+// Consolidated morning-report status: which sites have submitted today's ops report.
+function MorningReportStatus({ date }) {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api(scoped(`/reports/ops/status?date=${encodeURIComponent(date)}`))
+      .then((r) => { if (live) setData(r); })
+      .catch(() => { if (live) setData({ sites: [] }); });
+    return () => { live = false; };
+  }, [date]);
+  if (!data || !data.sites || data.sites.length <= 1) return null;
+  const done = data.sites.filter((s) => s.submitted).length;
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+        <strong>Morning reports · {date === today() ? 'today' : date}</strong>
+        <span style={{ fontWeight: 800 }}>{done}/{data.sites.length} in</span>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {data.sites.map((s) => (
+          <span key={s.site_id} style={{
+            fontSize: 12, fontWeight: 700, padding: '4px 10px', borderRadius: 999,
+            background: s.submitted ? 'rgba(22,163,74,.12)' : (s.has_report ? 'rgba(234,179,8,.14)' : 'var(--surface2, #f3f4f6)'),
+            color: s.submitted ? 'var(--ok, #16a34a)' : (s.has_report ? '#a16207' : 'var(--muted)'),
+          }} title={s.submitted_at ? new Date(s.submitted_at * 1000).toLocaleString('en-NG', { timeZone: 'Africa/Lagos' }) : (s.has_report ? 'draft started' : 'not started')}>
+            {s.submitted ? '✓' : (s.has_report ? '✎' : '○')} {s.name}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Files attached to a daily report. Saved with the report and included as email
 // attachments whenever the report is emailed (the email routes pull documents by
 // report_id). Shown in the report editor and the read-only archive detail.
@@ -785,6 +818,11 @@ export default function Reports() {
         <button className="btn btn-ghost" style={{ flex: '0 0 auto' }} onClick={() => openModal(
           <OpsForm sites={sites} siteBound={isSM} defaultDate={filters.from || today()} defaultSite={filters.site} onClose={closeModal} />, { guard: true })}>🛠 Day ops</button>
       </div>
+
+      {/* Who has submitted the morning report (all-sites overview) */}
+      {!isSM && (
+        <MorningReportStatus date={(filters.from && filters.from === filters.to) ? filters.from : today()} />
+      )}
 
       {/* POS sales summary (imported Fido history + live in-app sales) */}
       {pos && pos.totals.orders > 0 && (

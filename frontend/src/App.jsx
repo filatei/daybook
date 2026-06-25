@@ -22,6 +22,7 @@ import Reconcile from './views/Reconcile.jsx';
 import More from './views/More.jsx';
 import Payroll from './views/Payroll.jsx';
 import Generators from './views/Generators.jsx';
+import Diesel from './views/Diesel.jsx';
 import Terminals from './views/Terminals.jsx';
 import Products from './views/Products.jsx';
 import SiteMessages from './views/SiteMessages.jsx';
@@ -131,6 +132,7 @@ function Inner() {
         {tab === 'more'       && <More />}
         {tab === 'payroll'    && <Payroll />}
         {tab === 'generators' && <Generators />}
+        {tab === 'diesel'     && <Diesel />}
         {tab === 'terminals'  && <Terminals />}
         {tab === 'products'   && <Products />}
         {tab === 'messages'   && <SiteMessages />}

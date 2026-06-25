@@ -943,7 +943,34 @@ router.get('/reports/ops', requireAuth, needTenant('SECRETARY'), async (req, res
   const site_id = siteBound(req.ctx) ? req.ctx.site_id : req.query.site;
   if (!site_id) return res.status(400).json({ error: 'pick a site' });
   const row = await qone('SELECT * FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [req.ctx.tenant_id, site_id, date]);
-  res.json({ site_id, ops_date: date, data: row ? J(row.data, {}) : {}, updated_at: row ? row.updated_at : null });
+  res.json({ site_id, ops_date: date, data: row ? J(row.data, {}) : {}, updated_at: row ? row.updated_at : null, submitted_at: row ? row.submitted_at : null });
+});
+
+// Consolidated morning-report status — which sites have submitted today.
+// Owner/secretary view; site-bound users only see their own site.
+router.get('/reports/ops/status', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const args = [date, req.ctx.tenant_id];
+  let siteFilter = '';
+  if (siteBound(req.ctx)) { siteFilter = ' AND s.id=?'; args.push(req.ctx.site_id); }
+  const rows = await qall(
+    `SELECT s.id site_id, s.name,
+            o.submitted_at, o.updated_at, (o.id IS NOT NULL) AS has_report
+       FROM sites s
+       LEFT JOIN ops_daily o
+         ON o.site_id=s.id AND o.tenant_id=s.tenant_id AND o.ops_date=?
+      WHERE s.tenant_id=? AND s.status<>'CLOSED'${siteFilter}
+      ORDER BY s.name`, args);
+  res.json({
+    ops_date: date,
+    sites: rows.map((r) => ({
+      site_id: r.site_id, name: r.name,
+      has_report: !!r.has_report,
+      submitted: !!r.submitted_at,
+      submitted_at: r.submitted_at || null,
+      updated_at: r.updated_at || null,
+    })),
+  });
 });
 
 router.put('/reports/ops', requireAuth, needTenant('SECRETARY'), async (req, res) => {
@@ -954,12 +981,60 @@ router.put('/reports/ops', requireAuth, needTenant('SECRETARY'), async (req, res
   const site = await siteById(site_id);
   if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
   const data = (b.data && typeof b.data === 'object') ? b.data : {};
+  // submit:true marks the morning report as officially sent (vs a draft save).
+  // COALESCE keeps an earlier submission timestamp when later draft-saving.
+  const subAt = b.submit ? nowS() : null;
+  const subBy = b.submit ? req.user.id : null;
   await qrun(
-    `INSERT INTO ops_daily (id,tenant_id,site_id,ops_date,data,updated_by,updated_at)
-     VALUES (?,?,?,?,?,?,?)
-     ON CONFLICT (tenant_id,site_id,ops_date) DO UPDATE SET data=EXCLUDED.data, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at`,
-    [uuid(), req.ctx.tenant_id, site_id, date, JSON.stringify(data), req.user.id, nowS()]);
-  res.json({ ok: true, site_id, ops_date: date });
+    `INSERT INTO ops_daily (id,tenant_id,site_id,ops_date,data,updated_by,updated_at,submitted_at,submitted_by)
+     VALUES (?,?,?,?,?,?,?,?,?)
+     ON CONFLICT (tenant_id,site_id,ops_date) DO UPDATE SET
+       data=EXCLUDED.data, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at,
+       submitted_at=COALESCE(EXCLUDED.submitted_at, ops_daily.submitted_at),
+       submitted_by=COALESCE(EXCLUDED.submitted_by, ops_daily.submitted_by)`,
+    [uuid(), req.ctx.tenant_id, site_id, date, JSON.stringify(data), req.user.id, nowS(), subAt, subBy]);
+  res.json({ ok: true, site_id, ops_date: date, submitted: !!b.submit });
+});
+
+// ── DIESEL — one daily consumption entry per site (litres × rate = amount) ──
+router.get('/diesel', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const args = [req.ctx.tenant_id];
+  let w = 'd.tenant_id=?';
+  if (siteBound(req.ctx)) { w += ' AND d.site_id=?'; args.push(req.ctx.site_id); }
+  else if (req.query.site) { w += ' AND d.site_id=?'; args.push(req.query.site); }
+  if (req.query.from) { w += ' AND d.log_date>=?'; args.push(req.query.from); }
+  if (req.query.to) { w += ' AND d.log_date<=?'; args.push(req.query.to); }
+  const rows = await qall(
+    `SELECT d.*, s.name site_name FROM diesel_logs d JOIN sites s ON s.id=d.site_id
+      WHERE ${w} ORDER BY d.log_date DESC, s.name`, args);
+  const total = await qone(
+    `SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(amount),0) amount FROM diesel_logs d WHERE ${w}`, args);
+  res.json({ rows, total });
+});
+
+router.put('/diesel', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site;
+  if (!site_id) return res.status(400).json({ error: 'pick a site' });
+  const site = await siteById(site_id);
+  if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
+  const litres = Number(b.litres) || 0;
+  const rate = Number(b.rate_per_litre) || 0;
+  const amount = b.amount != null && b.amount !== '' ? Number(b.amount) : Math.round(litres * rate * 100) / 100;
+  await qrun(
+    `INSERT INTO diesel_logs (id,tenant_id,site_id,log_date,litres,rate_per_litre,amount,note,recorded_by,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT (tenant_id,site_id,log_date) DO UPDATE SET
+       litres=EXCLUDED.litres, rate_per_litre=EXCLUDED.rate_per_litre, amount=EXCLUDED.amount,
+       note=EXCLUDED.note, recorded_by=EXCLUDED.recorded_by, updated_at=EXCLUDED.updated_at`,
+    [uuid(), req.ctx.tenant_id, site_id, date, litres, rate, amount, b.note || null, req.user.id, nowS()]);
+  res.json({ ok: true, site_id, log_date: date, litres, rate_per_litre: rate, amount });
+});
+
+router.delete('/diesel/:id', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+  await qrun('DELETE FROM diesel_logs WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
+  res.json({ ok: true });
 });
 
 // Finished-goods opening stock (B/F) seed — set ONCE per site so the bag running

@@ -7,6 +7,16 @@ import { useStore, useRole, atLeast } from '../store.jsx';
 // manual figures (imprest balance, NEPA alarm, notes) and emails it.
 const N = (v) => Number(v) || 0;
 
+// Module-level so React keeps a stable component identity across renders.
+function Row({ label, value, strong, neg }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line)', fontWeight: strong ? 800 : 500 }}>
+      <span>{label}</span>
+      <span style={{ color: neg ? 'var(--err)' : 'inherit' }}>{neg ? `(${ngn(Math.abs(value))})` : ngn(value)}</span>
+    </div>
+  );
+}
+
 export default function Consolidated() {
   const { go, toast } = useStore();
   const role = useRole();
@@ -63,12 +73,6 @@ export default function Consolidated() {
     } catch (e) { toast(e.message || 'Email failed', 'err'); }
     setBusy(false);
   };
-
-  const Row = ({ label, value, strong, neg }) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid var(--line)', fontWeight: strong ? 800 : 500 }}>
-      <span>{label}</span><span style={{ color: neg ? 'var(--err)' : 'inherit' }}>{neg ? `(${ngn(Math.abs(value))})` : ngn(value)}</span>
-    </div>
-  );
 
   return (
     <div>

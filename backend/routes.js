@@ -871,7 +871,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
   // All-sites roll-up: per-site bags (produced / sold-excl-bonus / available) + a
   // grand total, and a stock compilation (packing bags + rolls) from each site's
   // day-ops. Addresses "total stocks used & available" and "bags sold & available".
-  let bagBySite = null, bagTotals = null, stockTotals = null;
+  let bagBySite = null, bagTotals = null, stockTotals = null, productionTotals = null;
   let gensBySite = null, roTotals = null, incidentsBySite = null;
   if (wantAll) {
     bagBySite = [];
@@ -892,6 +892,17 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       incidentsBySite = [];            // [{ site, text }] for the combined incidence list
       for (const o of oRows) {
         const dd = J(o.data, {}) || {}; const pk = dd.packing || {}, rl = dd.rolls || {};
+        // Pure-water production ledger entered in the morning report (per site).
+        const pr = dd.production || {};
+        if (pr.opening || pr.produced || pr.sales || pr.bonus || pr.incentive || pr.staff_water) {
+          productionTotals = productionTotals || { opening: 0, produced: 0, sales: 0, bonus: 0, incentive: 0, staff_water: 0, closing: 0 };
+          const open = Number(pr.opening) || 0, prod = Number(pr.produced) || 0;
+          const sal = Number(pr.sales) || 0, bon = Number(pr.bonus) || 0, inc = Number(pr.incentive) || 0, stf = Number(pr.staff_water) || 0;
+          productionTotals.opening += open; productionTotals.produced += prod;
+          productionTotals.sales += sal; productionTotals.bonus += bon;
+          productionTotals.incentive += inc; productionTotals.staff_water += stf;
+          productionTotals.closing += open + prod - sal - bon - inc - stf;
+        }
         stockTotals.packing_available += Number(pk.available) || 0;
         stockTotals.packing_used += Number(pk.used_production) || 0;
         stockTotals.rolls_used_kg += Number(rl.used_kg) || 0;
@@ -927,7 +938,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       orders: tot.orders, totalLoaded: tot.totalLoaded, totalBagged: tot.totalBagged,
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
-      bagReport, ops, bagBySite, bagTotals, stockTotals, posByBank,
+      bagReport, ops, bagBySite, bagTotals, stockTotals, posByBank, productionTotals,
       gensBySite, roTotals, incidentsBySite,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)

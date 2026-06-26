@@ -436,6 +436,16 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to, attach
           <tr style="font-weight:800"><td style="padding:6px 10px">TOTAL</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.opening || 0).toLocaleString()}</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.produced || 0).toLocaleString()}</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.sold || 0).toLocaleString()}</td><td style="padding:6px 10px;text-align:right">${(s.bagTotals.available || 0).toLocaleString()}</td></tr>
         </tbody>
       </table>` : ''}
+      ${s.productionTotals ? `<div style="font-weight:800;margin:6px 0">Pure water production — all sites <span style="font-weight:600;color:#6b7280;font-size:12px">(entered in morning report)</span></div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        ${row('Opening bags', (s.productionTotals.opening || 0).toLocaleString())}
+        ${row('Add — production', (s.productionTotals.produced || 0).toLocaleString())}
+        ${(s.productionTotals.sales || 0) ? row('Less — Sales', (s.productionTotals.sales).toLocaleString()) : ''}
+        ${(s.productionTotals.bonus || 0) ? row('Less — Bonus', (s.productionTotals.bonus).toLocaleString()) : ''}
+        ${(s.productionTotals.incentive || 0) ? row('Less — Incentive', (s.productionTotals.incentive).toLocaleString()) : ''}
+        ${(s.productionTotals.staff_water || 0) ? row('Less — Staff water', (s.productionTotals.staff_water).toLocaleString()) : ''}
+        ${row('Closing bags', (s.productionTotals.closing || 0).toLocaleString(), true)}
+      </table>` : ''}
       ${s.stockTotals ? `<div style="font-weight:800;margin:6px 0">Stock compilation — all sites</div>
       <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
         <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Packing bags used</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.packing_used || 0).toLocaleString()}</td></tr>

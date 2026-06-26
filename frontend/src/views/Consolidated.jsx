@@ -130,6 +130,20 @@ export default function Consolidated() {
             </div>
           )}
 
+          {/* Pure water production (entered in morning reports) */}
+          {s.productionTotals && (
+            <div className="card" style={{ marginBottom: 12 }}>
+              <div style={{ fontWeight: 800, marginBottom: 6 }}>Pure water production — all sites</div>
+              <Row label="Opening bags" value={N(s.productionTotals.opening)} />
+              <Row label="Add — production" value={N(s.productionTotals.produced)} />
+              {N(s.productionTotals.sales) > 0 && <Row label="Less — Sales" value={N(s.productionTotals.sales)} neg />}
+              {N(s.productionTotals.bonus) > 0 && <Row label="Less — Bonus" value={N(s.productionTotals.bonus)} neg />}
+              {N(s.productionTotals.incentive) > 0 && <Row label="Less — Incentive" value={N(s.productionTotals.incentive)} neg />}
+              {N(s.productionTotals.staff_water) > 0 && <Row label="Less — Staff water" value={N(s.productionTotals.staff_water)} neg />}
+              <Row label="Closing bags" value={N(s.productionTotals.closing)} strong />
+            </div>
+          )}
+
           {/* Bags / production totals */}
           {s.bagTotals && (
             <div className="card" style={{ marginBottom: 12 }}>

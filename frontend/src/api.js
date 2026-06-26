@@ -8,9 +8,11 @@ export function getToken() { return _token; }
 export function setActiveTenant(id) { _tenant = id; }
 export function getActiveTenant() { return _tenant; }
 
-/** Append ?tenant=<id> to paths that need workspace scoping */
+/** Append ?tenant=<id> to paths that need workspace scoping. The virtual
+ *  "Group" workspace (__group__) is not a real tenant, so it is never sent —
+ *  group views fetch each member tenant explicitly instead. */
 export function scoped(path) {
-  if (!_tenant) return path;
+  if (!_tenant || _tenant === '__group__') return path;
   return path + (path.includes('?') ? '&' : '?') + 'tenant=' + _tenant;
 }
 

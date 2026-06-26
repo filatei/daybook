@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
-import { useStore, useBackHandler, atLeast } from '../store.jsx';
+import { useStore, useBackHandler } from '../store.jsx';
 import { useRealtime } from '../hooks/useRealtime.js';
 import { OrdersListModal, OrderDetailModal, BankBreakdownModal } from '../components/OrderViews.jsx';
 
@@ -10,11 +10,10 @@ import { OrdersListModal, OrderDetailModal, BankBreakdownModal } from '../compon
 // /pos/range each per-tenant dashboard uses — once per workspace — and sums it,
 // so the numbers always match what they'd see per workspace. No backend change.
 function GroupTotals({ from, to, rangeLabel }) {
-  const { tenants, user } = useStore();
-  const groups = useMemo(
-    () => (tenants || []).filter((t) => user?.is_superadmin || atLeast(t.role, 'SNR_ACCOUNTANT')),
-    [tenants, user],
-  );
+  const { groupTenants } = useStore();
+  const groups = groupTenants || [];
+  // Stable key — groupTenants is a fresh array each render, so depend on the ids.
+  const groupKey = groups.map((g) => g.id).join(',');
   const [rows, setRows] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -44,7 +43,8 @@ function GroupTotals({ from, to, rangeLabel }) {
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, [groups, from, to]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupKey, from, to]);
 
   if (groups.length < 2) return null;
   const totalSales = (rows || []).reduce((s, r) => s + r.sales, 0);
@@ -149,7 +149,7 @@ function FoldSection({ title, count, open, onToggle, children }) {
 }
 
 export default function Dashboard() {
-  const { tenant } = useStore();
+  const { tenant, isGroup } = useStore();
   const [rangeIdx, setRangeIdx] = useState(0);
   const [day, setDay] = useState('');      // a specific picked day (overrides the range)
   const [data, setData] = useState(null);
@@ -203,7 +203,7 @@ export default function Dashboard() {
     setLoading(false);
   }, [tenant, rangeIdx, day]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (!isGroup) load(); }, [load, isGroup]);
 
   const t = data?.totals;
   // Prefer real POS sales for the headline numbers; fall back to daily-report totals.
@@ -277,13 +277,16 @@ export default function Dashboard() {
         {day && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setDay('')}>Clear</button>}
       </div>
 
-      {loading ? (
+      <GroupTotals from={day || daysAgo(RANGES[rangeIdx].days)} to={day || today()} rangeLabel={day || RANGES[rangeIdx].label} />
+
+      {isGroup ? (
+        <div className="empty"><div className="ic">🏢</div><p>Group roll-up across your workspaces. Switch to a single workspace (top-left) for detailed reports, sell, gate and other tools.</p></div>
+      ) : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} style={{ height: 72 }} />)}</>
       ) : (!t && !usePos) ? (
         <div className="empty"><div className="ic">📊</div><p>Select a workspace to see data</p></div>
       ) : (
         <>
-          <GroupTotals from={day || daysAgo(RANGES[rangeIdx].days)} to={day || today()} rangeLabel={day || RANGES[rangeIdx].label} />
           <div className="stat-grid">
             <button className="stat accent" onClick={() => usePos && openOrders('All orders')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
               <div className="k">Total Sales{usePos ? ' ›' : ''}</div>

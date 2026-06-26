@@ -3,6 +3,11 @@ import { setToken, setActiveTenant, api } from './api.js';
 
 const Ctx = createContext(null);
 
+// Virtual "Group" workspace — a read-only roll-up across the tenants a user owns
+// at Snr Accountant / GM / Admin (or superadmin). It is NOT a real tenant: no
+// data is duplicated; the dashboard aggregates the real tenants at read-time.
+export const GROUP_ID = '__group__';
+
 const initial = {
   user: null,
   token: null,
@@ -36,10 +41,26 @@ export function StoreProvider({ children }) {
 
   const login = useCallback((user, token, tenants) => {
     setToken(token);
+    const real = Array.isArray(tenants) ? tenants : [];
+    // Tenants this user can roll up: Snr Accountant+ in each (or superadmin).
+    const eligible = real.filter((t) => user?.is_superadmin || atLeast(t.role, 'SNR_ACCOUNTANT'));
+    let all = real;
+    if (eligible.length >= 2) {
+      const group = {
+        id: GROUP_ID,
+        name: 'Group (' + eligible.map((t) => t.name).join(' + ') + ')',
+        role: 'GENERAL_MANAGER',
+        group: true,
+        memberIds: eligible.map((t) => t.id),
+      };
+      all = [group, ...real];   // appears first in the switcher
+    }
     const saved = localStorage.getItem('daybook_tenant');
-    const tid = tenants.find((t) => t.id === saved)?.id || tenants[0]?.id || null;
+    const savedValid = all.find((t) => t.id === saved)?.id;
+    // Default to the Group rollup for eligible users; otherwise their first tenant.
+    const tid = savedValid || (eligible.length >= 2 ? GROUP_ID : real[0]?.id) || null;
     setActiveTenant(tid);
-    dispatch({ type: 'SET_USER', user, token, tenants });
+    dispatch({ type: 'SET_USER', user, token, tenants: all });
     dispatch({ type: 'SET_TENANT', id: tid });
   }, []);
 
@@ -148,7 +169,10 @@ export function StoreProvider({ children }) {
   }, []);
 
   const setSites = useCallback((sites) => dispatch({ type: 'SET_SITES', sites }), []);
-  const value = { ...state, login, setTenant, setSites, go, toast, openModal, closeModal, setDirty, confirm, resolveConfirm, registerBack, logout };
+  // Group rollup helpers: which real tenants it spans, and whether it's active.
+  const isGroup = state.tenant === GROUP_ID;
+  const groupTenants = state.tenants.filter((t) => !t.group && (state.user?.is_superadmin || atLeast(t.role, 'SNR_ACCOUNTANT')));
+  const value = { ...state, isGroup, groupTenants, login, setTenant, setSites, go, toast, openModal, closeModal, setDirty, confirm, resolveConfirm, registerBack, logout };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

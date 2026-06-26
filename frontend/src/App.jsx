@@ -35,7 +35,7 @@ import Chat from './views/Chat.jsx';
 import Compliance from './views/Compliance.jsx';
 
 function Inner() {
-  const { user, tab, go, login, logout, toast, setSites, tenant, tenants, openModal, closeModal } = useStore();
+  const { user, tab, go, login, logout, toast, setSites, tenant, tenants, isGroup, openModal, closeModal } = useStore();
   const role = useRole();
   const [booting, setBooting] = useState(true);
   // A receipt QR was scanned (…/?r=NNNN) in a phone browser without the app:
@@ -121,6 +121,14 @@ function Inner() {
     <>
       <Nav />
       <main className="main-content">
+        {isGroup && tab !== 'dashboard' ? (
+          <div className="empty">
+            <div className="ic">🏢</div>
+            <p>This section works inside a single workspace. You’re viewing the Group roll-up — switch to Fido or Fiafia (top-left) to use it.</p>
+            <button className="btn" style={{ width: 'auto', marginTop: 12 }} onClick={() => go('dashboard')}>Back to Group dashboard</button>
+          </div>
+        ) : (
+        <>
         {tab === 'dashboard' && <Dashboard />}
         {tab === 'reports'   && <Reports />}
         {tab === 'staff'     && <Staff />}
@@ -144,6 +152,8 @@ function Inner() {
         {tab === 'activity'   && <Activity />}
         {tab === 'chat'       && <Chat />}
         {tab === 'compliance' && <Compliance />}
+        </>
+        )}
         <footer className="app-footer">
           © {new Date().getFullYear()} Torama Technologies ·{' '}
           <a role="button" tabIndex={0} style={{ cursor: 'pointer' }} onClick={() => openModal(<ContactForm onClose={closeModal} />)}>Contact us</a> ·{' '}

@@ -31,11 +31,13 @@ function GroupTotals({ from, to, rangeLabel }) {
             api(`/reports/consolidated?date=${to}&tenant=${t.id}`).catch(() => null),
           ]);
           const st = c?.auto?.summary?.stockTotals;
+          const sites = (p?.bySite || []).map((x) => ({ site: x.site, sales: Number(x.sales) || 0, tenant: t.name }));
           return {
             id: t.id, name: t.name,
             sales: p?.totals?.sales || 0,
             orders: p?.totals?.orders || 0,
             packingBags: Number(st?.packing_available) || 0,
+            sites,
           };
         }));
         if (!cancelled) setRows(res);
@@ -50,6 +52,7 @@ function GroupTotals({ from, to, rangeLabel }) {
   const totalSales = (rows || []).reduce((s, r) => s + r.sales, 0);
   const totalOrders = (rows || []).reduce((s, r) => s + r.orders, 0);
   const totalPacking = (rows || []).reduce((s, r) => s + r.packingBags, 0);
+  const allSites = (rows || []).flatMap((r) => r.sites || []).filter((x) => x.sales > 0).sort((a, b) => b.sales - a.sales);
 
   return (
     <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid var(--brand-d)' }}>
@@ -72,6 +75,17 @@ function GroupTotals({ from, to, rangeLabel }) {
             <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', color: 'var(--ink)' }}>
               <span style={{ color: 'var(--muted)' }}>{r.name}</span>
               <span style={{ fontWeight: 700 }}>{ngn(r.sales)} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {r.packingBags.toLocaleString()} bags</span></span>
+            </div>
+          ))}
+        </div>
+      )}
+      {allSites.length > 0 && (
+        <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', marginBottom: 4 }}>BY SITE (ALL WORKSPACES)</div>
+          {allSites.map((x, i) => (
+            <div key={`${x.tenant}-${x.site}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0' }}>
+              <span style={{ color: 'var(--ink)' }}>{x.site} <span style={{ color: 'var(--muted)', fontSize: 11 }}>· {x.tenant}</span></span>
+              <span style={{ fontWeight: 700 }}>{ngn(x.sales)}</span>
             </div>
           ))}
         </div>

@@ -1,8 +1,84 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
-import { useStore, useBackHandler } from '../store.jsx';
+import { useStore, useBackHandler, atLeast } from '../store.jsx';
 import { useRealtime } from '../hooks/useRealtime.js';
 import { OrdersListModal, OrderDetailModal, BankBreakdownModal } from '../components/OrderViews.jsx';
+
+// ── Combined Fido + Fiafia roll-up (Snr Accountant / GM / Admin) ──────────────
+// When a user belongs to 2+ workspaces at SNR_ACCOUNTANT or above (or is a
+// superadmin), show a combined total across those workspaces. Pulls the same
+// /pos/range each per-tenant dashboard uses — once per workspace — and sums it,
+// so the numbers always match what they'd see per workspace. No backend change.
+function GroupTotals({ from, to, rangeLabel }) {
+  const { tenants, user } = useStore();
+  const groups = useMemo(
+    () => (tenants || []).filter((t) => user?.is_superadmin || atLeast(t.role, 'SNR_ACCOUNTANT')),
+    [tenants, user],
+  );
+  const [rows, setRows] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (groups.length < 2) return;
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await Promise.all(groups.map(async (t) => {
+          // Sales for the range + packing bags as of the range end date (bags are
+          // a daily stock snapshot). Both endpoints are scoped by ?tenant=.
+          const [p, c] = await Promise.all([
+            api(`/pos/range?from=${from}&to=${to}&tenant=${t.id}`).catch(() => null),
+            api(`/reports/consolidated?date=${to}&tenant=${t.id}`).catch(() => null),
+          ]);
+          const st = c?.auto?.summary?.stockTotals;
+          return {
+            id: t.id, name: t.name,
+            sales: p?.totals?.sales || 0,
+            orders: p?.totals?.orders || 0,
+            packingBags: Number(st?.packing_available) || 0,
+          };
+        }));
+        if (!cancelled) setRows(res);
+      } catch { /* ignore */ }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [groups, from, to]);
+
+  if (groups.length < 2) return null;
+  const totalSales = (rows || []).reduce((s, r) => s + r.sales, 0);
+  const totalOrders = (rows || []).reduce((s, r) => s + r.orders, 0);
+  const totalPacking = (rows || []).reduce((s, r) => s + r.packingBags, 0);
+
+  return (
+    <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid var(--brand-d)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>
+          GROUP TOTAL · {groups.map((g) => g.name).join(' + ')}
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{rangeLabel}</span>
+      </div>
+      <div style={{ fontSize: 26, fontWeight: 800, marginTop: 4 }}>
+        {loading && !rows ? '₦…' : ngn(totalSales)}
+        <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}> · {totalOrders.toLocaleString()} orders</span>
+      </div>
+      <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 2 }}>
+        Packing bags available: <b style={{ color: 'var(--ink)' }}>{totalPacking.toLocaleString()}</b>
+      </div>
+      {rows && (
+        <div style={{ marginTop: 8 }}>
+          {rows.map((r) => (
+            <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', color: 'var(--ink)' }}>
+              <span style={{ color: 'var(--muted)' }}>{r.name}</span>
+              <span style={{ fontWeight: 700 }}>{ngn(r.sales)} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {r.packingBags.toLocaleString()} bags</span></span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const clock = (s) => new Date((s || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -207,6 +283,7 @@ export default function Dashboard() {
         <div className="empty"><div className="ic">📊</div><p>Select a workspace to see data</p></div>
       ) : (
         <>
+          <GroupTotals from={day || daysAgo(RANGES[rangeIdx].days)} to={day || today()} rangeLabel={day || RANGES[rangeIdx].label} />
           <div className="stat-grid">
             <button className="stat accent" onClick={() => usePos && openOrders('All orders')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
               <div className="k">Total Sales{usePos ? ' ›' : ''}</div>

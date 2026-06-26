@@ -3,6 +3,8 @@ import { api, scoped, today } from '../api.js';
 import { useStore, useBackHandler } from '../store.jsx';
 
 const EMPTY = () => ({
+  // Pure-water (bagged) production ledger: closing = opening + produced − (sales + bonus + incentive + staff water).
+  production: { opening: '', produced: '', sales: '', bonus: '', incentive: '', staff_water: '' },
   bags: { leakage: '', staff_water: '', extra: '', rebagging: '', damage: '' },
   packing: { opening: '', received: '', used_production: '', sales: '', rebagging: '', damage_replacement: '', available: '' },
   rolls: { opening_count: '', opening_kg: '', received_count: '', received_kg: '', used_count: '', used_kg: '', available_count: '', available_kg: '' },
@@ -40,7 +42,8 @@ function Group({ title, children }) {
   );
 }
 
-const STEPS = ['Setup & bags', 'Packing bags', 'Rolls', 'Crates · water · power', 'Generators', 'RO & notes'];
+const STEPS = ['Setup · pure water', 'Packing bags', 'Rolls', 'Crates · water · power', 'Generators', 'RO & notes'];
+const N = (v) => Number(v) || 0;
 
 export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, onClose }) {
   const { toast } = useStore();
@@ -140,6 +143,19 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
                   </div>
                 )}
               </div>
+              <Group title="Pure water production (bags)">
+                <Num label="Opening bags" value={d.production.opening} onChange={(v) => setG('production', 'opening', v)} />
+                <Num label="Add: production" value={d.production.produced} onChange={(v) => setG('production', 'produced', v)} />
+                <Num label="Less: sales" value={d.production.sales} onChange={(v) => setG('production', 'sales', v)} />
+                <Num label="Less: bonus" value={d.production.bonus} onChange={(v) => setG('production', 'bonus', v)} />
+                <Num label="Less: incentive" value={d.production.incentive} onChange={(v) => setG('production', 'incentive', v)} />
+                <Num label="Less: staff water" value={d.production.staff_water} onChange={(v) => setG('production', 'staff_water', v)} />
+              </Group>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, padding: '8px 10px', background: 'var(--surface, #f6f7f9)', borderRadius: 8, fontWeight: 800 }}>
+                <span>Closing bags</span>
+                <span>{(N(d.production.opening) + N(d.production.produced) - N(d.production.sales) - N(d.production.bonus) - N(d.production.incentive) - N(d.production.staff_water)).toLocaleString()}</span>
+              </div>
+
               <Group title="Bag adjustments">
                 <Num label="Leakage" value={d.bags.leakage} onChange={(v) => setG('bags', 'leakage', v)} />
                 <Num label="Staff water" value={d.bags.staff_water} onChange={(v) => setG('bags', 'staff_water', v)} />

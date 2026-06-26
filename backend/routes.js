@@ -844,6 +844,22 @@ async function buildGeneratedReport(ctx, date, siteArg) {
   }
   const totalSales = tot.cash + tot.pos + tot.transfer;
   const single = !wantAll && bySite.length === 1 ? bySite[0] : null;
+  // POS split by acquiring bank (Moniepoint / GTB / …) so the daybook can be
+  // reconciled per bank instead of one lumped POS figure. Legacy POS (Mongo) only.
+  let posByBank = null;
+  if (await posEnabled(ctx.tenant_id)) {
+    try {
+      const codes = sites.map((s) => s.code).filter(Boolean);
+      const bb = await sales.bankBreakdown({ from: date, to: date, sites: codes });
+      const map = {};
+      for (const r of bb) {
+        if (r.kind !== 'POS') continue;
+        const k = r.bank || 'Unspecified';
+        map[k] = (map[k] || 0) + (Number(r.amount) || 0);
+      }
+      posByBank = Object.entries(map).map(([bank, amount]) => ({ bank, amount })).sort((a, b) => b.amount - a.amount);
+    } catch { /* leave null on legacy-source error */ }
+  }
   const bagReport = single ? await bagDayReport(ctx, single.site_id, date) : null;
   // Operations the site keyed in (leakage, rolls, generators, RO, water analysis…)
   let ops = null;
@@ -911,7 +927,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       orders: tot.orders, totalLoaded: tot.totalLoaded, totalBagged: tot.totalBagged,
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
-      bagReport, ops, bagBySite, bagTotals, stockTotals,
+      bagReport, ops, bagBySite, bagTotals, stockTotals, posByBank,
       gensBySite, roTotals, incidentsBySite,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)

@@ -112,8 +112,12 @@ export default function Consolidated() {
           {/* Cash → deposit */}
           <div className="card" style={{ marginBottom: 12 }}>
             <Row label="Total cash" value={N(s.cash)} />
-            <Row label="GTB / transfer" value={N(s.transfer)} />
-            <Row label="POS / Moniepoint" value={N(s.pos)} />
+            <Row label="Transfer" value={N(s.transfer)} />
+            {/* POS split by acquiring bank (Moniepoint / GTB / …) for reconciliation. */}
+            {Array.isArray(s.posByBank) && s.posByBank.length > 0
+              ? s.posByBank.map((b) => <Row key={b.bank} label={`POS · ${b.bank}`} value={N(b.amount)} />)
+              : <Row label="POS" value={N(s.pos)} />}
+            {Array.isArray(s.posByBank) && s.posByBank.length > 0 && <Row label="POS total" value={N(s.pos)} strong />}
             <Row label="Incentive" value={N(s.incentive)} />
             <Row label="Net cash deposit" value={netDeposit} strong />
           </div>

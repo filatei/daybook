@@ -17,7 +17,10 @@ body {
   background: var(--bg); color: var(--ink); line-height: 1.45;
   overscroll-behavior-y: contain;
 }
-#root { min-height: 100vh; display: flex; flex-direction: column; }
+/* App shell: root fills the viewport and never scrolls; only .main-content
+   scrolls, so the top header and the fixed bottom nav stay put and content
+   flows under them. 100dvh tracks the mobile browser's dynamic viewport. */
+#root { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--brand-d); text-decoration: none; }
 
@@ -106,7 +109,9 @@ a { color: var(--brand-d); text-decoration: none; }
 
 /* ── Main content ──────────────────────────────────────────────────────────── */
 .main-content {
-  flex: 1; padding: 16px 14px calc(32px + env(safe-area-inset-bottom, 0px));
+  flex: 1 1 auto; min-height: 0;            /* the only scroll area in the shell */
+  overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
+  padding: 16px 14px calc(32px + env(safe-area-inset-bottom, 0px));
   max-width: 640px; margin: 0 auto; width: 100%;
   animation: fade .3s ease;
 }

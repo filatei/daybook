@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { StoreProvider, useStore, useRole, isGateRole } from './store.jsx';
 import { api, scoped, setToken } from './api.js';
 import Nav from './components/Nav.jsx';
@@ -56,6 +56,11 @@ function Inner() {
 
   // Gate-only roles (Gateman, Supervisor) are confined to the Gate screen.
   useEffect(() => { if (isGateRole(role) && tab !== 'gate') go('gate'); }, [role, tab, go]);
+
+  // .main-content is the app shell's only scroll area, so it persists across tab
+  // changes — reset it to the top whenever the tab switches.
+  const mainRef = useRef(null);
+  useEffect(() => { if (mainRef.current) mainRef.current.scrollTop = 0; }, [tab]);
 
   // Sign out cleanly when the session expires (api.js fires this on a 401).
   useEffect(() => {
@@ -120,7 +125,7 @@ function Inner() {
   return (
     <>
       <Nav />
-      <main className="main-content">
+      <main className="main-content" ref={mainRef}>
         {isGroup && tab !== 'dashboard' ? (
           <div className="empty">
             <div className="ic">🏢</div>

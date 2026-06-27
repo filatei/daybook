@@ -394,9 +394,9 @@ export default function Dashboard() {
           query={bankDrill}
           onClose={() => setBankDrill(null)}
           onPick={(r) => {
-            const f = r.terminal ? `terminal=${encodeURIComponent(r.terminal)}` : (r.bank ? `bank=${encodeURIComponent(r.bank)}` : '');
+            const f = r.bank ? `bank=${encodeURIComponent(r.bank)}` : '';
             setBankDrill(null);
-            openOrders(`${r.kind === 'POS' ? '💳' : '🏦'} ${r.terminal || r.bank || 'Unspecified'}`, `method=NONCASH${f ? '&' + f : ''}`);
+            openOrders(`${r.kind === 'POS' ? '💳' : '🏦'} ${r.bank || 'Unspecified'}`, `method=NONCASH${f ? '&' + f : ''}`);
           }}
         />
       )}

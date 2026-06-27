@@ -67,9 +67,26 @@ export function OrderDetailModal({ order, orderId, onClose }) {
   );
 }
 
-// Non-cash sales grouped by POS terminal / transfer bank → tap a group to drill
-// into its orders.  `query` carries the date-range (+ optional site) filter.
-const labelOf = (r) => r.terminal || r.bank || 'Unspecified';
+// Non-cash sales grouped by OWNER (acquiring bank — GTB, Moniepoint, …) so the
+// daybook reconciles per POS owner, summing across that owner's terminals.
+// `query` carries the date-range (+ optional site) filter.
+const ownerOf = (r) => r.bank || 'Unspecified';
+
+// Aggregate raw /pos/banks rows (one per bank+terminal) into one row per owner.
+function byOwner(list) {
+  const m = {};
+  for (const r of list) {
+    const k = ownerOf(r);
+    if (!m[k]) m[k] = { bank: r.bank || null, kind: r.kind, amount: 0, orders: 0, terminals: new Set() };
+    m[k].amount += Number(r.amount) || 0;
+    m[k].orders += Number(r.orders) || 0;
+    if (r.terminal) m[k].terminals.add(r.terminal);
+  }
+  return Object.values(m)
+    .map((g) => ({ ...g, terminals: g.terminals.size }))
+    .sort((a, b) => b.amount - a.amount);
+}
+
 // Module-level (stable identity). Takes onPick as a prop instead of closing over it.
 function BankGroup({ heading, list, icon, onPick }) {
   if (list.length === 0) return null;
@@ -80,8 +97,8 @@ function BankGroup({ heading, list, icon, onPick }) {
         <button key={i} onClick={() => onPick(r)}
           style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '9px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{labelOf(r)}</div>
-            {r.terminal && r.bank && <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.bank}</div>}
+            <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ownerOf(r)}</div>
+            {r.terminals > 1 && <div style={{ fontSize: 11, color: 'var(--muted)' }}>{r.terminals} terminals</div>}
           </div>
           <div style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
             <div style={{ fontWeight: 800 }}>{ngn(r.amount)}</div>
@@ -96,17 +113,17 @@ function BankGroup({ heading, list, icon, onPick }) {
 export function BankBreakdownModal({ title, query, onClose, onPick }) {
   const [rows, setRows] = useState(null);
   useEffect(() => { api(scoped(`/pos/banks?${query}`)).then(setRows).catch(() => setRows([])); }, [query]);
-  const pos = (rows || []).filter((r) => r.kind === 'POS');
-  const tr = (rows || []).filter((r) => r.kind === 'TRANSFER');
+  const pos = byOwner((rows || []).filter((r) => r.kind === 'POS'));
+  const tr = byOwner((rows || []).filter((r) => r.kind === 'TRANSFER'));
   return (
     <Backdrop onClose={onClose}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <strong>{title || 'Transfer / POS breakdown'}</strong>
+        <strong>{title || 'POS by owner'}</strong>
         <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={onClose}>✕</button>
       </div>
       {rows === null ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
         : rows.length === 0 ? <div className="empty"><div className="ic">💳</div><p>No transfer/POS sales in this period</p></div>
-          : <><BankGroup heading="POS terminals" list={pos} icon="💳" onPick={onPick} /><BankGroup heading="Transfer banks" list={tr} icon="🏦" onPick={onPick} /></>}
+          : <><BankGroup heading="POS / Card by owner" list={pos} icon="💳" onPick={onPick} /><BankGroup heading="Transfers by bank" list={tr} icon="🏦" onPick={onPick} /></>}
     </Backdrop>
   );
 }

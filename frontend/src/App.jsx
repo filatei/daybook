@@ -62,6 +62,44 @@ function Inner() {
   const mainRef = useRef(null);
   useEffect(() => { if (mainRef.current) mainRef.current.scrollTop = 0; }, [tab]);
 
+  // ── Pull-to-refresh ───────────────────────────────────────────────────────
+  // The fixed app-shell makes .main-content (not the document) the scroller, so
+  // the browser's native pull-to-refresh no longer fires. Re-implement it: drag
+  // down from the top past the threshold to reload the app (newest bundle).
+  const [ptr, setPtr] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    let startY = 0, pulling = false, dist = 0;
+    const THRESH = 70, MAX = 110;
+    const onStart = (e) => {
+      if (el.scrollTop <= 0 && e.touches.length === 1) { startY = e.touches[0].clientY; pulling = true; dist = 0; }
+      else pulling = false;
+    };
+    const onMove = (e) => {
+      if (!pulling) return;
+      const dy = e.touches[0].clientY - startY;
+      if (dy <= 0) { dist = 0; setPtr(0); return; }
+      dist = Math.min(MAX, dy * 0.5);   // rubber-band resistance
+      setPtr(dist);
+    };
+    const onEnd = () => {
+      if (!pulling) return;
+      pulling = false;
+      if (dist >= THRESH) { setRefreshing(true); setPtr(THRESH); setTimeout(() => window.location.reload(), 250); }
+      else setPtr(0);
+    };
+    el.addEventListener('touchstart', onStart, { passive: true });
+    el.addEventListener('touchmove', onMove, { passive: true });
+    el.addEventListener('touchend', onEnd);
+    return () => {
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchmove', onMove);
+      el.removeEventListener('touchend', onEnd);
+    };
+  }, [user, tenants.length]);
+
   // Sign out cleanly when the session expires (api.js fires this on a 401).
   useEffect(() => {
     const onExpired = () => { localStorage.removeItem('daybook_token'); logout(); toast('Session expired — please sign in again', 'info'); };
@@ -126,6 +164,9 @@ function Inner() {
     <>
       <Nav />
       <main className="main-content" ref={mainRef}>
+        <div className="ptr" style={{ height: ptr, opacity: ptr ? 1 : 0 }}>
+          <span className={`ptr-ic ${refreshing || ptr >= 70 ? 'go' : ''}`}>↻</span>
+        </div>
         {isGroup && tab !== 'dashboard' ? (
           <div className="empty">
             <div className="ic">🏢</div>

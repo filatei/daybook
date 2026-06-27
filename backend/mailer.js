@@ -483,6 +483,7 @@ async function sendManualReport({ tenant, date, data, notes, to }) {
   const cash = d.cash || {};
   const pb = d.packing_bags || {};
   const rolls = Array.isArray(d.rolls) ? d.rolls : [];
+  const exps = Array.isArray(d.expenses) ? d.expenses.filter((e) => e && (e.name || e.amount)) : [];
   const subject = `Daily report (manual) — ${name} · ${date}`;
   const num = (v) => (Number(v) || 0).toLocaleString('en-NG');
   const row = (k, v, bold) => `<tr><td style="padding:5px 10px;border-bottom:1px solid #eee">${esc(k)}</td><td style="padding:5px 10px;border-bottom:1px solid #eee;text-align:right;${bold ? 'font-weight:800' : ''}">${v}</td></tr>`;
@@ -504,14 +505,21 @@ async function sendManualReport({ tenant, date, data, notes, to }) {
         ${row('Total sales', ngn(sum.total_sales), true)}
         ${row('Diesel', '(' + ngn(sum.diesel) + ')')}
         ${row('Imprest', '(' + ngn(sum.imprest) + ')')}
+        ${(Number(sum.other_expenses) || 0) > 0 ? row('Other expenses', '(' + ngn(sum.other_expenses) + ')') : ''}
         ${row('Balance', ngn(sum.balance), true)}
       </table>
       <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:14px">
         ${row('Total cash', ngn(cash.total_cash), true)}
         ${row('Diesel', '(' + ngn(cash.diesel) + ')')}
         ${row('Imprest', '(' + ngn(cash.imprest) + ')')}
+        ${(Number(cash.other_expenses) || 0) > 0 ? row('Other expenses', '(' + ngn(cash.other_expenses) + ')') : ''}
         ${row('Total deposit', ngn(cash.total_deposit), true)}
       </table>
+      ${exps.length ? `<div style="font-weight:700;margin:10px 0 2px">Other expenses</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        ${exps.map((e) => row(esc(e.name || '—'), '(' + ngn(e.amount) + ')')).join('')}
+        ${row('Total', '(' + ngn(exps.reduce((s, e) => s + (Number(e.amount) || 0), 0)) + ')', true)}
+      </table>` : ''}
       <div style="font-weight:700;margin:10px 0 2px">Packing bags usage</div>
       <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:6px">
         ${row('Total used', num(pb.used))}

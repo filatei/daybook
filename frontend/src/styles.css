@@ -212,10 +212,22 @@ a { color: var(--brand-d); text-decoration: none; }
 .empty .ic { font-size: 42px; opacity: .5; }
 .skel {
   height: 64px; border-radius: 14px;
-  background: linear-gradient(90deg, #eef1f6, #f7f9fc, #eef1f6);
+  background: linear-gradient(90deg, #cfd6e0 25%, #e3e8ef 50%, #cfd6e0 75%);
   background-size: 200% 100%; animation: sh 1.2s infinite; margin-bottom: 12px;
 }
 @keyframes sh { to { background-position: -200% 0; } }
+
+/* ── Pull-to-refresh indicator ───────────────────────────────────────────── */
+.ptr {
+  display: flex; align-items: flex-end; justify-content: center;
+  overflow: hidden; margin-bottom: 2px; transition: opacity .2s ease;
+}
+.ptr-ic {
+  display: inline-block; font-size: 22px; line-height: 1; padding-bottom: 8px;
+  color: var(--muted); transform: rotate(0deg);
+}
+.ptr-ic.go { animation: ptrspin .7s linear infinite; color: var(--brand, #2563eb); }
+@keyframes ptrspin { to { transform: rotate(360deg); } }
 canvas { max-width: 100%; }
 
 /* ── Forms ─────────────────────────────────────────────────────────────────── */

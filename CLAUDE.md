@@ -42,14 +42,20 @@ React 18 + Vite frontend, Node/Express + PostgreSQL backend. Deployed as PWA.
 - [x] Backend: loaded_at migration, /pos/sales/:id/loaded route
 - [x] Backend: gate routes (GET /pos/gate/:receiptNo, POST /pos/sales/:id/exit)
 
-## Pending Work (Priority Order)
-1. **Data migration** — Fido's historical data lives in MongoDB on `fido.torama.ng` server. Old code at `/Users/user1/projects/tor-pos-backend` (MongoDB). Need SSH read-only access to pull collections and insert into new Postgres with Fido's tenant_id.
-2. **Dashboard** — currently shows ₦0, needs real data. Backend `/pos/summary` exists. Add today's live KPIs, top products.
-3. **Reports view** — date-range sales + expenses
-4. **Staff view** — clock-in/out, face liveness, payroll linkage
-5. **Documents view** — incident reports / daily logs
-6. **Staff typeahead** — `GET /suggest/staff?q=` + Typeahead in staff-name fields
-7. **TypeScript migration** — deferred until after first working deploy
+## Recently Completed (Phase 4/5 — verified in code, 2026-06-27)
+- [x] Dashboard — real data from `/pos/range` (cash/transfer/POS, by-day/site/product/customer/hour), incentive, POS-by-owner drill
+- [x] Reports view — date-range filters, daily-report archive, ✨ Generate daily report, 📝 Manual daily report (tenant-wide, email+archive), POS Moniepoint/GTB split by owner
+- [x] Staff view — badge clock-in/out (`/attendance/badge`), face liveness (useFaceLiveness, face_descriptor enrol, match_score, tenant face_match_threshold), payroll linkage (Payroll.jsx)
+- [x] Documents view — categories incl. incident reports / daily logs, attachments, per-site/company-wide
+- [x] Staff typeahead — `/suggest/staff` (+ customers, vendors, expense-items)
+- [x] CSV exports — `/activity/all.csv`, `/timesheets/summary.csv`
+- [x] App-shell fixed top/bottom nav (content scrolls under); ETL tooling for Fido Mongo→Postgres (`backend/etl.js`, supports `--verify`, batching)
+
+## Pending Work (Priority Order) — accurate as of 2026-06-27
+1. **Run the Fido data migration** — the ETL is BUILT (`backend/etl.js`); what's pending is EXECUTION: set `SALES_MONGO_URL` (read-only) + `SALES_DB`, run the import into Postgres under Fido's tenant_id, then `--verify` (reconcile counts + ₦ per site). Needs SSH/Mongo access to the old `fido.torama.ng` server.
+2. **Reports sales+expenses CSV/range export** — Reports has the on-screen view; a downloadable sales+expenses export for a date range is not yet built (only activity + timesheets CSVs exist).
+3. **TypeScript migration** — still deferred (optional; JS works in prod).
+4. **(Backlog) Staff face-liveness polish** — core enrol/match works; optional UX hardening (re-enrol flow, threshold tuning UI) if needed.
 
 ## Key Technical Notes
 - All backend updates use `router.patch()` not `router.put()`

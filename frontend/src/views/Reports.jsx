@@ -687,6 +687,7 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
 const emptyManual = () => ({
   summary: { total_sales: '', diesel: '', imprest: '' },
   cash: { total_cash: '', diesel: '', imprest: '' },
+  expenses: [],   // [{ name, amount }] — misc cash expenses, deducted from balance & deposit
   packing_bags: { used: '', available: '' },
   rolls: [{ product: '', used_count: '', used_kg: '', available_count: '', available_kg: '' }],
   notes: '',
@@ -712,19 +713,25 @@ function ManualReportModal({ initialDate, onSaved, onClose }) {
   }, [date]);
 
   const N = (v) => Number(v) || 0;
-  const balance = N(f.summary.total_sales) - N(f.summary.diesel) - N(f.summary.imprest);
-  const deposit = N(f.cash.total_cash) - N(f.cash.diesel) - N(f.cash.imprest);
+  const expenses = Array.isArray(f.expenses) ? f.expenses : [];
+  const otherTotal = expenses.reduce((s, e) => s + N(e.amount), 0);
+  const balance = N(f.summary.total_sales) - N(f.summary.diesel) - N(f.summary.imprest) - otherTotal;
+  const deposit = N(f.cash.total_cash) - N(f.cash.diesel) - N(f.cash.imprest) - otherTotal;
 
   const setSum = (k, v) => setF((p) => ({ ...p, summary: { ...p.summary, [k]: v } }));
   const setCash = (k, v) => setF((p) => ({ ...p, cash: { ...p.cash, [k]: v } }));
+  const setExp = (i, k, v) => setF((p) => { const e = [...(p.expenses || [])]; e[i] = { ...e[i], [k]: v }; return { ...p, expenses: e }; });
+  const addExp = () => setF((p) => ({ ...p, expenses: [...(p.expenses || []), { name: '', amount: '' }] }));
+  const rmExp = (i) => setF((p) => ({ ...p, expenses: (p.expenses || []).filter((_, j) => j !== i) }));
   const setPB = (k, v) => setF((p) => ({ ...p, packing_bags: { ...p.packing_bags, [k]: v } }));
   const setRoll = (i, k, v) => setF((p) => { const r = [...p.rolls]; r[i] = { ...r[i], [k]: v }; return { ...p, rolls: r }; });
   const addRoll = () => setF((p) => ({ ...p, rolls: [...p.rolls, { product: '', used_count: '', used_kg: '', available_count: '', available_kg: '' }] }));
   const rmRoll = (i) => setF((p) => ({ ...p, rolls: p.rolls.filter((_, j) => j !== i) }));
 
   const buildData = () => ({
-    summary: { total_sales: N(f.summary.total_sales), diesel: N(f.summary.diesel), imprest: N(f.summary.imprest), balance },
-    cash: { total_cash: N(f.cash.total_cash), diesel: N(f.cash.diesel), imprest: N(f.cash.imprest), total_deposit: deposit },
+    summary: { total_sales: N(f.summary.total_sales), diesel: N(f.summary.diesel), imprest: N(f.summary.imprest), other_expenses: otherTotal, balance },
+    cash: { total_cash: N(f.cash.total_cash), diesel: N(f.cash.diesel), imprest: N(f.cash.imprest), other_expenses: otherTotal, total_deposit: deposit },
+    expenses: expenses.filter((e) => e.name || e.amount).map((e) => ({ name: (e.name || '').trim(), amount: N(e.amount) })),
     packing_bags: { used: N(f.packing_bags.used), available: N(f.packing_bags.available) },
     rolls: f.rolls.filter((r) => r.product || r.used_count || r.available_count)
       .map((r) => ({ product: r.product, used_count: N(r.used_count), used_kg: N(r.used_kg), available_count: N(r.available_count), available_kg: N(r.available_kg) })),
@@ -770,6 +777,7 @@ function ManualReportModal({ initialDate, onSaved, onClose }) {
               <div><label className="fl">Total sales</label>{numInput(f.summary.total_sales, (v) => setSum('total_sales', v))}</div>
               <div><label className="fl">Diesel</label>{numInput(f.summary.diesel, (v) => setSum('diesel', v))}</div>
               <div><label className="fl">Imprest</label>{numInput(f.summary.imprest, (v) => setSum('imprest', v))}</div>
+              {otherTotal > 0 && <div><label className="fl">Other expenses</label><input className="input" disabled value={ngn(otherTotal)} /></div>}
               <div><label className="fl">Balance</label><input className="input" disabled value={ngn(balance)} /></div>
             </div>
 
@@ -778,8 +786,25 @@ function ManualReportModal({ initialDate, onSaved, onClose }) {
               <div><label className="fl">Total cash</label>{numInput(f.cash.total_cash, (v) => setCash('total_cash', v))}</div>
               <div><label className="fl">Diesel</label>{numInput(f.cash.diesel, (v) => setCash('diesel', v))}</div>
               <div><label className="fl">Imprest</label>{numInput(f.cash.imprest, (v) => setCash('imprest', v))}</div>
+              {otherTotal > 0 && <div><label className="fl">Other expenses</label><input className="input" disabled value={ngn(otherTotal)} /></div>}
               <div><label className="fl">Total deposit</label><input className="input" disabled value={ngn(deposit)} /></div>
             </div>
+
+            <div style={{ fontWeight: 700, marginTop: 14, marginBottom: 2 }}>Other expenses <span style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 12 }}>· deducted from balance &amp; deposit</span></div>
+            {expenses.map((e, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 8 }}>
+                <div style={{ flex: 2 }}>
+                  <label className="fl" style={{ marginTop: 0 }}>Expense</label>
+                  <input className="input" placeholder="e.g. transport, repairs" value={e.name} onChange={(ev) => setExp(i, 'name', ev.target.value)} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label className="fl" style={{ marginTop: 0 }}>Amount (₦)</label>
+                  <input type="number" inputMode="decimal" className="input" value={e.amount} onChange={(ev) => setExp(i, 'amount', ev.target.value)} />
+                </div>
+                <button className="x" onClick={() => rmExp(i)} style={{ marginBottom: 2 }}>✕</button>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" style={{ marginBottom: 4 }} onClick={addExp}>+ Add expense</button>
 
             <div style={{ fontWeight: 700, marginTop: 14, marginBottom: 2 }}>Packing bags usage</div>
             <div className="grid2">
@@ -825,6 +850,7 @@ function ManualReportDetail({ report, onEdit, onClose, onChanged }) {
   const [emailing, setEmailing] = useState(false);
   const d = report.data || {};
   const sum = d.summary || {}, cash = d.cash || {}, pb = d.packing_bags || {}, rolls = Array.isArray(d.rolls) ? d.rolls : [];
+  const exps = Array.isArray(d.expenses) ? d.expenses.filter((e) => e && (e.name || e.amount)) : [];
   const num = (v) => (Number(v) || 0).toLocaleString();
   const line = (k, v, bold) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, padding: '3px 0', ...(bold ? { fontWeight: 800 } : {}) }}>
@@ -853,12 +879,14 @@ function ManualReportDetail({ report, onEdit, onClose, onChanged }) {
         {line('Total sales', ngn(sum.total_sales), true)}
         {line('Diesel', `(${ngn(sum.diesel)})`)}
         {line('Imprest', `(${ngn(sum.imprest)})`)}
+        {(num(sum.other_expenses) > 0) && line('Other expenses', `(${ngn(sum.other_expenses)})`)}
         {line('Balance', ngn(sum.balance), true)}
       </div>
       <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
         {line('Total cash', ngn(cash.total_cash), true)}
         {line('Diesel', `(${ngn(cash.diesel)})`)}
         {line('Imprest', `(${ngn(cash.imprest)})`)}
+        {(num(cash.other_expenses) > 0) && line('Other expenses', `(${ngn(cash.other_expenses)})`)}
         {line('Total deposit', ngn(cash.total_deposit), true)}
       </div>
       <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
@@ -866,6 +894,12 @@ function ManualReportDetail({ report, onEdit, onClose, onChanged }) {
         {line('Total used', num(pb.used))}
         {line('Available', num(pb.available))}
       </div>
+      {exps.length > 0 && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Other expenses</div>
+          {exps.map((e, i) => line(e.name || '—', `(${ngn(e.amount)})`))}
+        </div>
+      )}
       {rolls.length > 0 && (
         <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>Rolls usage</div>

@@ -178,6 +178,22 @@ async function migrate() {
       UNIQUE(tenant_id, site_id, report_date)
     );
 
+    -- MANUAL REPORTS — tenant-wide daily report keyed in by the Snr Accountant
+    -- (matches the paper/manual end-of-day report). One per tenant per day.
+    CREATE TABLE IF NOT EXISTS manual_reports (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+      report_date   TEXT NOT NULL,
+      data          TEXT,        -- JSON: { summary, cash, packing_bags, rolls[] }
+      notes         TEXT,
+      status        TEXT CHECK(status IN ('DRAFT','SUBMITTED','EMAILED')) DEFAULT 'SUBMITTED',
+      created_by    TEXT REFERENCES users(id),
+      created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      updated_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      emailed_at    BIGINT,
+      UNIQUE(tenant_id, report_date)
+    );
+
     -- DOCUMENTS — uploads of any kind, categorised
     CREATE TABLE IF NOT EXISTS documents (
       id            TEXT PRIMARY KEY,
@@ -455,6 +471,7 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_member_user   ON memberships(user_id);
     CREATE INDEX IF NOT EXISTS idx_member_tenant ON memberships(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_reports_td    ON daily_reports(tenant_id, report_date);
+    CREATE INDEX IF NOT EXISTS idx_manrep_td     ON manual_reports(tenant_id, report_date);
     CREATE INDEX IF NOT EXISTS idx_docs_tc       ON documents(tenant_id, category);
     CREATE INDEX IF NOT EXISTS idx_sites_tenant  ON sites(tenant_id);
     CREATE INDEX IF NOT EXISTS idx_genlogs       ON generator_logs(tenant_id, generator_id, log_date);

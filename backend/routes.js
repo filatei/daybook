@@ -14,7 +14,7 @@ const {
   verifyGoogleToken, signSession, requireAuth, optionalAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, siteBound, GOOGLE_CLIENT_ID,
 } = require('./auth');
-const { sendDailyReport, sendGeneratedReport, sendInvite, sendContactMessage, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
+const { sendDailyReport, sendGeneratedReport, sendManualReport, sendInvite, sendContactMessage, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
 
 const ROLE_LABELS = {
   GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
@@ -1004,6 +1004,99 @@ router.post('/reports/generate/email', requireAuth, needTenant('SECRETARY'), asy
       [uuid(), req.ctx.tenant_id, to.join(','), `Daily report ${date}`, 'FAILED', e.message]).catch(() => {});
     res.status(502).json({ error: 'email failed: ' + e.message });
   }
+});
+
+// ── Manual daily report (tenant-wide, Snr Accountant) ──────────────────────────
+// A keyed-in end-of-day report matching the paper format. One per tenant per day.
+const tzToday = () => new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+
+function manualView(r) {
+  return {
+    id: r.id, kind: 'MANUAL', tenant_id: r.tenant_id, report_date: r.report_date,
+    data: J(r.data, {}), notes: r.notes || '', status: r.status,
+    tenant_name: r.tenant_name || null, created_at: r.created_at,
+    updated_at: r.updated_at, emailed_at: r.emailed_at,
+    total_sales: (J(r.data, {}).summary || {}).total_sales || 0,
+    site_name: 'Manual report',
+  };
+}
+
+// Single manual report for a date (for prefill/edit). Returns { data:null } if none.
+router.get('/reports/manual', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const date = req.query.date || tzToday();
+  const r = await qone('SELECT * FROM manual_reports WHERE tenant_id=? AND report_date=?', [req.ctx.tenant_id, date]);
+  res.json(r ? manualView(r) : { data: null, report_date: date });
+});
+
+// List manual reports in a date range (merged into the archive on the client).
+router.get('/reports/manual/list', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const { from, to } = req.query; const where = ['m.tenant_id=?']; const args = [req.ctx.tenant_id];
+  if (from) { where.push('m.report_date>=?'); args.push(from); }
+  if (to) { where.push('m.report_date<=?'); args.push(to); }
+  const rows = await qall(
+    `SELECT m.*, t.name tenant_name FROM manual_reports m JOIN tenants t ON t.id=m.tenant_id
+     WHERE ${where.join(' AND ')} ORDER BY m.report_date DESC LIMIT 500`, args);
+  res.json(rows.map(manualView));
+});
+
+// Create or update today's (or a chosen date's) manual report. Upsert by date.
+router.post('/reports/manual', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || tzToday();
+  const data = b.data && typeof b.data === 'object' ? b.data : {};
+  const notes = (b.notes || '').trim() || null;
+  const status = b.submit ? 'SUBMITTED' : (b.status || 'DRAFT');
+  const now = Math.floor(Date.now() / 1000);
+  const existing = await qone('SELECT id FROM manual_reports WHERE tenant_id=? AND report_date=?', [req.ctx.tenant_id, date]);
+  if (existing) {
+    await qrun('UPDATE manual_reports SET data=?, notes=?, status=?, updated_at=? WHERE id=?',
+      [JSON.stringify(data), notes, status, now, existing.id]);
+  } else {
+    await qrun('INSERT INTO manual_reports (id,tenant_id,report_date,data,notes,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, date, JSON.stringify(data), notes, status, req.user.id, now, now]);
+  }
+  await audit(req.ctx.tenant_id, req.user.id, existing ? 'UPDATE' : 'CREATE', 'manual-report', date, {});
+  const r = await qone('SELECT m.*, t.name tenant_name FROM manual_reports m JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=? AND m.report_date=?', [req.ctx.tenant_id, date]);
+  res.status(201).json(manualView(r));
+});
+
+// Email a manual report (saving it first if a payload is supplied).
+router.post('/reports/manual/email', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const b = req.body || {};
+  const date = b.date || tzToday();
+  // Persist the latest values before sending so the email and archive match.
+  if (b.data && typeof b.data === 'object') {
+    const notes = (b.notes || '').trim() || null;
+    const now = Math.floor(Date.now() / 1000);
+    const existing = await qone('SELECT id FROM manual_reports WHERE tenant_id=? AND report_date=?', [req.ctx.tenant_id, date]);
+    if (existing) await qrun('UPDATE manual_reports SET data=?, notes=?, status=?, updated_at=? WHERE id=?', [JSON.stringify(b.data), notes, 'SUBMITTED', now, existing.id]);
+    else await qrun('INSERT INTO manual_reports (id,tenant_id,report_date,data,notes,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)', [uuid(), req.ctx.tenant_id, date, JSON.stringify(b.data), notes, 'SUBMITTED', req.user.id, now, now]);
+  }
+  const r = await qone('SELECT * FROM manual_reports WHERE tenant_id=? AND report_date=?', [req.ctx.tenant_id, date]);
+  if (!r) return res.status(400).json({ error: 'enter the report first' });
+  const tenant = await tenantById(req.ctx.tenant_id);
+  const to = reportRecipients({ tenant, site: null, senderEmail: req.user.email });
+  try {
+    const sent = await sendManualReport({ tenant, date, data: J(r.data, {}), notes: r.notes || '', to });
+    await qrun('UPDATE manual_reports SET status=?, emailed_at=? WHERE id=?', ['EMAILED', Math.floor(Date.now() / 1000), r.id]);
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, to.join(','), sent.subject, sent.queued ? 'QUEUED' : 'SENT']).catch(() => {});
+    res.json({ ok: true, to, queued: !!sent.queued });
+  } catch (e) {
+    await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)',
+      [uuid(), req.ctx.tenant_id, to.join(','), `Manual report ${date}`, 'FAILED', e.message]).catch(() => {});
+    res.status(502).json({ error: 'email failed: ' + e.message });
+  }
+});
+
+router.delete('/reports/manual/:id', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const r = await qone('SELECT * FROM manual_reports WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  const allowed = r.created_by === req.user.id || req.user.is_superadmin || atLeast(req.ctx.role, 'GENERAL_MANAGER');
+  if (!allowed) return res.status(403).json({ error: 'only the creator or a manager can delete it' });
+  await qrun('DELETE FROM manual_reports WHERE id=?', [r.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'DELETE', 'manual-report', r.report_date, {});
+  res.json({ ok: true });
 });
 
 // ── Daily operations capture (per site/day) ────────────────────────────────────

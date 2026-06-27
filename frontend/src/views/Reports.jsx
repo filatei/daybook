@@ -683,6 +683,216 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
   );
 }
 
+// ── Manual report (tenant-wide, Snr Accountant) ────────────────────────────────
+const emptyManual = () => ({
+  summary: { total_sales: '', diesel: '', imprest: '' },
+  cash: { total_cash: '', diesel: '', imprest: '' },
+  packing_bags: { used: '', available: '' },
+  rolls: [{ product: '', used_count: '', used_kg: '', available_count: '', available_kg: '' }],
+  notes: '',
+});
+
+function ManualReportModal({ initialDate, onSaved, onClose }) {
+  const { toast } = useStore();
+  const [date, setDate] = useState(initialDate || today());
+  const [f, setF] = useState(emptyManual());
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [emailing, setEmailing] = useState(false);
+
+  // Load any existing report for the chosen date so it edits in place (one/day).
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    api(scoped(`/reports/manual?date=${encodeURIComponent(date)}`))
+      .then((r) => { if (!live) return; setF(r && r.data ? { ...emptyManual(), ...r.data, notes: r.notes || '' } : emptyManual()); })
+      .catch(() => { if (live) setF(emptyManual()); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [date]);
+
+  const N = (v) => Number(v) || 0;
+  const balance = N(f.summary.total_sales) - N(f.summary.diesel) - N(f.summary.imprest);
+  const deposit = N(f.cash.total_cash) - N(f.cash.diesel) - N(f.cash.imprest);
+
+  const setSum = (k, v) => setF((p) => ({ ...p, summary: { ...p.summary, [k]: v } }));
+  const setCash = (k, v) => setF((p) => ({ ...p, cash: { ...p.cash, [k]: v } }));
+  const setPB = (k, v) => setF((p) => ({ ...p, packing_bags: { ...p.packing_bags, [k]: v } }));
+  const setRoll = (i, k, v) => setF((p) => { const r = [...p.rolls]; r[i] = { ...r[i], [k]: v }; return { ...p, rolls: r }; });
+  const addRoll = () => setF((p) => ({ ...p, rolls: [...p.rolls, { product: '', used_count: '', used_kg: '', available_count: '', available_kg: '' }] }));
+  const rmRoll = (i) => setF((p) => ({ ...p, rolls: p.rolls.filter((_, j) => j !== i) }));
+
+  const buildData = () => ({
+    summary: { total_sales: N(f.summary.total_sales), diesel: N(f.summary.diesel), imprest: N(f.summary.imprest), balance },
+    cash: { total_cash: N(f.cash.total_cash), diesel: N(f.cash.diesel), imprest: N(f.cash.imprest), total_deposit: deposit },
+    packing_bags: { used: N(f.packing_bags.used), available: N(f.packing_bags.available) },
+    rolls: f.rolls.filter((r) => r.product || r.used_count || r.available_count)
+      .map((r) => ({ product: r.product, used_count: N(r.used_count), used_kg: N(r.used_kg), available_count: N(r.available_count), available_kg: N(r.available_kg) })),
+  });
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api(scoped('/reports/manual'), { method: 'POST', body: { date, data: buildData(), notes: f.notes.trim() || null, submit: true } });
+      toast('Manual report saved ✓', 'ok'); onSaved();
+    } catch (e) { toast(e.message || 'Save failed', 'err'); }
+    setSaving(false);
+  };
+  const send = async () => {
+    if (emailing) return;
+    setEmailing(true);
+    try {
+      const r = await api(scoped('/reports/manual/email'), { method: 'POST', body: { date, data: buildData(), notes: f.notes.trim() || null } });
+      toast(r.queued ? `Queued → ${(r.to || []).join(', ')}` : `Emailed ✓ → ${(r.to || []).join(', ')}`, 'ok');
+      onSaved(); onClose();
+    } catch (e) { toast(e.message || 'Email failed', 'err'); }
+    setEmailing(false);
+  };
+
+  const numInput = (val, on) => (
+    <input type="number" inputMode="decimal" className="input" value={val} onChange={(e) => on(e.target.value)} />
+  );
+
+  return (
+    <div onClick={() => !saving && !emailing && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 130 }}>
+      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 460, margin: 0, maxHeight: '92vh', overflowY: 'auto', borderRadius: '20px 20px 0 0', paddingBottom: 'calc(16px + var(--safe-b))' }}>
+        <div className="grip" />
+        <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 2 }}>📝 Manual daily report</div>
+        <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>Key in the day's figures, then send. One report per day — re-opening a date edits it.</p>
+
+        <label className="fl">Date</label>
+        <input type="date" className="input" value={date} max={today()} onChange={(e) => setDate(e.target.value)} />
+
+        {loading ? <div className="skel" style={{ marginTop: 12 }} /> : (
+          <>
+            <div style={{ fontWeight: 700, marginTop: 14, marginBottom: 2 }}>Sales</div>
+            <div className="grid2">
+              <div><label className="fl">Total sales</label>{numInput(f.summary.total_sales, (v) => setSum('total_sales', v))}</div>
+              <div><label className="fl">Diesel</label>{numInput(f.summary.diesel, (v) => setSum('diesel', v))}</div>
+              <div><label className="fl">Imprest</label>{numInput(f.summary.imprest, (v) => setSum('imprest', v))}</div>
+              <div><label className="fl">Balance</label><input className="input" disabled value={ngn(balance)} /></div>
+            </div>
+
+            <div style={{ fontWeight: 700, marginTop: 14, marginBottom: 2 }}>Cash</div>
+            <div className="grid2">
+              <div><label className="fl">Total cash</label>{numInput(f.cash.total_cash, (v) => setCash('total_cash', v))}</div>
+              <div><label className="fl">Diesel</label>{numInput(f.cash.diesel, (v) => setCash('diesel', v))}</div>
+              <div><label className="fl">Imprest</label>{numInput(f.cash.imprest, (v) => setCash('imprest', v))}</div>
+              <div><label className="fl">Total deposit</label><input className="input" disabled value={ngn(deposit)} /></div>
+            </div>
+
+            <div style={{ fontWeight: 700, marginTop: 14, marginBottom: 2 }}>Packing bags usage</div>
+            <div className="grid2">
+              <div><label className="fl">Total used</label>{numInput(f.packing_bags.used, (v) => setPB('used', v))}</div>
+              <div><label className="fl">Available</label>{numInput(f.packing_bags.available, (v) => setPB('available', v))}</div>
+            </div>
+
+            <div style={{ fontWeight: 700, marginTop: 14, marginBottom: 2 }}>Rolls usage</div>
+            {f.rolls.map((r, i) => (
+              <div key={i} style={{ border: '1px solid var(--line)', borderRadius: 10, padding: 10, marginBottom: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                  <div style={{ flex: 1 }}><label className="fl" style={{ marginTop: 0 }}>Product</label>
+                    <input className="input" placeholder="e.g. Fido Water / Akenfa" value={r.product} onChange={(e) => setRoll(i, 'product', e.target.value)} /></div>
+                  {f.rolls.length > 1 && <button className="x" onClick={() => rmRoll(i)} style={{ marginBottom: 2 }}>✕</button>}
+                </div>
+                <div className="grid2" style={{ marginTop: 6 }}>
+                  <div><label className="fl">Used (no.)</label>{numInput(r.used_count, (v) => setRoll(i, 'used_count', v))}</div>
+                  <div><label className="fl">Used (kg)</label>{numInput(r.used_kg, (v) => setRoll(i, 'used_kg', v))}</div>
+                  <div><label className="fl">Available (no.)</label>{numInput(r.available_count, (v) => setRoll(i, 'available_count', v))}</div>
+                  <div><label className="fl">Available (kg)</label>{numInput(r.available_kg, (v) => setRoll(i, 'available_kg', v))}</div>
+                </div>
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" style={{ marginBottom: 12 }} onClick={addRoll}>+ Add roll product</button>
+
+            <label className="fl">Notes</label>
+            <textarea className="input" rows={3} value={f.notes} onChange={(e) => setF((p) => ({ ...p, notes: e.target.value }))} placeholder="Anything notable…" />
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={save} disabled={saving || emailing}>{saving ? <span className="spin" /> : 'Save'}</button>
+              <button className="btn" style={{ flex: 1 }} onClick={send} disabled={saving || emailing}>{emailing ? <><span className="spin" /> Sending…</> : '✉️ Send'}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Read-only detail of a saved manual report (archive view) + Email/Edit actions.
+function ManualReportDetail({ report, onEdit, onClose, onChanged }) {
+  const { toast } = useStore();
+  const [emailing, setEmailing] = useState(false);
+  const d = report.data || {};
+  const sum = d.summary || {}, cash = d.cash || {}, pb = d.packing_bags || {}, rolls = Array.isArray(d.rolls) ? d.rolls : [];
+  const num = (v) => (Number(v) || 0).toLocaleString();
+  const line = (k, v, bold) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, padding: '3px 0', ...(bold ? { fontWeight: 800 } : {}) }}>
+      <span style={{ color: bold ? 'var(--ink)' : 'var(--muted)' }}>{k}</span><span>{v}</span>
+    </div>
+  );
+  const email = async () => {
+    if (emailing) return;
+    setEmailing(true);
+    try {
+      const r = await api(scoped('/reports/manual/email'), { method: 'POST', body: { date: report.report_date } });
+      toast(r.queued ? `Queued → ${(r.to || []).join(', ')}` : `Emailed ✓`, 'ok'); onChanged && onChanged();
+    } catch (e) { toast(e.message || 'Email failed', 'err'); }
+    setEmailing(false);
+  };
+  return (
+    <div>
+      <div className="grip" />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <h3 style={{ margin: 0, flex: 1 }}>📝 Manual report</h3>
+        <span className={`badge ${STATUS_LABEL[report.status] || 'draft'}`}>{report.status}</span>
+      </div>
+      <p className="sub" style={{ marginTop: 2 }}>{report.report_date}{report.tenant_name ? ` · ${report.tenant_name}` : ''}{report.emailed_at ? ' · ✉️ emailed' : ''}</p>
+
+      <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+        {line('Total sales', ngn(sum.total_sales), true)}
+        {line('Diesel', `(${ngn(sum.diesel)})`)}
+        {line('Imprest', `(${ngn(sum.imprest)})`)}
+        {line('Balance', ngn(sum.balance), true)}
+      </div>
+      <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+        {line('Total cash', ngn(cash.total_cash), true)}
+        {line('Diesel', `(${ngn(cash.diesel)})`)}
+        {line('Imprest', `(${ngn(cash.imprest)})`)}
+        {line('Total deposit', ngn(cash.total_deposit), true)}
+      </div>
+      <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>Packing bags</div>
+        {line('Total used', num(pb.used))}
+        {line('Available', num(pb.available))}
+      </div>
+      {rolls.length > 0 && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Rolls usage</div>
+          {rolls.map((r, i) => (
+            <div key={i} style={{ borderTop: i ? '1px solid var(--line)' : 'none', paddingTop: i ? 6 : 0, marginTop: i ? 6 : 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>{r.product || '—'}</div>
+              {line('Used', `${num(r.used_count)} (${num(r.used_kg)}kg)`)}
+              {line('Available', `${num(r.available_count)} (${num(r.available_kg)}kg)`)}
+            </div>
+          ))}
+        </div>
+      )}
+      {report.notes && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Notes</div>
+          <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{report.notes}</div>
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={email} disabled={emailing}>{emailing ? <><span className="spin" /> Sending…</> : '✉️ Email'}</button>
+        <button className="btn" style={{ flex: '1 1 100%' }} onClick={onEdit}>✎ Edit report</button>
+      </div>
+    </div>
+  );
+}
+
 export default function Reports() {
   const { openModal, closeModal, sites, tenant, tenants, toast } = useStore();
   const role = useRole();
@@ -692,6 +902,7 @@ export default function Reports() {
   const activeTenant = (tenants || []).find((t) => String(t.id) === String(tenant));
   const [reports, setReports] = useState([]);
   const [pos, setPos] = useState(null);
+  const [posBanks, setPosBanks] = useState([]);
   const [orders, setOrders] = useState([]);
   const [orderQ, setOrderQ] = useState('');
   const [viewOrder, setViewOrder] = useState(null);   // order open in the receipt modal
@@ -705,8 +916,12 @@ export default function Reports() {
   // clear both dates / tap "All time" for the lifetime totals.
   const [filters, setFilters] = useState({ site: '', from: today(), to: today() });
   const [genOpen, setGenOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualEditDate, setManualEditDate] = useState(null);
+  const [manualReports, setManualReports] = useState([]);
   // Hardware Back steps up one level (close detail → close drill list) not exit.
   useBackHandler(genOpen, () => setGenOpen(false));
+  useBackHandler(manualOpen, () => setManualOpen(false));
   useBackHandler(!!drill, () => setDrill(null));
   useBackHandler(!!viewOrder, () => { setViewOrder(null); setReadOnly(false); });
   useBackHandler(askDelete, () => setAskDelete(false));   // deepest sub-step first
@@ -718,15 +933,19 @@ export default function Reports() {
       if (filters.site) params.set('site', filters.site);
       if (filters.from) params.set('from', filters.from);
       if (filters.to) params.set('to', filters.to);
-      const [data, posData, ord] = await Promise.all([
+      const [data, posData, ord, banks] = await Promise.all([
         api(scoped(`/reports?${params}`)),
         api(scoped(`/pos/range?${params}`)).catch(() => null),  // imported + live POS sales
         api(scoped(`/pos/sales?source=app&${params}`)).catch(() => []),  // in-app orders only
+        api(scoped(`/pos/banks?${params}`)).catch(() => []),    // POS/transfer split by acquiring bank
       ]);
-      setReports(data); setPos(posData); setOrders(ord || []);
+      setReports(data); setPos(posData); setOrders(ord || []); setPosBanks(Array.isArray(banks) ? banks : []);
+      if (!isSM) {
+        try { setManualReports(await api(scoped(`/reports/manual/list?${params}`))); } catch { setManualReports([]); }
+      } else setManualReports([]);
     } catch { setReports([]); }
     setLoading(false);
-  }, [tenant, filters]);
+  }, [tenant, filters, isSM]);
 
   // Build the print/preview payload for an order row (tolerates both the in-app
   // pos_sales shape and the live-fido /pos/orders shape).
@@ -798,12 +1017,28 @@ export default function Reports() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Manual reports + auto daily reports share one archive list (manual tagged).
+  const archive = [...manualReports, ...reports]
+    .sort((a, b) => (a.report_date < b.report_date ? 1 : a.report_date > b.report_date ? -1 : 0));
+
   const openForm = (report = null) => {
     openModal(
       <ReportForm
         report={report}
         sites={sites}
         onSave={load}
+        onClose={closeModal}
+      />,
+      { guard: true }
+    );
+  };
+
+  const openManualDetail = (report) => {
+    openModal(
+      <ManualReportDetail
+        report={report}
+        onChanged={load}
+        onEdit={() => { closeModal(); setManualEditDate(report.report_date); setManualOpen(true); }}
         onClose={closeModal}
       />,
       { guard: true }
@@ -855,6 +1090,12 @@ export default function Reports() {
           <OpsForm sites={sites} siteBound={isSM} defaultDate={filters.from || today()} defaultSite={filters.site} onClose={closeModal} />, { guard: true })}>🛠 Day ops</button>
       </div>
 
+      {/* Snr Accountant: key in the tenant-wide manual end-of-day report */}
+      {!isSM && (
+        <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 14 }}
+          onClick={() => { setManualEditDate(filters.from || today()); setManualOpen(true); }}>📝 Manual report</button>
+      )}
+
       {/* Who has submitted the morning report (all-sites overview) */}
       {!isSM && (
         <MorningReportStatus date={(filters.from && filters.from === filters.to) ? filters.from : today()} />
@@ -882,6 +1123,34 @@ export default function Reports() {
               <span style={{ fontWeight: 600 }}>{ngn(b.sales)} · {b.orders.toLocaleString()}</span>
             </div>
           ))}
+
+          {/* Moniepoint / GTB / … split for reconciliation */}
+          {posBanks.length > 0 && (() => {
+            const grp = (kind) => {
+              const m = {};
+              posBanks.filter((r) => r.kind === kind).forEach((r) => { const k = r.bank || 'Unspecified'; m[k] = (m[k] || 0) + (Number(r.amount) || 0); });
+              return Object.entries(m).map(([bank, amount]) => ({ bank, amount })).sort((a, b) => b.amount - a.amount);
+            };
+            const posG = grp('POS'); const trG = grp('TRANSFER');
+            if (!posG.length && !trG.length) return null;
+            const rowOf = (b, p) => (
+              <div key={p + b.bank} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+                <span style={{ color: 'var(--muted)' }}>{b.bank}</span><span style={{ fontWeight: 600 }}>{ngn(b.amount)}</span>
+              </div>
+            );
+            return (
+              <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+                {posG.length > 0 && <>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--ink)', marginBottom: 2 }}>POS / Card by bank</div>
+                  {posG.map((b) => rowOf(b, 'p'))}
+                </>}
+                {trG.length > 0 && <>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--ink)', margin: '6px 0 2px' }}>Transfers by bank</div>
+                  {trG.map((b) => rowOf(b, 't'))}
+                </>}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -921,7 +1190,7 @@ export default function Reports() {
 
       {loading ? (
         <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
-      ) : reports.length === 0 ? (
+      ) : archive.length === 0 ? (
         <div className="empty"><div className="ic">🧾</div><p>{pos && pos.totals.orders > 0 ? 'No daily reports yet — POS sales shown above' : 'No reports found'}</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -930,14 +1199,18 @@ export default function Reports() {
             <span style={{ fontSize: 12, color: 'var(--muted)' }}>
               {(!filters.from && !filters.to) ? 'all dates'
                 : (filters.from && filters.from === filters.to) ? (filters.from === today() ? 'today' : filters.from)
-                : `${filters.from || '…'} → ${filters.to || '…'}`} · {reports.length}
+                : `${filters.from || '…'} → ${filters.to || '…'}`} · {archive.length}
             </span>
           </div>
-          {reports.map((r) => (
-            <button key={r.id} onClick={() => openDetail(r)}
+          {archive.map((r) => (
+            <button key={`${r.kind || 'AUTO'}-${r.id}`} onClick={() => r.kind === 'MANUAL' ? openManualDetail(r) : openDetail(r)}
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{r.site_name} <span className={`badge ${STATUS_LABEL[r.status] || 'draft'}`}>{r.status}</span></div>
+                <div style={{ fontWeight: 700 }}>
+                  {r.kind === 'MANUAL' ? '📝 Manual report' : r.site_name}{' '}
+                  <span className={`badge ${STATUS_LABEL[r.status] || 'draft'}`}>{r.status}</span>
+                  {r.kind === 'MANUAL' && <span className="badge" style={{ marginLeft: 4, background: '#eef2ff', color: '#4338ca' }}>manual</span>}
+                </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.report_date} · {r.tenant_name}</div>
               </div>
               <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(r.total_sales)}</div>
@@ -949,6 +1222,8 @@ export default function Reports() {
       <button className="fab" onClick={() => openForm()}>+</button>
 
       {genOpen && <GenerateReportModal sites={sites} siteBound={isSM} onSaved={load} onClose={() => setGenOpen(false)} />}
+
+      {manualOpen && <ManualReportModal initialDate={manualEditDate} onSaved={load} onClose={() => setManualOpen(false)} />}
 
       {/* Orders drill-down — list every order for the range + site */}
       {drill !== null && (

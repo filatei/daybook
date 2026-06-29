@@ -85,7 +85,13 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
         <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px' }} onClick={onClose}>✕</button>
       </div>
       {row('Pay type', line.pay_type || '—')}
-      {(line.tenants?.length || (line.by_site?.length)) ? row('Sites', (line.by_site || []).map((s) => s.site_name).join(', ') || (line.tenants || []).length + ' tenant(s)') : null}
+      {row('Primary site', bd ? (bd.primary_site || '—') : '…')}
+      {(() => {
+        if (!bd) return null;
+        const all = Array.from(new Set([...(bd.days || []), ...(bd.production || [])].map((r) => r.site_name).filter(Boolean)));
+        const others = all.filter((n) => n !== bd.primary_site);
+        return others.length ? row('Also worked at', others.join(', ')) : null;
+      })()}
       {piece
         ? row('Bags', `${line.bags_loaded} loaded · ${line.bags_bagged} bagged`)
         : row('Days clocked-in', `${line.days_present} of ${line.period_days}`)}
@@ -488,6 +494,19 @@ function SetupTab({ sites }) {
     setBagBusy(false);
   };
 
+  const [importingStaff, setImportingStaff] = useState(false);
+  const importStaff = async (file) => {
+    if (!file) return;
+    setImportingStaff(true);
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await api(scoped('/payroll/staff-import'), { method: 'POST', form: fd });
+      toast(`Staff: ${r.created} added, ${r.updated} updated${r.sites_unmatched?.length ? ` · location(s) not matched: ${r.sites_unmatched.join(', ')}` : ''}`, 'ok');
+      load();
+    } catch (e) { toast(e.message, 'err'); }
+    setImportingStaff(false);
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     try { const p = new URLSearchParams(); if (site) p.set('site', site); setRows(await api(scoped(`/payroll/pay-config?${p}`))); }
@@ -512,6 +531,19 @@ function SetupTab({ sites }) {
           <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bag.loaded ?? 0} onChange={(e) => setBag((b) => ({ ...b, loaded: e.target.value }))} /></div>
           <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bag.bagged ?? 0} onChange={(e) => setBag((b) => ({ ...b, bagged: e.target.value }))} /></div>
           <button className="btn" style={{ width: 'auto', padding: '10px 16px' }} onClick={saveBag} disabled={bagBusy}>{bagBusy ? <span className="spin" /> : null} Save</button>
+        </div>
+      </div>
+      <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
+        <strong style={{ display: 'block', marginBottom: 2 }}>Staff roster</strong>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Upload an Excel (REGULAR / BAGGERS / LOADERS) to add or update staff in this workspace. Matches by ID; REGULAR base salary is saved.</span>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <button className="btn btn-ghost btn-sm" style={{ flex: 1 }}
+            onClick={() => downloadFile(scoped('/payroll/staff-template.xlsx'), 'staff-template.xlsx').catch((e) => toast(e.message || 'Download failed', 'err'))}>⬇ Template</button>
+          <label className="btn btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
+            {importingStaff ? <span className="spin" /> : '⬆ Import staff'}
+            <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importingStaff}
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importStaff(f); }} />
+          </label>
         </div>
       </div>
       {sites.length > 1 && (

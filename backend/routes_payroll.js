@@ -468,7 +468,7 @@ router.post('/production', requireAuth, async (req, res) => {
 // Shared: compute gross-pay lines for a period (+ outstanding advance per staff).
 async function computeLines(tenant_id, from, to, site, rates) {
   rates = rates || await getBagRates();
-  const sWhere = ['tenant_id=?', "status='ACTIVE'"], sArgs = [tenant_id];
+  const sWhere = ['tenant_id=?', "status='ACTIVE'", "UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'"], sArgs = [tenant_id];
   if (site) { sWhere.push('site_id=?'); sArgs.push(site); }
   const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
     FROM staff WHERE ${sWhere.join(' AND ')} ORDER BY full_name`, sArgs);
@@ -534,7 +534,8 @@ async function computeCombinedLines(tenantIds, from, to, rates) {
   if (!tenantIds.length) return [];
   const ph = tenantIds.map(() => '?').join(',');
   const staff = await qall(`SELECT id, tenant_id, full_name, role_title, site_id, pay_type, daily_rate, bank_name, bank_account
-    FROM staff WHERE tenant_id IN (${ph}) AND status='ACTIVE'`, tenantIds);
+    FROM staff WHERE tenant_id IN (${ph}) AND status='ACTIVE'
+      AND UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'`, tenantIds);
   const att = await qall(`SELECT DISTINCT staff_id, work_date FROM attendance
     WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [...tenantIds, from, to]);
   const daysByStaff = {};
@@ -646,6 +647,82 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   res.send(buf);
 });
 
+// ── Staff onboarding template (blank roster sheets) ────────────────────────────
+router.get('/staff-template.xlsx', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const wb = XLSX.utils.book_new();
+  const reg = ['ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'DESIGNATION', 'LOCATION', 'ACCOUNT NUMBER', 'BASE SALARY'];
+  const pieceCols = ['ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'ACCOUNT NUMBER'];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([], { header: reg }), 'REGULAR');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([], { header: pieceCols }), 'BAGGERS');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([], { header: pieceCols }), 'LOADERS');
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="staff-template.xlsx"');
+  res.send(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }));
+});
+
+// ── Import / onboard the staff roster from a workbook (into THIS workspace) ─────
+// Upserts staff by ID (= ext_people_id). REGULAR → MONTHLY (BASE SALARY → salary),
+// BAGGERS/LOADERS → PIECE. LOCATION is matched to an existing site by name.
+router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
+  let wb;
+  try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
+
+  const sites = await qall('SELECT id, name FROM sites WHERE tenant_id=?', [c.tenant_id]);
+  const siteByName = {}; for (const s of sites) siteByName[String(s.name).trim().toLowerCase()] = s.id;
+  const norm = (k) => String(k || '').trim().toUpperCase();
+  const num = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[, ]/g, '')); return isNaN(n) ? null : n; };
+  let created = 0, updated = 0; const noSite = new Set();
+
+  const upsert = async (row, staffType) => {
+    const get = (names) => { for (const k of Object.keys(row)) if (names.includes(norm(k))) return row[k]; return undefined; };
+    const id = String(get(['ID', 'STAFF ID', 'EXT ID']) ?? '').replace(/\.0$/, '').trim();
+    const first = String(get(['FIRST NAME']) ?? '').trim();
+    const middle = String(get(['MIDDLE NAME']) ?? '').trim();
+    const last = String(get(['LAST NAME']) ?? '').trim();
+    const full = [first, middle, last].filter(Boolean).join(' ').trim();
+    if (!id && !full) return; // empty row
+    if (/HIRED/i.test(full)) return; // "HIRED BAGGER/LOADER" placeholders are not real staff
+    const acctRaw = String(get(['ACCOUNT NUMBER', 'ACCOUNT']) ?? '').trim();
+    const dash = acctRaw.indexOf('-');
+    const bankName = dash > 0 ? acctRaw.slice(0, dash) : null;
+    const bankAcct = dash > 0 ? acctRaw.slice(dash + 1) : acctRaw || null;
+    const loc = String(get(['LOCATION']) ?? '').trim().toLowerCase();
+    const siteId = siteByName[loc] || null;
+    if (loc && !siteId) noSite.add(loc);
+    const designation = String(get(['DESIGNATION']) ?? '').trim() || staffType;
+    const payType = staffType === 'REGULAR' ? 'MONTHLY' : 'PIECE';
+    const baseSalary = staffType === 'REGULAR' ? (num(get(['BASE SALARY', 'SALARY', 'MONTHLY SALARY'])) || 0) : 0;
+
+    // Match an existing staff by ext id (preferred) or by name within the tenant.
+    let existing = id ? await qone('SELECT id FROM staff WHERE tenant_id=? AND ext_people_id=?', [c.tenant_id, id]) : null;
+    if (!existing && full) existing = await qone('SELECT id FROM staff WHERE tenant_id=? AND LOWER(full_name)=?', [c.tenant_id, full.toLowerCase()]);
+    if (existing) {
+      await qrun(`UPDATE staff SET full_name=?, role_title=?, staff_type=?, pay_type=?, bank_name=COALESCE(?,bank_name), bank_account=COALESCE(?,bank_account),
+        ${baseSalary > 0 ? 'daily_rate=?,' : ''} ext_people_id=COALESCE(?,ext_people_id), site_id=COALESCE(?,site_id), status='ACTIVE' WHERE id=?`,
+        baseSalary > 0
+          ? [full, designation, staffType, payType, bankName, bankAcct, baseSalary, id || null, siteId, existing.id]
+          : [full, designation, staffType, payType, bankName, bankAcct, id || null, siteId, existing.id]);
+      updated += 1;
+    } else {
+      await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,staff_type,pay_type,daily_rate,bank_name,bank_account,ext_people_id,status)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE')`,
+        [uuid(), c.tenant_id, siteId, full, designation, staffType, payType, baseSalary, bankName, bankAcct, id || null]);
+      created += 1;
+    }
+  };
+
+  for (const [kind, staffType] of [['REGULAR', 'REGULAR'], ['BAGGERS', 'BAGGER'], ['LOADERS', 'LOADER']]) {
+    const name = Object.keys(wb.Sheets).find((n) => norm(n) === kind);
+    if (!name) continue;
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
+    for (const r of rows) await upsert(r, staffType);
+  }
+  res.json({ created, updated, sites_unmatched: Array.from(noSite) });
+});
+
 // ── Per-staff payroll breakdown (drill-down) — Snr Accountant+ ─────────────────
 // ids = comma-separated staff ids (a single staff, or all merged member ids for a
 // combined line). Returns the day-by-day attendance + production behind the totals.
@@ -665,7 +742,11 @@ router.get('/staff-detail', requireAuth, async (req, res) => {
     WHERE p.staff_id IN (${ph}) AND p.work_date BETWEEN ? AND ?
       AND (p.bags_loaded>0 OR p.bags_bagged>0)
     ORDER BY p.work_date`, [...ids, from, to]);
-  res.json({ days, production });
+  // Primary (home) site = the staff's own site_id; other sites are derived
+  // client-side from the days/production rows above.
+  const ps = await qall(`SELECT si.name FROM staff s LEFT JOIN sites si ON si.id=s.site_id WHERE s.id IN (${ph})`, ids);
+  const primary_site = (ps.find((r) => r.name) || {}).name || null;
+  res.json({ primary_site, days, production });
 });
 
 // ── Advances / deductions — Supervisor (Site Manager+) records; settled at run ──

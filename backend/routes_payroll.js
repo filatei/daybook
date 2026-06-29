@@ -18,7 +18,7 @@ const { v4: uuid } = require('uuid');
 // In-memory upload for the payroll Excel import (parsed, never written to disk).
 const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
 const { qone, qall, qrun, withTransaction } = require('./db');
-const { requireAuth, contextFor, requestedTenant, atLeast, siteBound, membershipsFor } = require('./auth');
+const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
 
 const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -43,14 +43,15 @@ async function getBagRates() {
   return { loaded: m.rate_loaded || 0, bagged: m.rate_bagged || 0 };
 }
 
-// Tenants to combine for one payroll run = every tenant where this user holds an
-// SNR Accountant+ membership (covers Fido + Fiafia for the finance team). No
-// brand names hardcoded — it follows whoever the runner actually oversees.
-async function payrollGroup(user, fallbackTenant) {
-  if (user.is_superadmin) return fallbackTenant ? [fallbackTenant] : [];
-  const ms = await membershipsFor(user.id);
-  const ids = ms.filter((m) => atLeast(m.role, 'SNR_ACCOUNTANT')).map((m) => m.tenant_id);
-  return ids.length ? Array.from(new Set(ids)) : (fallbackTenant ? [fallbackTenant] : []);
+// Payroll covers the WHOLE business — every staff member across ALL active
+// tenants (e.g. Fido + Fiafia together), not just the runner's own tenant. The
+// run is gated by role at the route (needCtx SNR_ACCOUNTANT+); the staff pool is
+// company-wide. (A configurable tenant-group can replace this later if Daybook
+// ever hosts unrelated businesses.)
+async function payrollGroup(_user, fallbackTenant) {
+  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE'");
+  const ids = rows.map((r) => r.id);
+  return ids.length ? ids : (fallbackTenant ? [fallbackTenant] : []);
 }
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;

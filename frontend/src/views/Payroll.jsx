@@ -229,7 +229,20 @@ function RunsTab() {
   const [runs, setRuns] = useState([]);
   const [open, setOpen] = useState(null);   // run detail
   const [editLine, setEditLine] = useState(null); // line being adjusted
+  const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
+
+  const importFile = async (file) => {
+    if (!file) return;
+    setImporting(true);
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await api(scoped(`/payroll/runs2/${open.id}/import`), { method: 'POST', form: fd });
+      const fresh = await api(scoped(`/payroll/runs2/${open.id}`)); setOpen(fresh); load();
+      toast(`Imported: ${r.updated} updated${r.unmatched?.length ? `, ${r.unmatched.length} unmatched ID(s)` : ''}`, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    setImporting(false);
+  };
 
   const saveLine = async (patch) => {
     try {
@@ -291,6 +304,13 @@ function RunsTab() {
               ))}
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+              {open.status === 'DRAFT' && (
+                <label className="btn btn-ghost" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
+                  {importing ? <span className="spin" /> : '⬆ Upload sheet'}
+                  <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importing}
+                    onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importFile(f); }} />
+                </label>
+              )}
               {open.status === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={() => setStatus('APPROVED')}>Approve</button>}
               {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/export.csv?tenant=${tenant}`, `payroll_${open.period_from}.csv`)}>⬇ CSV</button>

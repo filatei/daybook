@@ -12,7 +12,11 @@
 
 const express = require('express');
 const XLSX = require('xlsx');
+const multer = require('multer');
 const { v4: uuid } = require('uuid');
+
+// In-memory upload for the payroll Excel import (parsed, never written to disk).
+const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
 const { qone, qall, qrun, withTransaction } = require('./db');
 const { requireAuth, contextFor, requestedTenant, atLeast, siteBound, membershipsFor } = require('./auth');
 
@@ -777,6 +781,72 @@ router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
   const sums = await qone('SELECT COALESCE(SUM(gross),0) g, COALESCE(SUM(deductions),0) d, COALESCE(SUM(net),0) n FROM pay_run_lines WHERE run_id=?', [run.id]);
   await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?', [round2(sums.g), round2(sums.d), round2(sums.n), run.id]);
   res.json(await qone('SELECT * FROM pay_run_lines WHERE id=?', [line.id]));
+});
+
+// Import a filled-in Excel workbook into a DRAFT run. Matches rows by the ID
+// column (= staff.ext_people_id), applies qty + deduction, recomputes gross/net,
+// and flags any qty that differs from the daily-recorded snapshot in `remarks`.
+router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
+  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be imported into' });
+  let wb;
+  try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
+
+  const rates = await getBagRates();
+  const periodDays = Math.max(1, Math.round((Date.parse(run.period_to) - Date.parse(run.period_from)) / 86400000) + 1);
+  const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=?', [run.id]);
+  const lineByStaff = {}; for (const l of lines) lineByStaff[l.staff_id] = l;
+  const staffIds = lines.map((l) => l.staff_id).filter(Boolean);
+  const extToStaff = {};
+  if (staffIds.length) {
+    const ph = staffIds.map(() => '?').join(',');
+    const rows = await qall(`SELECT id, ext_people_id FROM staff WHERE id IN (${ph})`, staffIds);
+    for (const s of rows) if (s.ext_people_id != null && s.ext_people_id !== '') extToStaff[String(s.ext_people_id).replace(/\.0$/, '').trim()] = s.id;
+  }
+  const norm = (k) => String(k || '').trim().toUpperCase();
+  const num = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[, ]/g, '')); return isNaN(n) ? null : n; };
+  let updated = 0; const unmatched = [];
+
+  const applyRow = async (row, kind) => {
+    const get = (names) => { for (const k of Object.keys(row)) if (names.includes(norm(k))) return row[k]; return undefined; };
+    const id = String(get(['ID', 'STAFF ID', 'EXT ID']) ?? '').replace(/\.0$/, '').trim();
+    if (!id) return;
+    const staffId = extToStaff[id]; const line = staffId && lineByStaff[staffId];
+    if (!line) { unmatched.push(id); return; }
+    const ded = num(get(['DEDUCTION', 'SALARY ADV', 'ADVANCE']));
+    let loaded = Number(line.bags_loaded) || 0, bagged = Number(line.bags_bagged) || 0, days = Number(line.days_present) || 0;
+    if (kind === 'BAGGERS') { const q = num(get(['QTY', 'BAGS BAGGED', 'BAGGED'])); if (q != null) bagged = q; }
+    else if (kind === 'LOADERS') { const q = num(get(['BAGS LOADED', 'QTY', 'LOADED'])); if (q != null) loaded = q; }
+    else { const d = num(get(['DAYS WORKED', 'DAYS'])); if (d != null) days = d; }
+    const pt = (line.pay_type || '').toUpperCase();
+    let gross;
+    if (pt === 'PIECE') gross = loaded * rates.loaded + bagged * rates.bagged;
+    else { const st = await qone('SELECT daily_rate FROM staff WHERE id=?', [staffId]); const rate = Number(st?.daily_rate) || 0; gross = pt === 'MONTHLY' ? rate * (days / periodDays) : days * rate; }
+    gross = round2(gross);
+    const d2 = Math.min(gross, Math.max(0, ded != null ? ded : Number(line.deductions) || 0));
+    const net = round2(gross - d2);
+    const notes = [];
+    const rd = Number(line.rec_days), rl = Number(line.rec_loaded), rg = Number(line.rec_bagged);
+    if (pt === 'PIECE') { if (!isNaN(rl) && loaded !== rl) notes.push(`Loaded ${rl}→${loaded}`); if (!isNaN(rg) && bagged !== rg) notes.push(`Bagged ${rg}→${bagged}`); }
+    else if (!isNaN(rd) && days !== rd) notes.push(`Days ${rd}→${days}`);
+    const remarks = notes.length ? `Adjusted (upload): ${notes.join(', ')}` : null;
+    await qrun('UPDATE pay_run_lines SET days_present=?, bags_loaded=?, bags_bagged=?, gross=?, deductions=?, net=?, remarks=? WHERE id=?',
+      [days, loaded, bagged, gross, d2, net, remarks, line.id]);
+    updated += 1;
+  };
+
+  for (const kind of ['REGULAR', 'BAGGERS', 'LOADERS']) {
+    const name = Object.keys(wb.Sheets).find((n) => norm(n) === kind);
+    if (!name) continue;
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
+    for (const r of rows) await applyRow(r, kind);
+  }
+  const sums = await qone('SELECT COALESCE(SUM(gross),0) g, COALESCE(SUM(deductions),0) d, COALESCE(SUM(net),0) n FROM pay_run_lines WHERE run_id=?', [run.id]);
+  await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?', [round2(sums.g), round2(sums.d), round2(sums.n), run.id]);
+  res.json({ updated, unmatched });
 });
 
 // Approve (Snr Accountant+) → Paid (General Manager+).

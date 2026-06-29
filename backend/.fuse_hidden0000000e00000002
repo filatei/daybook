@@ -767,7 +767,7 @@ router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
   const rates = await getBagRates();
   const pt = (line.pay_type || '').toUpperCase();
   const st = await qone('SELECT daily_rate FROM staff WHERE id=?', [line.staff_id]);
-  const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
+  const periodDays = Math.max(1, Math.round((Date.parse(run.period_to) - Date.parse(run.period_from)) / 86400000) + 1);
   let gross;
   if (pt === 'PIECE') gross = loaded * rates.loaded + bagged * rates.bagged;
   else if (pt === 'MONTHLY') gross = (Number(st?.daily_rate) || 0) * (days / periodDays);
@@ -806,7 +806,7 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
   try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
 
   const rates = await getBagRates();
-  const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
+  const periodDays = Math.max(1, Math.round((Date.parse(run.period_to) - Date.parse(run.period_from)) / 86400000) + 1);
   const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=?', [run.id]);
   const lineByStaff = {}; for (const l of lines) lineByStaff[l.staff_id] = l;
   const staffIds = lines.map((l) => l.staff_id).filter(Boolean);

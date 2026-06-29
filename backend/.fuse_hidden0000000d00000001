@@ -485,7 +485,7 @@ async function computeLines(tenant_id, from, to, site, rates) {
     WHERE tenant_id=? AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [tenant_id, to]);
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
   // Calendar days in the pay period — denominator for monthly proration.
-  const periodDays = workingDays(from, to); // Mon–Sat working days
+  const periodDays = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1);
   return staff.map((s) => {
     const days = daysBy[s.id] || 0;
     const pb = prodBy[s.id] || { l: 0, g: 0 };
@@ -545,7 +545,7 @@ async function computeCombinedLines(tenantIds, from, to, rates) {
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id IN (${ph}) AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [...tenantIds, to]);
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
-  const periodDays = workingDays(from, to); // Mon–Sat working days
+  const periodDays = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1);
 
   const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const groups = {};
@@ -767,7 +767,7 @@ router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
   const rates = await getBagRates();
   const pt = (line.pay_type || '').toUpperCase();
   const st = await qone('SELECT daily_rate FROM staff WHERE id=?', [line.staff_id]);
-  const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
+  const periodDays = Math.max(1, Math.round((Date.parse(run.period_to) - Date.parse(run.period_from)) / 86400000) + 1);
   let gross;
   if (pt === 'PIECE') gross = loaded * rates.loaded + bagged * rates.bagged;
   else if (pt === 'MONTHLY') gross = (Number(st?.daily_rate) || 0) * (days / periodDays);
@@ -806,7 +806,7 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
   try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
 
   const rates = await getBagRates();
-  const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
+  const periodDays = Math.max(1, Math.round((Date.parse(run.period_to) - Date.parse(run.period_from)) / 86400000) + 1);
   const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=?', [run.id]);
   const lineByStaff = {}; for (const l of lines) lineByStaff[l.staff_id] = l;
   const staffIds = lines.map((l) => l.staff_id).filter(Boolean);

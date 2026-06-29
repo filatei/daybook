@@ -10,8 +10,19 @@ const siteSplitLabel = (bySite) => (bySite || []).map((s) => {
   if (s.bagged > 0) parts.push(`B${s.bagged}`);
   return `${s.site_name} ${parts.join('/')}`;
 }).join(' · ');
-const ymd = (d) => d.toISOString().slice(0, 10);
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const eom = (y, m) => ymd(new Date(y, m, 0));
+// Payroll cycle = 28th of previous month → 27th of current month. The "current"
+// completed cycle ends on the 27th of this month once we're past the 27th,
+// otherwise last month's 27th.
+const fullMonthWindow = () => {
+  const n = new Date();
+  let ey = n.getFullYear(), em = n.getMonth(); // 0-based month
+  if (n.getDate() <= 27) { em -= 1; if (em < 0) { em = 11; ey -= 1; } }
+  const to = new Date(ey, em, 27);
+  const from = new Date(ey, em - 1, 28);
+  return { from: ymd(from), to: ymd(to) };
+};
 const dl = async (path, name) => {
   const res = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${getToken()}` } });
   if (!res.ok) return; const url = URL.createObjectURL(await res.blob());
@@ -110,19 +121,21 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
 function RunTab({ sites, onSaved }) {
   const { toast, openModal, closeModal } = useStore();
   const now = new Date();
-  const [from, setFrom] = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`);
-  const [to, setTo] = useState(today());
+  const fm = fullMonthWindow();
+  const [from, setFrom] = useState(fm.from);
+  const [to, setTo] = useState(fm.to);
   const [site, setSite] = useState('');
   const [combined, setCombined] = useState(true); // Fido + Fiafia in one run
   const [lines, setLines] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
+  const [q, setQ] = useState('');
 
   const preset = (kind) => {
     const y = now.getFullYear(), m = now.getMonth() + 1, mm = String(m).padStart(2, '0');
     if (kind === 'mid') { setFrom(`${y}-${mm}-01`); setTo(`${y}-${mm}-15`); }
     else if (kind === 'second') { setFrom(`${y}-${mm}-16`); setTo(eom(y, m)); }
-    else { setFrom(`${y}-${mm}-01`); setTo(eom(y, m)); }
+    else { const w = fullMonthWindow(); setFrom(w.from); setTo(w.to); } // full cycle = 28th→27th
   };
   const run = async () => {
     setBusy(true);
@@ -135,9 +148,16 @@ function RunTab({ sites, onSaved }) {
   const net = (l) => Math.max(0, (l.gross || 0) - (+l.deduction || 0));
   const openDetail = (l) => openModal(
     <StaffPayDetail line={l} from={from} to={to} onClose={closeModal} onDeduction={(amt) => setDedById(l.staff_id, amt)} />);
-  const summary = (l) => ((l.pay_type || '').toUpperCase() === 'PIECE'
-    ? `${l.bags_loaded} loaded · ${l.bags_bagged} bagged`
-    : `${l.days_present} day${l.days_present === 1 ? '' : 's'}${(l.gross || 0) <= 0 ? ' · no rate set' : ''}`);
+  const summary = (l) => {
+    const zero = (l.gross || 0) <= 0;
+    if ((l.pay_type || '').toUpperCase() === 'PIECE') {
+      const bags = `${l.bags_loaded} loaded · ${l.bags_bagged} bagged`;
+      if (!l.bags_loaded && !l.bags_bagged) return 'no bags this period';
+      return bags + (zero ? ' · set per-bag rate' : '');
+    }
+    if (!l.days_present) return 'no clock-ins this period';
+    return `${l.days_present} day${l.days_present === 1 ? '' : 's'}${zero ? ' · set monthly salary' : ''}`;
+  };
   const totGross = (lines || []).reduce((a, l) => a + (l.gross || 0), 0);
   const totNet = (lines || []).reduce((a, l) => a + net(l), 0);
 
@@ -179,8 +199,10 @@ function RunTab({ sites, onSaved }) {
       </button>
 
       {lines && (() => {
-        const paid = lines.filter((l) => (l.gross || 0) > 0);
-        const others = lines.filter((l) => (l.gross || 0) <= 0);
+        const term = q.trim().toLowerCase();
+        const match = (l) => !term || String(l.full_name || '').toLowerCase().includes(term);
+        const paid = lines.filter((l) => (l.gross || 0) > 0 && match(l));
+        const others = lines.filter((l) => (l.gross || 0) <= 0 && match(l));
         if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
         const rowBtn = (l) => (
           <button key={l.staff_id} onClick={() => openDetail(l)}
@@ -198,6 +220,7 @@ function RunTab({ sites, onSaved }) {
               <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{paid.length} paid · Gross {ngn(totGross)}</span>
               <span style={{ fontWeight: 800 }}>Net {ngn(totNet)}</span>
             </div>
+            <input className="input" style={{ margin: '8px 0' }} placeholder="Search staff by name…" value={q} onChange={(e) => setQ(e.target.value)} />
             {paid.length === 0
               ? <div className="empty"><div className="ic">💰</div><p>No one has pay this period. Set rates/salaries under Rates.</p></div>
               : <div className="card" style={{ padding: 0, overflow: 'hidden' }}>{paid.map(rowBtn)}</div>}
@@ -453,6 +476,7 @@ function SetupTab({ sites }) {
   const { tenant, toast, openModal, closeModal } = useStore();
   const [rows, setRows] = useState([]);
   const [site, setSite] = useState('');
+  const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
 
   // Shared per-bag rates (global, apply to ALL loaders/baggers across Fido+Fiafia).
@@ -497,7 +521,10 @@ function SetupTab({ sites }) {
           <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
       )}
-      {rows.map((r, i) => (
+      <input className="input" style={{ marginBottom: 12 }} placeholder="Search staff by name…" value={q} onChange={(e) => setQ(e.target.value)} />
+      {rows.map((r, i) => ({ r, i }))
+        .filter(({ r }) => !q.trim() || String(r.full_name || '').toLowerCase().includes(q.trim().toLowerCase()))
+        .map(({ r, i }) => (
         <div key={r.id} className="card" style={{ padding: '10px 14px', marginBottom: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <strong>{r.full_name}</strong>

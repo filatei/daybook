@@ -133,8 +133,7 @@ function RunTab({ sites, onSaved }) {
 
   const preset = (kind) => {
     const y = now.getFullYear(), m = now.getMonth() + 1, mm = String(m).padStart(2, '0');
-    if (kind === 'mid') { setFrom(`${y}-${mm}-01`); setTo(`${y}-${mm}-15`); }
-    else if (kind === 'second') { setFrom(`${y}-${mm}-16`); setTo(eom(y, m)); }
+    if (kind === 'mid') { setFrom(`${y}-${mm}-01`); setTo(`${y}-${mm}-15`); } // mid-month bonus (loaders/baggers)
     else { const w = fullMonthWindow(); setFrom(w.from); setTo(w.to); } // full cycle = 28th→27th
   };
   const run = async () => {
@@ -175,9 +174,8 @@ function RunTab({ sites, onSaved }) {
   return (
     <div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('mid')}>1–15</button>
-        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('second')}>16–end</button>
-        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('month')}>Full month</button>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('mid')}>1–15 (mid-month bonus)</button>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('month')}>Full month (28→27)</button>
       </div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={from} onChange={(e) => setFrom(e.target.value)} />

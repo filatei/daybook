@@ -483,8 +483,11 @@ async function computeLines(tenant_id, from, to, site, rates) {
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
       days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
       by_site: bySite[s.id] || [],
+      member_ids: [s.id],
       advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
-  }).filter((l) => l.gross > 0 || l.days_present > 0 || l.bags_loaded > 0 || l.bags_bagged > 0 || l.advance > 0);
+  });
+  // Returns ALL active staff (incl. zero) so the UI can show paid staff up top
+  // and cull the rest into a review section. Save (runs2) skips zero lines.
 }
 
 // Per-worker, per-site production split for a period. Returns
@@ -560,9 +563,7 @@ async function computeCombinedLines(tenantIds, from, to, rates) {
       bags_loaded: l, bags_bagged: g, gross: round2(gross), advance: round2(advance),
       tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
     };
-    if (line.gross > 0 || line.days_present > 0 || line.bags_loaded > 0 || line.bags_bagged > 0 || line.advance > 0) {
-      lines.push(line);
-    }
+    lines.push(line); // include all; UI splits paid vs review, save skips zero
   }
   lines.sort((a, b) => String(a.full_name).localeCompare(String(b.full_name)));
   return lines;
@@ -582,6 +583,28 @@ router.post('/compute2', requireAuth, async (req, res) => {
   }
   const lines = await computeLines(c.tenant_id, from, to, site || null, rates);
   res.json({ from, to, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+});
+
+// ── Per-staff payroll breakdown (drill-down) — Snr Accountant+ ─────────────────
+// ids = comma-separated staff ids (a single staff, or all merged member ids for a
+// combined line). Returns the day-by-day attendance + production behind the totals.
+router.get('/staff-detail', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const ids = String(req.query.ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const { from, to } = req.query;
+  if (!ids.length || !from || !to) return res.json({ days: [], production: [] });
+  const ph = ids.map(() => '?').join(',');
+  const days = await qall(`SELECT a.work_date, COALESCE(si.name,'—') site_name
+    FROM attendance a LEFT JOIN sites si ON si.id=a.site_id
+    WHERE a.staff_id IN (${ph}) AND a.clock_in IS NOT NULL AND a.work_date BETWEEN ? AND ?
+    ORDER BY a.work_date`, [...ids, from, to]);
+  const production = await qall(`SELECT p.work_date, COALESCE(si.name,'—') site_name,
+      COALESCE(p.bags_loaded,0) bags_loaded, COALESCE(p.bags_bagged,0) bags_bagged
+    FROM production p LEFT JOIN sites si ON si.id=p.site_id
+    WHERE p.staff_id IN (${ph}) AND p.work_date BETWEEN ? AND ?
+      AND (p.bags_loaded>0 OR p.bags_bagged>0)
+    ORDER BY p.work_date`, [...ids, from, to]);
+  res.json({ days, production });
 });
 
 // ── Advances / deductions — Supervisor (Site Manager+) records; settled at run ──
@@ -623,6 +646,7 @@ router.post('/runs2', requireAuth, async (req, res) => {
     await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?)`,
       [runId, c.tenant_id, combined ? null : site, from, to, req.user.id]);
     for (const l of lines) {
+      if (l.gross <= 0) continue; // never save a zero payslip line
       const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
       const net = Math.round((l.gross - d) * 100) / 100;
       tg += l.gross; td += d; tn += net;

@@ -51,9 +51,64 @@ function AdvanceForm({ staff, onSaved, onClose }) {
   );
 }
 
+// ── Per-staff payslip detail + day-by-day breakdown (drill-down) ──────────────
+function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
+  const [ded, setDed] = useState(line.deduction || 0);
+  const [bd, setBd] = useState(null);
+  const ids = (line.member_ids && line.member_ids.length ? line.member_ids : [line.staff_id]).join(',');
+  const piece = (line.pay_type || '').toUpperCase() === 'PIECE';
+  useEffect(() => {
+    api(scoped(`/payroll/staff-detail?ids=${encodeURIComponent(ids)}&from=${from}&to=${to}`))
+      .then(setBd).catch(() => setBd({ days: [], production: [] }));
+  }, []);
+  const net = Math.max(0, (line.gross || 0) - (+ded || 0));
+  const row = (k, v) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--line)' }}>
+      <span style={{ color: 'var(--muted)', fontSize: 13 }}>{k}</span><strong style={{ fontSize: 13 }}>{v}</strong>
+    </div>
+  );
+  return (
+    <div className="modal-card" style={{ maxWidth: 460 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <strong style={{ fontSize: 16 }}>{line.full_name}</strong>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px' }} onClick={onClose}>✕</button>
+      </div>
+      {row('Pay type', line.pay_type || '—')}
+      {(line.tenants?.length || (line.by_site?.length)) ? row('Sites', (line.by_site || []).map((s) => s.site_name).join(', ') || (line.tenants || []).length + ' tenant(s)') : null}
+      {piece
+        ? row('Bags', `${line.bags_loaded} loaded · ${line.bags_bagged} bagged`)
+        : row('Days clocked-in', `${line.days_present} of ${line.period_days}`)}
+      {row('Gross', ngn(line.gross))}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0' }}>
+        <span style={{ color: 'var(--muted)', fontSize: 13 }}>Deduction</span>
+        <input type="number" className="input" style={{ width: 120, textAlign: 'right', padding: '6px 8px' }} value={ded} onChange={(e) => setDed(e.target.value)} />
+      </div>
+      {row('Net pay', ngn(net))}
+
+      <div style={{ marginTop: 12, fontWeight: 700, fontSize: 13 }}>{piece ? 'Bags by day' : 'Days worked'}</div>
+      {!bd ? <div className="skel" /> : piece ? (
+        bd.production.length === 0 ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>No bag records.</div> :
+          bd.production.map((p, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 0', borderBottom: '1px solid var(--line)' }}>
+              <span>{p.work_date} · {p.site_name}</span><span>L{p.bags_loaded} / B{p.bags_bagged}</span>
+            </div>
+          ))
+      ) : (
+        bd.days.length === 0 ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>No clock-ins.</div> :
+          bd.days.map((d, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 0', borderBottom: '1px solid var(--line)' }}>
+              <span>{d.work_date}</span><span style={{ color: 'var(--muted)' }}>{d.site_name}</span>
+            </div>
+          ))
+      )}
+      <button className="btn" style={{ marginTop: 12 }} onClick={() => { onDeduction(+ded || 0); onClose(); }}>Done</button>
+    </div>
+  );
+}
+
 // ── Run: compute + save a payroll ─────────────────────────────────────────────
 function RunTab({ sites, onSaved }) {
-  const { toast } = useStore();
+  const { toast, openModal, closeModal } = useStore();
   const now = new Date();
   const [from, setFrom] = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`);
   const [to, setTo] = useState(today());
@@ -61,6 +116,7 @@ function RunTab({ sites, onSaved }) {
   const [combined, setCombined] = useState(true); // Fido + Fiafia in one run
   const [lines, setLines] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [showOthers, setShowOthers] = useState(false);
 
   const preset = (kind) => {
     const y = now.getFullYear(), m = now.getMonth() + 1, mm = String(m).padStart(2, '0');
@@ -75,8 +131,13 @@ function RunTab({ sites, onSaved }) {
     catch (e) { toast(e.message, 'err'); }
     setBusy(false);
   };
-  const setDed = (i, v) => setLines((p) => p.map((l, j) => (j === i ? { ...l, deduction: v } : l)));
+  const setDedById = (id, v) => setLines((p) => p.map((l) => (l.staff_id === id ? { ...l, deduction: v } : l)));
   const net = (l) => Math.max(0, (l.gross || 0) - (+l.deduction || 0));
+  const openDetail = (l) => openModal(
+    <StaffPayDetail line={l} from={from} to={to} onClose={closeModal} onDeduction={(amt) => setDedById(l.staff_id, amt)} />);
+  const summary = (l) => ((l.pay_type || '').toUpperCase() === 'PIECE'
+    ? `${l.bags_loaded} loaded · ${l.bags_bagged} bagged`
+    : `${l.days_present} day${l.days_present === 1 ? '' : 's'}${(l.gross || 0) <= 0 ? ' · no rate set' : ''}`);
   const totGross = (lines || []).reduce((a, l) => a + (l.gross || 0), 0);
   const totNet = (lines || []).reduce((a, l) => a + net(l), 0);
 
@@ -113,30 +174,45 @@ function RunTab({ sites, onSaved }) {
         Combined payroll (Fido + Fiafia in one run; same person merged)
       </label>
 
-      {lines && (lines.length === 0 ? <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div> : (
-        <>
-          <div className="card" style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Gross {ngn(totGross)}</span>
-            <span style={{ fontWeight: 800 }}>Net {ngn(totNet)}</span>
-          </div>
-          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            {lines.map((l, i) => (
-              <div key={l.staff_id} style={{ display: 'grid', gridTemplateColumns: '1fr 90px 80px', gap: 8, alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.full_name}</div>
-                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>{l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`} · {ngn(l.gross)}</div>
-                  {(l.by_site || []).length > 1 && (
-                    <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{siteSplitLabel(l.by_site)}</div>
-                  )}
-                </div>
-                <input type="number" className="input" style={{ padding: '6px 8px', textAlign: 'right' }} value={l.deduction} onChange={(e) => setDed(i, e.target.value)} title="Deduction" />
-                <div style={{ textAlign: 'right', fontWeight: 700 }}>{ngn(net(l))}</div>
+      {lines && (() => {
+        const paid = lines.filter((l) => (l.gross || 0) > 0);
+        const others = lines.filter((l) => (l.gross || 0) <= 0);
+        if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
+        const rowBtn = (l) => (
+          <button key={l.staff_id} onClick={() => openDetail(l)}
+            style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--line)', background: 'transparent', border: 'none', borderBottomStyle: 'solid', textAlign: 'left', cursor: 'pointer' }}>
+            <span style={{ minWidth: 0 }}>
+              <span style={{ display: 'block', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.full_name}</span>
+              <span style={{ display: 'block', fontSize: 11.5, color: 'var(--muted)' }}>{summary(l)}</span>
+            </span>
+            <span style={{ textAlign: 'right', fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(net(l))} ›</span>
+          </button>
+        );
+        return (
+          <>
+            <div className="card" style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{paid.length} paid · Gross {ngn(totGross)}</span>
+              <span style={{ fontWeight: 800 }}>Net {ngn(totNet)}</span>
+            </div>
+            {paid.length === 0
+              ? <div className="empty"><div className="ic">💰</div><p>No one has pay this period. Set rates/salaries under Rates.</p></div>
+              : <div className="card" style={{ padding: 0, overflow: 'hidden' }}>{paid.map(rowBtn)}</div>}
+
+            {others.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setShowOthers((v) => !v)}>
+                  {showOthers ? '▾' : '▸'} Not paid this period ({others.length}) — review
+                </button>
+                {showOthers && <div className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 6 }}>{others.map(rowBtn)}</div>}
               </div>
-            ))}
-          </div>
-          <button className="btn" style={{ marginTop: 10 }} onClick={save} disabled={busy}>{busy ? <span className="spin" /> : '💾'} Save payroll (draft)</button>
-        </>
-      ))}
+            )}
+
+            {paid.length > 0 && (
+              <button className="btn" style={{ marginTop: 10 }} onClick={save} disabled={busy}>{busy ? <span className="spin" /> : '💾'} Save payroll (draft)</button>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

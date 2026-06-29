@@ -11,7 +11,6 @@ const siteSplitLabel = (bySite) => (bySite || []).map((s) => {
   return `${s.site_name} ${parts.join('/')}`;
 }).join(' · ');
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-const eom = (y, m) => ymd(new Date(y, m, 0));
 // Payroll cycle = 28th of previous month → 27th of current month. The "current"
 // completed cycle ends on the 27th of this month once we're past the 27th,
 // otherwise last month's 27th.

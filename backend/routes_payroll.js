@@ -13,19 +13,42 @@
 const express = require('express');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun, withTransaction } = require('./db');
-const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
+const { requireAuth, contextFor, requestedTenant, atLeast, siteBound, membershipsFor } = require('./auth');
 
 const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
 
 // ── helper ────────────────────────────────────────────────────────────────────
-async function needCtx(req, res, minRole = 'ACCOUNTANT') {
+// Payroll compute/config/approve is restricted to the finance tier: SNR
+// ACCOUNTANT / GENERAL MANAGER / ADMIN (rank ≥ 7). Operational routes (recording
+// production / advances) pass 'SECRETARY' explicitly to stay open to site staff.
+async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
   const tid = requestedTenant(req) || req.body?.tenant_id;
   if (!tid) { res.status(400).json({ error: 'select a workspace' }); return null; }
   const c = await contextFor(req.user, tid);
   if (!c || !atLeast(c.role, minRole)) { res.status(403).json({ error: 'forbidden' }); return null; }
   return c;
 }
+
+// Global, SHARED per-bag rates (one for loading, one for bagging) applied to every
+// loader/bagger across the combined payroll. Stored tenant-independently.
+async function getBagRates() {
+  const rows = await qall("SELECT key, value FROM payroll_settings WHERE key IN ('rate_loaded','rate_bagged')");
+  const m = {}; for (const r of rows) m[r.key] = Number(r.value) || 0;
+  return { loaded: m.rate_loaded || 0, bagged: m.rate_bagged || 0 };
+}
+
+// Tenants to combine for one payroll run = every tenant where this user holds an
+// SNR Accountant+ membership (covers Fido + Fiafia for the finance team). No
+// brand names hardcoded — it follows whoever the runner actually oversees.
+async function payrollGroup(user, fallbackTenant) {
+  if (user.is_superadmin) return fallbackTenant ? [fallbackTenant] : [];
+  const ms = await membershipsFor(user.id);
+  const ids = ms.filter((m) => atLeast(m.role, 'SNR_ACCOUNTANT')).map((m) => m.tenant_id);
+  return ids.length ? Array.from(new Set(ids)) : (fallbackTenant ? [fallbackTenant] : []);
+}
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PAY RATES
@@ -335,6 +358,23 @@ router.patch('/pay-config/:id', requireAuth, async (req, res) => {
   res.json(await qone('SELECT id, full_name, pay_type, daily_rate, rate_loaded, rate_bagged FROM staff WHERE id=?', [st.id]));
 });
 
+// ── Shared per-bag rates (global) — Snr Accountant / GM / Admin only ───────────
+router.get('/bag-rates', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  res.json(await getBagRates());
+});
+router.put('/bag-rates', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+ via default
+  const b = req.body || {};
+  const set = (k, v) => qrun(
+    `INSERT INTO payroll_settings (key,value,updated_at,updated_by) VALUES (?,?,?,?)
+     ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by`,
+    [k, Math.max(0, +v || 0), nowS(), req.user.id]);
+  if (b.rate_loaded != null) await set('rate_loaded', b.rate_loaded);
+  if (b.rate_bagged != null) await set('rate_bagged', b.rate_bagged);
+  res.json(await getBagRates());
+});
+
 // ── Daily production entry (bags loaded / bagged) — Supervisor (Site Manager+) ──
 // Production is recorded PER WORK-SITE: a worker who bags/loads at more than one
 // site in a day gets one row per site, credited to the site where the work was
@@ -411,7 +451,8 @@ router.post('/production', requireAuth, async (req, res) => {
 });
 
 // Shared: compute gross-pay lines for a period (+ outstanding advance per staff).
-async function computeLines(tenant_id, from, to, site) {
+async function computeLines(tenant_id, from, to, site, rates) {
+  rates = rates || await getBagRates();
   const sWhere = ['tenant_id=?', "status='ACTIVE'"], sArgs = [tenant_id];
   if (site) { sWhere.push('site_id=?'); sArgs.push(site); }
   const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
@@ -435,7 +476,7 @@ async function computeLines(tenant_id, from, to, site) {
     const pb = prodBy[s.id] || { l: 0, g: 0 };
     const pt = (s.pay_type || '').toUpperCase();
     let gross;
-    if (pt === 'PIECE') gross = pb.l * (s.rate_loaded || 0) + pb.g * (s.rate_bagged || 0);
+    if (pt === 'PIECE') gross = pb.l * rates.loaded + pb.g * rates.bagged;
     // Monthly staff earn a FIXED salary, prorated by attendance over the period.
     else if (pt === 'MONTHLY') gross = (s.daily_rate || 0) * (days / periodDays);
     else gross = days * (s.daily_rate || 0);   // daily wage
@@ -466,13 +507,81 @@ async function siteSplit(tenant_id, from, to) {
   return by;
 }
 
+// Combined payroll across MULTIPLE tenants (e.g. Fido + Fiafia), merging the same
+// person into one payslip. Identity = normalized name + bank account (name-only
+// when no account on file). Piece pay uses the shared per-bag rates; monthly pay
+// is prorated by DISTINCT days clocked-in across all the person's tenants.
+async function computeCombinedLines(tenantIds, from, to, rates) {
+  rates = rates || await getBagRates();
+  if (!tenantIds.length) return [];
+  const ph = tenantIds.map(() => '?').join(',');
+  const staff = await qall(`SELECT id, tenant_id, full_name, role_title, site_id, pay_type, daily_rate, bank_name, bank_account
+    FROM staff WHERE tenant_id IN (${ph}) AND status='ACTIVE'`, tenantIds);
+  const att = await qall(`SELECT DISTINCT staff_id, work_date FROM attendance
+    WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [...tenantIds, from, to]);
+  const daysByStaff = {};
+  for (const a of att) (daysByStaff[a.staff_id] = daysByStaff[a.staff_id] || new Set()).add(a.work_date);
+  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
+    FROM production WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [...tenantIds, from, to]);
+  const prodBy = {}; for (const p of prod) prodBy[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
+    WHERE tenant_id IN (${ph}) AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [...tenantIds, to]);
+  const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
+  const periodDays = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1);
+
+  const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const groups = {};
+  for (const s of staff) {
+    const acct = norm(s.bank_account);
+    const key = acct ? `${norm(s.full_name)}|${acct}` : `n:${norm(s.full_name)}`;
+    (groups[key] = groups[key] || []).push(s);
+  }
+  const lines = [];
+  for (const key of Object.keys(groups)) {
+    const members = groups[key];
+    const head = members[0];
+    const memberIds = members.map((m) => m.id);
+    const dayset = new Set();
+    let l = 0, g = 0, advance = 0;
+    for (const id of memberIds) {
+      for (const d of (daysByStaff[id] || [])) dayset.add(d);
+      const pb = prodBy[id]; if (pb) { l += pb.l; g += pb.g; }
+      advance += advBy[id] || 0;
+    }
+    const days = dayset.size;
+    const pt = (head.pay_type || '').toUpperCase();
+    let gross;
+    if (pt === 'PIECE') gross = l * rates.loaded + g * rates.bagged;
+    else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
+    else gross = days * (head.daily_rate || 0);
+    const line = {
+      staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
+      pay_type: head.pay_type, days_present: days, period_days: periodDays,
+      bags_loaded: l, bags_bagged: g, gross: round2(gross), advance: round2(advance),
+      tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
+    };
+    if (line.gross > 0 || line.days_present > 0 || line.bags_loaded > 0 || line.bags_bagged > 0 || line.advance > 0) {
+      lines.push(line);
+    }
+  }
+  lines.sort((a, b) => String(a.full_name).localeCompare(String(b.full_name)));
+  return lines;
+}
+
 // ── Compute a payroll for a period (preview, not saved) — Snr Accountant+ ───────
+// `combined:true` runs across all the user's SNR+ tenants (Fido + Fiafia merged).
 router.post('/compute2', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const { from, to, site } = req.body || {};
+  const { from, to, site, combined } = req.body || {};
   if (!from || !to) return res.status(400).json({ error: 'from and to required' });
-  const lines = await computeLines(c.tenant_id, from, to, site || null);
-  res.json({ from, to, lines, total: Math.round(lines.reduce((a, l) => a + l.gross, 0) * 100) / 100 });
+  const rates = await getBagRates();
+  if (combined) {
+    const group = await payrollGroup(req.user, c.tenant_id);
+    const lines = await computeCombinedLines(group, from, to, rates);
+    return res.json({ from, to, combined: true, tenants: group, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+  }
+  const lines = await computeLines(c.tenant_id, from, to, site || null, rates);
+  res.json({ from, to, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
 });
 
 // ── Advances / deductions — Supervisor (Site Manager+) records; settled at run ──
@@ -504,12 +613,15 @@ router.post('/runs2', requireAuth, async (req, res) => {
   const { from, to } = b; const site = b.site || null;
   if (!from || !to) return res.status(400).json({ error: 'from and to required' });
   const ded = b.deductions || {};   // { staff_id: amount }
-  const lines = await computeLines(c.tenant_id, from, to, site);
+  const combined = !!b.combined;
+  const lines = combined
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to)
+    : await computeLines(c.tenant_id, from, to, site);
   const runId = uuid();
   let tg = 0, td = 0, tn = 0;
   await withTransaction(async () => {
     await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?)`,
-      [runId, c.tenant_id, site, from, to, req.user.id]);
+      [runId, c.tenant_id, combined ? null : site, from, to, req.user.id]);
     for (const l of lines) {
       const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
       const net = Math.round((l.gross - d) * 100) / 100;
@@ -517,8 +629,17 @@ router.post('/runs2', requireAuth, async (req, res) => {
       await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
         [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net]);
-      // Settle outstanding advances for this worker up to the period end.
-      if (d > 0) await qrun('UPDATE staff_advances SET run_id=? WHERE tenant_id=? AND staff_id=? AND run_id IS NULL AND adv_date<=?', [runId, c.tenant_id, l.staff_id, to]);
+      // Settle outstanding advances up to the period end. Combined runs settle
+      // across ALL of the person's merged staff ids (both tenants) by staff_id;
+      // single-tenant runs scope by tenant_id as before.
+      if (d > 0) {
+        if (combined && Array.isArray(l.member_ids) && l.member_ids.length) {
+          const ph = l.member_ids.map(() => '?').join(',');
+          await qrun(`UPDATE staff_advances SET run_id=? WHERE staff_id IN (${ph}) AND run_id IS NULL AND adv_date<=?`, [runId, ...l.member_ids, to]);
+        } else {
+          await qrun('UPDATE staff_advances SET run_id=? WHERE tenant_id=? AND staff_id=? AND run_id IS NULL AND adv_date<=?', [runId, c.tenant_id, l.staff_id, to]);
+        }
+      }
     }
     await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?',
       [Math.round(tg * 100) / 100, Math.round(td * 100) / 100, Math.round(tn * 100) / 100, runId]);

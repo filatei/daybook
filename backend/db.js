@@ -644,6 +644,16 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_production_td ON production(tenant_id, work_date);
 
+    -- Global payroll settings (shared across tenants). Holds the single per-bag
+    -- rates (rate_loaded, rate_bagged) applied to ALL loaders/baggers across the
+    -- combined Fido+Fiafia payroll. GLOBAL on purpose — not tenant-scoped.
+    CREATE TABLE IF NOT EXISTS payroll_settings (
+      key        TEXT PRIMARY KEY,
+      value      DOUBLE PRECISION NOT NULL DEFAULT 0,
+      updated_at BIGINT,
+      updated_by TEXT
+    );
+
     -- Advances / deductions given to a worker; settled (run_id set) at payroll time.
     CREATE TABLE IF NOT EXISTS staff_advances (
       id          TEXT PRIMARY KEY,

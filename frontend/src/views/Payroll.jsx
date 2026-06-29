@@ -58,6 +58,7 @@ function RunTab({ sites, onSaved }) {
   const [from, setFrom] = useState(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`);
   const [to, setTo] = useState(today());
   const [site, setSite] = useState('');
+  const [combined, setCombined] = useState(true); // Fido + Fiafia in one run
   const [lines, setLines] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -69,7 +70,7 @@ function RunTab({ sites, onSaved }) {
   };
   const run = async () => {
     setBusy(true);
-    try { const r = await api(scoped('/payroll/compute2'), { method: 'POST', body: { from, to, site: site || undefined } });
+    try { const r = await api(scoped('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 }))); }
     catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -84,7 +85,7 @@ function RunTab({ sites, onSaved }) {
     setBusy(true);
     try {
       const deductions = {}; lines.forEach((l) => { deductions[l.staff_id] = +l.deduction || 0; });
-      await api(scoped('/payroll/runs2'), { method: 'POST', body: { from, to, site: site || undefined, deductions } });
+      await api(scoped('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined } });
       toast('Payroll saved as draft ✓', 'ok'); setLines(null); onSaved && onSaved();
     } catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -100,13 +101,17 @@ function RunTab({ sites, onSaved }) {
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={from} onChange={(e) => setFrom(e.target.value)} />
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={to} max={today()} onChange={(e) => setTo(e.target.value)} />
-        {sites.length > 1 && (
+        {!combined && sites.length > 1 && (
           <select className="input" style={{ flex: '1 1 120px' }} value={site} onChange={(e) => setSite(e.target.value)}>
             <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         )}
         <button className="btn" style={{ width: 'auto', padding: '8px 16px' }} onClick={run} disabled={busy}>{busy ? <span className="spin" /> : null} Compute</button>
       </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+        <input type="checkbox" checked={combined} onChange={(e) => setCombined(e.target.checked)} />
+        Combined payroll (Fido + Fiafia in one run; same person merged)
+      </label>
 
       {lines && (lines.length === 0 ? <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div> : (
         <>
@@ -295,6 +300,17 @@ function SetupTab({ sites }) {
   const [site, setSite] = useState('');
   const [loading, setLoading] = useState(true);
 
+  // Shared per-bag rates (global, apply to ALL loaders/baggers across Fido+Fiafia).
+  const [bag, setBag] = useState({ loaded: 0, bagged: 0 });
+  const [bagBusy, setBagBusy] = useState(false);
+  useEffect(() => { api(scoped('/payroll/bag-rates')).then(setBag).catch(() => {}); }, [tenant]);
+  const saveBag = async () => {
+    setBagBusy(true);
+    try { setBag(await api(scoped('/payroll/bag-rates'), { method: 'PUT', body: { rate_loaded: +bag.loaded || 0, rate_bagged: +bag.bagged || 0 } })); toast('Per-bag rates saved ✓', 'ok'); }
+    catch (e) { toast(e.message, 'err'); }
+    setBagBusy(false);
+  };
+
   const load = useCallback(async () => {
     setLoading(true);
     try { const p = new URLSearchParams(); if (site) p.set('site', site); setRows(await api(scoped(`/payroll/pay-config?${p}`))); }
@@ -312,6 +328,15 @@ function SetupTab({ sites }) {
   if (loading) return <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>;
   return (
     <div>
+      <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
+        <strong style={{ display: 'block', marginBottom: 2 }}>Per-bag rates (loaders & baggers)</strong>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Shared across Fido + Fiafia. Every loader/bagger is paid bags × this rate.</span>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bag.loaded ?? 0} onChange={(e) => setBag((b) => ({ ...b, loaded: e.target.value }))} /></div>
+          <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bag.bagged ?? 0} onChange={(e) => setBag((b) => ({ ...b, bagged: e.target.value }))} /></div>
+          <button className="btn" style={{ width: 'auto', padding: '10px 16px' }} onClick={saveBag} disabled={bagBusy}>{bagBusy ? <span className="spin" /> : null} Save</button>
+        </div>
+      </div>
       {sites.length > 1 && (
         <select className="input" style={{ marginBottom: 12 }} value={site} onChange={(e) => setSite(e.target.value)}>
           <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -350,13 +375,13 @@ function SetupTab({ sites }) {
 export default function Payroll() {
   const { go, sites } = useStore();
   const role = useRole();
-  const allowed = role && atLeast(role, 'ACCOUNTANT');
+  const allowed = role && atLeast(role, 'SNR_ACCOUNTANT');
   const [tab, setTab] = useState('run');
   const [summary, setSummary] = useState(null);
 
   useEffect(() => { if (allowed && tab === 'history') api(scoped('/payroll/imported/summary')).then(setSummary).catch(() => {}); }, [allowed, tab]);
 
-  if (!allowed) return <div className="empty"><div className="ic">🔒</div><p>Payroll is restricted to Accountants and above.</p></div>;
+  if (!allowed) return <div className="empty"><div className="ic">🔒</div><p>Payroll is restricted to Senior Accountant, General Manager and Admin.</p></div>;
 
   return (
     <div>

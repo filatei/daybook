@@ -353,10 +353,7 @@ function SetupTab({ sites }) {
             </select>
           </div>
           {r.pay_type === 'PIECE' ? (
-            <div className="grid2">
-              <div><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={r.rate_loaded ?? 0} onChange={(e) => setVal(i, 'rate_loaded', e.target.value)} /></div>
-              <div><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={r.rate_bagged ?? 0} onChange={(e) => setVal(i, 'rate_bagged', e.target.value)} /></div>
-            </div>
+            <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>Paid by the shared per-bag rates above (all loaders one rate, all baggers one rate).</div>
           ) : r.pay_type === 'MONTHLY' ? (
             <div><label className="fl">Monthly salary (₦) — prorated by attendance</label><input type="number" className="input" value={r.daily_rate ?? 0} onChange={(e) => setVal(i, 'daily_rate', e.target.value)} /></div>
           ) : (

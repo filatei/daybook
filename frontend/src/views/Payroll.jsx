@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { api, scoped, ngn, today, getToken } from '../api.js';
+import { api, scoped, ngn, today, getToken, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -173,6 +173,10 @@ function RunTab({ sites, onSaved }) {
         <input type="checkbox" checked={combined} onChange={(e) => setCombined(e.target.checked)} />
         Combined payroll (Fido + Fiafia in one run; same person merged)
       </label>
+      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
+        onClick={() => downloadFile(scoped(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}`), `payroll-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+        ⬇ Excel template (Regular / Baggers / Loaders)
+      </button>
 
       {lines && (() => {
         const paid = lines.filter((l) => (l.gross || 0) > 0);
@@ -224,7 +228,16 @@ function RunsTab() {
   const isGM = role && atLeast(role, 'GENERAL_MANAGER');
   const [runs, setRuns] = useState([]);
   const [open, setOpen] = useState(null);   // run detail
+  const [editLine, setEditLine] = useState(null); // line being adjusted
   const [loading, setLoading] = useState(true);
+
+  const saveLine = async (patch) => {
+    try {
+      await api(scoped(`/payroll/runs2/${open.id}/lines/${editLine.id}`), { method: 'PATCH', body: patch });
+      const fresh = await api(scoped(`/payroll/runs2/${open.id}`));
+      setOpen(fresh); setEditLine(null); toast('Line updated ✓', 'ok'); load();
+    } catch (e) { toast(e.message, 'err'); }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -267,10 +280,14 @@ function RunsTab() {
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}</div>
             <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 10 }}>
               {(open.lines || []).map((l) => (
-                <div key={l.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
-                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.staff_name}<span style={{ color: 'var(--muted)' }}> · {l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`}{l.deductions ? ` − ${ngn(l.deductions)}` : ''}</span></span>
-                  <strong>{ngn(l.net)}</strong>
-                </div>
+                <button key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
+                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13, width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: open.status === 'DRAFT' ? 'pointer' : 'default' }}>
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {l.remarks ? <span title={l.remarks} style={{ marginRight: 4 }}>ℹ️</span> : null}
+                    {l.staff_name}<span style={{ color: 'var(--muted)' }}> · {l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`}{l.deductions ? ` − ${ngn(l.deductions)}` : ''}</span>
+                  </span>
+                  <strong style={{ whiteSpace: 'nowrap' }}>{ngn(l.net)}{open.status === 'DRAFT' ? ' ›' : ''}</strong>
+                </button>
               ))}
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
@@ -283,6 +300,48 @@ function RunsTab() {
           </div>
         </div>
       )}
+
+      {editLine && (
+        <LineEditor line={editLine} onClose={() => setEditLine(null)} onSave={saveLine} />
+      )}
+    </div>
+  );
+}
+
+// Adjust one payslip line on a DRAFT run (deduction + bags/days). Shows the
+// daily-recorded baseline so the accountant sees what they're overriding.
+function LineEditor({ line, onClose, onSave }) {
+  const piece = (line.pay_type || '').toUpperCase() === 'PIECE';
+  const [ded, setDed] = useState(line.deductions || 0);
+  const [loaded, setLoaded] = useState(line.bags_loaded || 0);
+  const [bagged, setBagged] = useState(line.bags_bagged || 0);
+  const [days, setDays] = useState(line.days_present || 0);
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 380, margin: 0 }}>
+        <strong style={{ display: 'block', marginBottom: 8 }}>{line.staff_name}</strong>
+        {piece ? (
+          <>
+            <label className="fl">Bags loaded <span style={{ color: 'var(--muted)' }}>(recorded {line.rec_loaded ?? '—'})</span></label>
+            <input type="number" className="input" value={loaded} onChange={(e) => setLoaded(e.target.value)} />
+            <label className="fl" style={{ marginTop: 8 }}>Bags bagged <span style={{ color: 'var(--muted)' }}>(recorded {line.rec_bagged ?? '—'})</span></label>
+            <input type="number" className="input" value={bagged} onChange={(e) => setBagged(e.target.value)} />
+          </>
+        ) : (
+          <>
+            <label className="fl">Days worked <span style={{ color: 'var(--muted)' }}>(recorded {line.rec_days ?? '—'})</span></label>
+            <input type="number" className="input" value={days} onChange={(e) => setDays(e.target.value)} />
+          </>
+        )}
+        <label className="fl" style={{ marginTop: 8 }}>Deduction (₦)</label>
+        <input type="number" className="input" value={ded} onChange={(e) => setDed(e.target.value)} />
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Cancel</button>
+          <button className="btn" style={{ flex: 1 }} onClick={() => onSave(piece
+            ? { bags_loaded: +loaded || 0, bags_bagged: +bagged || 0, deductions: +ded || 0 }
+            : { days_present: +days || 0, deductions: +ded || 0 })}>Save</button>
+        </div>
+      </div>
     </div>
   );
 }

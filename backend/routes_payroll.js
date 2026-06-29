@@ -11,6 +11,7 @@
 'use strict';
 
 const express = require('express');
+const XLSX = require('xlsx');
 const { v4: uuid } = require('uuid');
 const { qone, qall, qrun, withTransaction } = require('./db');
 const { requireAuth, contextFor, requestedTenant, atLeast, siteBound, membershipsFor } = require('./auth');
@@ -585,6 +586,52 @@ router.post('/compute2', requireAuth, async (req, res) => {
   res.json({ from, to, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
 });
 
+// ── Excel template download (Fido-shaped: REGULAR / BAGGERS / LOADERS) ─────────
+// Pre-filled from the computed payroll so the accountant edits deductions / qty
+// and re-uploads. Adds a DEDUCTION + REMARKS column to each sheet.
+router.get('/template.xlsx', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const { from, to } = req.query;
+  if (!from || !to) return res.status(400).end();
+  const combined = req.query.combined === '1' || req.query.combined === 'true';
+  const rates = await getBagRates();
+  const lines = combined
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to, rates)
+    : await computeLines(c.tenant_id, from, to, null, rates);
+  const ids = lines.map((l) => l.staff_id).filter(Boolean);
+  const sBy = {};
+  if (ids.length) {
+    const ph = ids.map(() => '?').join(',');
+    const staff = await qall(`SELECT s.id, s.ext_people_id, s.full_name, s.role_title, s.staff_type,
+        s.bank_name, s.bank_account, si.name site_name
+      FROM staff s LEFT JOIN sites si ON si.id=s.site_id WHERE s.id IN (${ph})`, ids);
+    for (const s of staff) sBy[s.id] = s;
+  }
+  const reg = [], bag = [], load = [];
+  for (const l of lines) {
+    const s = sBy[l.staff_id] || {};
+    const nm = splitName(l.full_name);
+    const acct = [s.bank_name, s.bank_account].filter(Boolean).join('-') || (s.bank_account || '');
+    const pt = (l.pay_type || '').toUpperCase();
+    const isLoader = s.staff_type === 'LOADER' || (pt === 'PIECE' && Number(l.bags_loaded) > Number(l.bags_bagged));
+    if (pt === 'PIECE' && !isLoader) {
+      bag.push({ 'S/N': bag.length + 1, ID: s.ext_people_id || '', 'FIRST NAME': nm.first, 'MIDDLE NAME': nm.middle, 'LAST NAME': nm.last, LOCATION: s.site_name || '', QTY: l.bags_bagged, 'ACCOUNT NUMBER': acct, DEDUCTION: l.advance || 0, REMARKS: '', COMMISSION: l.gross });
+    } else if (pt === 'PIECE') {
+      load.push({ 'S/N': load.length + 1, ID: s.ext_people_id || '', 'FIRST NAME': nm.first, 'MIDDLE NAME': nm.middle, 'LAST NAME': nm.last, LOCATION: s.site_name || '', 'ACCOUNT NUMBER': acct, 'BAGS LOADED': l.bags_loaded, DEDUCTION: l.advance || 0, REMARKS: '', 'NET PAY (COMMISSION)': l.gross });
+    } else {
+      reg.push({ 'S/N': reg.length + 1, ID: s.ext_people_id || '', 'FIRST NAME': nm.first, 'MIDDLE NAME': nm.middle, 'LAST NAME': nm.last, DESIGNATION: s.role_title || '', LOCATION: s.site_name || '', 'ACCOUNT NUMBER': acct, 'DAYS WORKED': l.days_present, 'BASE SALARY': '', DEDUCTION: l.advance || 0, REMARKS: '', 'NET SALARY': l.gross });
+    }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reg, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'DESIGNATION', 'LOCATION', 'ACCOUNT NUMBER', 'DAYS WORKED', 'BASE SALARY', 'DEDUCTION', 'REMARKS', 'NET SALARY'] }), 'REGULAR');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bag, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'QTY', 'ACCOUNT NUMBER', 'DEDUCTION', 'REMARKS', 'COMMISSION'] }), 'BAGGERS');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(load, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'ACCOUNT NUMBER', 'BAGS LOADED', 'DEDUCTION', 'REMARKS', 'NET PAY (COMMISSION)'] }), 'LOADERS');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="payroll-${from}_${to}.xlsx"`);
+  res.send(buf);
+});
+
 // ── Per-staff payroll breakdown (drill-down) — Snr Accountant+ ─────────────────
 // ids = comma-separated staff ids (a single staff, or all merged member ids for a
 // combined line). Returns the day-by-day attendance + production behind the totals.
@@ -650,9 +697,11 @@ router.post('/runs2', requireAuth, async (req, res) => {
       const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
       const net = Math.round((l.gross - d) * 100) / 100;
       tg += l.gross; td += d; tn += net;
-      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net]);
+      // rec_* = the daily-recorded snapshot at compute time; later edits/uploads
+      // are compared against it to flag discrepancies in `remarks`.
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged]);
       // Settle outstanding advances up to the period end. Combined runs settle
       // across ALL of the person's merged staff ids (both tenants) by staff_id;
       // single-tenant runs scope by tenant_id as before.
@@ -683,6 +732,53 @@ router.get('/runs2/:id', requireAuth, async (req, res) => {
   run.lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
   res.json(run);
 });
+// Edit one payslip line on a DRAFT run — adjust deduction / bags / days, recompute
+// gross+net, and flag any discrepancy vs the daily-recorded snapshot in `remarks`.
+router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be edited' });
+  const line = await qone('SELECT * FROM pay_run_lines WHERE id=? AND run_id=?', [req.params.lineId, run.id]);
+  if (!line) return res.status(404).json({ error: 'line not found' });
+
+  const b = req.body || {};
+  const num = (v, fallback) => (v == null || v === '' || isNaN(+v) ? fallback : +v);
+  const days = num(b.days_present, Number(line.days_present) || 0);
+  const loaded = num(b.bags_loaded, Number(line.bags_loaded) || 0);
+  const bagged = num(b.bags_bagged, Number(line.bags_bagged) || 0);
+  const deduction = Math.max(0, num(b.deductions, Number(line.deductions) || 0));
+
+  // Recompute gross from the (possibly edited) quantities.
+  const rates = await getBagRates();
+  const pt = (line.pay_type || '').toUpperCase();
+  const st = await qone('SELECT daily_rate FROM staff WHERE id=?', [line.staff_id]);
+  const periodDays = Math.max(1, Math.round((Date.parse(run.period_to) - Date.parse(run.period_from)) / 86400000) + 1);
+  let gross;
+  if (pt === 'PIECE') gross = loaded * rates.loaded + bagged * rates.bagged;
+  else if (pt === 'MONTHLY') gross = (Number(st?.daily_rate) || 0) * (days / periodDays);
+  else gross = days * (Number(st?.daily_rate) || 0);
+  gross = round2(gross);
+  const ded = Math.min(gross, deduction);
+  const net = round2(gross - ded);
+
+  // Discrepancy vs daily-recorded snapshot → remarks.
+  const notes = [];
+  const rd = Number(line.rec_days), rl = Number(line.rec_loaded), rg = Number(line.rec_bagged);
+  if (pt === 'PIECE') {
+    if (!isNaN(rl) && loaded !== rl) notes.push(`Loaded ${rl}→${loaded}`);
+    if (!isNaN(rg) && bagged !== rg) notes.push(`Bagged ${rg}→${bagged}`);
+  } else if (!isNaN(rd) && days !== rd) notes.push(`Days ${rd}→${days}`);
+  const remarks = notes.length ? `Adjusted: ${notes.join(', ')}` : null;
+
+  await qrun('UPDATE pay_run_lines SET days_present=?, bags_loaded=?, bags_bagged=?, gross=?, deductions=?, net=?, remarks=? WHERE id=?',
+    [days, loaded, bagged, gross, ded, net, remarks, line.id]);
+  // Re-roll run totals.
+  const sums = await qone('SELECT COALESCE(SUM(gross),0) g, COALESCE(SUM(deductions),0) d, COALESCE(SUM(net),0) n FROM pay_run_lines WHERE run_id=?', [run.id]);
+  await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?', [round2(sums.g), round2(sums.d), round2(sums.n), run.id]);
+  res.json(await qone('SELECT * FROM pay_run_lines WHERE id=?', [line.id]));
+});
+
 // Approve (Snr Accountant+) → Paid (General Manager+).
 router.post('/runs2/:id/status', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;

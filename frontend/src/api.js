@@ -40,6 +40,20 @@ export async function api(path, { method = 'GET', body, form } = {}) {
 export const isNetErr = (e) =>
   !navigator.onLine || /failed to fetch|networkerror|load failed|fetch failed/i.test(e?.message || '');
 
+// Download an authenticated binary (e.g. xlsx export) as a file.
+export async function downloadFile(path, filename) {
+  const headers = {};
+  if (_token) headers['Authorization'] = 'Bearer ' + _token;
+  const res = await fetch('/api' + path, { headers });
+  if (!res.ok) throw new Error('Download failed');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename || 'download';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
 // ── Receipt deep-link / install URL ───────────────────────────────────────────
 // The QR printed on a receipt encodes a full URL so that a customer scanning it
 // with their phone camera is taken to daybook.torama.money (Chrome opens it),

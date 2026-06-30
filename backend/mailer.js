@@ -428,6 +428,14 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to, attach
         <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Site</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sales</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Cash</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Transfer/POS</th></tr></thead>
         <tbody>${dist}</tbody>
       </table>` : ''}
+      ${(s.salesByProduct && s.salesByProduct.length) ? `<div style="font-weight:800;margin:6px 0">Sales by product</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Product</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Qty</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Amount</th></tr></thead>
+        <tbody>
+          ${s.salesByProduct.map((p) => `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0">${esc(p.name)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(p.qty || 0).toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">₦${(Number(p.amount) || 0).toLocaleString()}</td></tr>`).join('')}
+          <tr style="font-weight:800"><td style="padding:6px 10px">TOTAL</td><td style="padding:6px 10px;text-align:right">${s.salesByProduct.reduce((a, p) => a + (p.qty || 0), 0).toLocaleString()}</td><td style="padding:6px 10px;text-align:right">₦${s.salesByProduct.reduce((a, p) => a + (Number(p.amount) || 0), 0).toLocaleString()}</td></tr>
+        </tbody>
+      </table>` : ''}
       ${(s.bagBySite && s.bagBySite.length) ? `<div style="font-weight:800;margin:6px 0">Bags ${esc(s.bagTotals && s.bagTotals.product ? '(' + s.bagTotals.product + ')' : '')} — all sites <span style="font-weight:600;color:#6b7280;font-size:12px">(sold excludes bonus)</span></div>
       <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
         <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Site</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Opening</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Produced</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sold</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Available</th></tr></thead>

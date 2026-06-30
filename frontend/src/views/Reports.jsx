@@ -332,6 +332,27 @@ function GeneratedReportBody({ gen, ov = null }) {
         </div>
       )}
 
+      {gen.summary?.salesByProduct && gen.summary.salesByProduct.length > 0 && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales by product</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
+            <span>Product</span><span style={{ textAlign: 'right' }}>Qty</span><span style={{ textAlign: 'right' }}>Amount</span>
+          </div>
+          {gen.summary.salesByProduct.map((p) => (
+            <div key={p.name} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+              <span>{p.name}</span>
+              <span style={{ textAlign: 'right' }}>{(p.qty || 0).toLocaleString()}</span>
+              <span style={{ textAlign: 'right' }}>{ngn(p.amount)}</span>
+            </div>
+          ))}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
+            <span>Total</span>
+            <span style={{ textAlign: 'right' }}>{gen.summary.salesByProduct.reduce((a, p) => a + (p.qty || 0), 0).toLocaleString()}</span>
+            <span style={{ textAlign: 'right' }}>{ngn(gen.summary.salesByProduct.reduce((a, p) => a + (p.amount || 0), 0))}</span>
+          </div>
+        </div>
+      )}
+
       {gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0 && (
         <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>Bags — all sites <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(sold excl. bonus)</span></div>

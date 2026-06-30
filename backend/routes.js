@@ -821,6 +821,36 @@ async function bagDayReport(ctx, siteId, date) {
   };
 }
 
+// All products sold (POS) for the given sites on one day, grouped by product
+// name with qty + ₦ — so non-bag items (dispensers, water crates, nylon, etc.)
+// appear in the report, not just the bagged water product. Excludes INCENTIVE
+// (free) lines so it ties to the cash/POS/transfer totals. Reads native pos_sales.
+async function salesByProduct(ctx, siteIds, date) {
+  const map = {};
+  for (const sid of siteIds) {
+    let rows = [];
+    try {
+      rows = await qall(
+        `SELECT lower(elem->>'name') key, max(elem->>'name') name,
+                COALESCE(SUM((elem->>'qty')::numeric),0) qty,
+                COALESCE(SUM((elem->>'amount')::numeric),0) amount
+           FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
+          WHERE p.tenant_id=? AND p.site_id=? AND p.sale_date=?
+            AND COALESCE(p.payment_method,'') <> 'INCENTIVE'
+            AND p.items_json IS NOT NULL AND left(p.items_json,1)='['
+          GROUP BY lower(elem->>'name')`,
+        [ctx.tenant_id, sid, date]);
+    } catch { rows = []; }
+    for (const r of rows) {
+      const k = r.key || '—';
+      if (!map[k]) map[k] = { name: r.name || '—', qty: 0, amount: 0 };
+      map[k].qty += Number(r.qty) || 0;
+      map[k].amount += Number(r.amount) || 0;
+    }
+  }
+  return Object.values(map).sort((a, b) => b.amount - a.amount);
+}
+
 // Build the full generated report (one site, or all sites aggregated).
 async function buildGeneratedReport(ctx, date, siteArg) {
   const wantAll = !siteBound(ctx) && (!siteArg || String(siteArg).toUpperCase() === 'ALL');
@@ -843,6 +873,9 @@ async function buildGeneratedReport(ctx, date, siteArg) {
     tot.totalLoaded += pe.totalLoaded; tot.totalBagged += pe.totalBagged; tot.diesel += pe.diesel; tot.expenses += pe.expenses;
   }
   const totalSales = tot.cash + tot.pos + tot.transfer;
+  // Every product sold across the reported site(s) — bag water + dispensers,
+  // crates, nylon and anything else — so the report itemises all sales.
+  const productSales = await salesByProduct(ctx, sites.map((s) => s.id), date);
   const single = !wantAll && bySite.length === 1 ? bySite[0] : null;
   // POS split by acquiring bank (Moniepoint / GTB / …) so the daybook can be
   // reconciled per bank instead of one lumped POS figure. Legacy POS (Mongo) only.
@@ -939,7 +972,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
       bagReport, ops, bagBySite, bagTotals, stockTotals, posByBank, productionTotals,
-      gensBySite, roTotals, incidentsBySite,
+      gensBySite, roTotals, incidentsBySite, salesByProduct: productSales,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
     // Single-site reports are saveable/submittable; the all-sites roll-up is view/email only.

@@ -214,7 +214,18 @@ function Inner() {
   );
 }
 
+// Feature highlights shown on the public landing page.
+const LANDING_FEATURES = [
+  { ic: '💳', t: 'Sales & POS', d: 'Record every sale, print thermal receipts, and track stock leaving the gate.' },
+  { ic: '💸', t: 'Expenses & cash', d: 'Log expenses, reconcile cash, and keep a clean daily money trail per site.' },
+  { ic: '🧾', t: 'Daily reports', d: 'Automatic and manual daily reports, emailed to managers and archived.' },
+  { ic: '👥', t: 'Staff & payroll', d: 'Badge clock-in, attendance, and payroll — across every site you run.' },
+];
+
 function LoginScreen({ devLogin }) {
+  const [showLogin, setShowLogin] = useState(false);
+  const year = new Date().getFullYear();
+
   useEffect(() => {
     const initGsi = (gid) => {
       if (!window.google?.accounts?.id || !gid) return;
@@ -244,20 +255,78 @@ function LoginScreen({ devLogin }) {
     }).catch(() => {});
   }, []);
 
+  // The login card stays mounted (just hidden) so Google Identity can render its
+  // button into #gsi-button on first load, before the user opens the login view.
   return (
-    <div className="login-screen">
-      <div className="login-card">
-        <div className="login-logo">📒</div>
-        <h1 className="login-title">Daybook</h1>
-        <p className="login-sub">Daily sales &amp; operations reporting</p>
-        <div id="gsi-button" style={{ minHeight: 44 }} />
-        {import.meta.env.DEV && (
-          <button className="btn btn-ghost" style={{ marginTop: 16 }} onClick={devLogin}>
-            Dev login
-          </button>
+    <div className="lp">
+      <header className="lp-top">
+        <span className="lp-logo">📒 Daybook</span>
+        {!showLogin && (
+          <button className="lp-signin" onClick={() => setShowLogin(true)}>Sign in</button>
         )}
+      </header>
+
+      {/* ── Public landing ─────────────────────────────────────────── */}
+      <main className="lp-main" style={{ display: showLogin ? 'none' : 'block' }}>
+        <section className="lp-hero">
+          <span className="lp-eyebrow">By Torama Technologies</span>
+          <h1>Run your whole day’s operations in one place.</h1>
+          <p>
+            Daybook is a daily operations platform for water businesses and other
+            multi-site operators — sales, expenses, cash, staff, inventory and
+            reports, across every location, on any device.
+          </p>
+          <button className="btn lp-cta" onClick={() => setShowLogin(true)}>Sign in to continue</button>
+          <div className="lp-note">Access is by invitation from your administrator.</div>
+        </section>
+
+        <section className="lp-grid">
+          {LANDING_FEATURES.map((f) => (
+            <div className="lp-card" key={f.t}>
+              <div className="lp-card-ic">{f.ic}</div>
+              <div className="lp-card-t">{f.t}</div>
+              <div className="lp-card-d">{f.d}</div>
+            </div>
+          ))}
+        </section>
+
+        <section className="lp-about">
+          <h2>About</h2>
+          <p>
+            Daybook is built and operated by <b>Torama Technologies</b>. It is a
+            private business tool — each company’s data is isolated by workspace,
+            protected by role- and site-based access, encrypted in transit, and
+            audit-logged.
+          </p>
+          <p className="lp-contact">
+            <b>Contact:</b> <a href="mailto:support@torama.money">support@torama.money</a><br />
+            <b>Web:</b> daybook.torama.money
+          </p>
+        </section>
+      </main>
+
+      {/* ── Login card (kept mounted for GSI) ──────────────────────── */}
+      <div className="login-screen" style={{ display: showLogin ? 'flex' : 'none' }}>
+        <div className="login-card">
+          <div className="login-logo">📒</div>
+          <h1 className="login-title">Daybook</h1>
+          <p className="login-sub">Daily sales &amp; operations reporting</p>
+          <div id="gsi-button" style={{ minHeight: 44 }} />
+          {import.meta.env.DEV && (
+            <button className="btn btn-ghost" style={{ marginTop: 16 }} onClick={devLogin}>
+              Dev login
+            </button>
+          )}
+          <button className="lp-back" onClick={() => setShowLogin(false)}>← Back to home</button>
+        </div>
       </div>
-      <div className="login-copyright">© {new Date().getFullYear()} Torama Technologies</div>
+
+      <footer className="lp-foot">
+        © {year} Torama Technologies ·{' '}
+        <a href="/privacy.html" target="_blank" rel="noopener noreferrer">Privacy</a> ·{' '}
+        <a href="/terms.html" target="_blank" rel="noopener noreferrer">Terms</a> ·{' '}
+        <a href="mailto:support@torama.money">Contact</a>
+      </footer>
     </div>
   );
 }

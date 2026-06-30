@@ -55,12 +55,16 @@ async function ensureSeed() {
     if (!tenant) {
       const id = uuid();
       await qrun('INSERT INTO tenants (id,slug,name,brand_color,industry,plan,pos_source) VALUES (?,?,?,?,?,?,?)',
-        [id, t.slug, t.name, t.brand_color, t.industry, 'OWNER', 'FIDO']);
+        [id, t.slug, t.name, t.brand_color, t.industry, 'OWNER', null]);
       tenant = { id };
       console.log(`[seed] tenant ${t.name}`);
-    } else if (!tenant.pos_source) {
-      // backfill existing Fido/Fiafia rows with the POS link + owner plan
-      await qrun("UPDATE tenants SET pos_source='FIDO', plan='OWNER' WHERE id=?", [tenant.id]);
+    } else if (tenant.pos_source) {
+      // CUTOVER (2026-06): Daybook now reads native pos_sales. Keep the legacy
+      // Mongo POS link OFF — this used to force-set pos_source='FIDO' on every
+      // boot, which re-enabled the frozen legacy source and hid today's native
+      // sales from the dashboard/reports. Enforce native by clearing it.
+      await qrun("UPDATE tenants SET pos_source=NULL WHERE id=?", [tenant.id]);
+      console.log(`[seed] cleared legacy pos_source on ${t.slug} (native pos_sales)`);
     }
     for (const s of t.sites) {
       const exists = await qone('SELECT 1 FROM sites WHERE tenant_id=? AND code=?', [tenant.id, s.code]);

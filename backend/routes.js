@@ -825,7 +825,7 @@ async function bagDayReport(ctx, siteId, date) {
 // name with qty + ₦ — so non-bag items (dispensers, water crates, nylon, etc.)
 // appear in the report, not just the bagged water product. Excludes INCENTIVE
 // (free) lines so it ties to the cash/POS/transfer totals. Reads native pos_sales.
-async function salesByProduct(ctx, siteIds, date) {
+async function salesByProduct(ctx, siteIds, date, incentive = false) {
   const map = {};
   for (const sid of siteIds) {
     let rows = [];
@@ -836,7 +836,7 @@ async function salesByProduct(ctx, siteIds, date) {
                 COALESCE(SUM((elem->>'amount')::numeric),0) amount
            FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
           WHERE p.tenant_id=? AND p.site_id=? AND p.sale_date=?
-            AND COALESCE(p.payment_method,'') <> 'INCENTIVE'
+            AND COALESCE(p.payment_method,'') ${incentive ? '=' : '<>'} 'INCENTIVE'
             AND p.items_json IS NOT NULL AND left(p.items_json,1)='['
           GROUP BY lower(elem->>'name')`,
         [ctx.tenant_id, sid, date]);
@@ -874,8 +874,11 @@ async function buildGeneratedReport(ctx, date, siteArg) {
   }
   const totalSales = tot.cash + tot.pos + tot.transfer;
   // Every product sold across the reported site(s) — bag water + dispensers,
-  // crates, nylon and anything else — so the report itemises all sales.
-  const productSales = await salesByProduct(ctx, sites.map((s) => s.id), date);
+  // crates, nylon and anything else — so the report itemises all sales. Incentive
+  // (free/staff) items are listed separately (not part of the sales total).
+  const _siteIds = sites.map((s) => s.id);
+  const productSales = await salesByProduct(ctx, _siteIds, date, false);
+  const productIncentive = await salesByProduct(ctx, _siteIds, date, true);
   const single = !wantAll && bySite.length === 1 ? bySite[0] : null;
   // POS split by acquiring bank (Moniepoint / GTB / …) so the daybook can be
   // reconciled per bank instead of one lumped POS figure. Legacy POS (Mongo) only.
@@ -972,7 +975,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
       bagReport, ops, bagBySite, bagTotals, stockTotals, posByBank, productionTotals,
-      gensBySite, roTotals, incidentsBySite, salesByProduct: productSales,
+      gensBySite, roTotals, incidentsBySite, salesByProduct: productSales, salesByProductIncentive: productIncentive,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
     // Single-site reports are saveable/submittable; the all-sites roll-up is view/email only.

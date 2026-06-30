@@ -523,13 +523,6 @@ async function migrate() {
     -- twice (queued then retried) is stored once.
     ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS client_uid TEXT;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_client_uid ON chat_messages(tenant_id, client_uid) WHERE client_uid IS NOT NULL;
-
-    -- Payroll line: daily-recorded snapshot (for discrepancy flagging when an
-    -- accountant edits/uploads different numbers) + a per-line remarks note.
-    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS rec_days    DOUBLE PRECISION;
-    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS rec_loaded  DOUBLE PRECISION;
-    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS rec_bagged  DOUBLE PRECISION;
-    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS remarks     TEXT;
   `);
 
   // Finished-goods opening stock (B/F) seed — anchors the running bag-stock
@@ -695,8 +688,15 @@ async function migrate() {
       tenant_id   TEXT NOT NULL,
       staff_id    TEXT, staff_name TEXT, pay_type TEXT,
       days_present DOUBLE PRECISION, bags_loaded DOUBLE PRECISION, bags_bagged DOUBLE PRECISION,
-      gross DOUBLE PRECISION, deductions DOUBLE PRECISION, net DOUBLE PRECISION
+      gross DOUBLE PRECISION, deductions DOUBLE PRECISION, net DOUBLE PRECISION,
+      rec_days DOUBLE PRECISION, rec_loaded DOUBLE PRECISION, rec_bagged DOUBLE PRECISION, remarks TEXT
     );
+    -- Daily-recorded snapshot columns (discrepancy flagging) — back-fill for DBs
+    -- created before they existed. Runs AFTER the table is created.
+    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS rec_days    DOUBLE PRECISION;
+    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS rec_loaded  DOUBLE PRECISION;
+    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS rec_bagged  DOUBLE PRECISION;
+    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS remarks     TEXT;
     CREATE INDEX IF NOT EXISTS idx_payruns_td ON pay_runs(tenant_id, period_from);
   `);
 

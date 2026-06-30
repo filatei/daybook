@@ -113,16 +113,6 @@ export default function Nav() {
       <header className="nav" style={{ '--brand': brand }}>
         <div className="nav-top">
           <span className="nav-logo">📒 Daybook</span>
-          <select
-            className="tenant-sel"
-            value={tenant || ''}
-            onChange={(e) => setTenant(e.target.value || null)}
-          >
-            {isSuperAdmin && <option value="">All workspaces</option>}
-            {tenants.map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
           {isAdmin && (
             <button className="chat-btn ai-hdr-btn" onClick={() => openModal(<AIAssistant onClose={closeModal} />, { guard: true })} title="Ask Daybook AI" aria-label="AI assistant">
               🤖
@@ -134,6 +124,20 @@ export default function Nav() {
             {unread > 0 && <span className="chat-badge nav">{unread > 99 ? '99+' : unread}</span>}
           </button>
           <ProfileMenu user={user} isGMup={isGMup} isMgr={isMgr} go={go} logout={logout} canInstall={canInstall} install={install} />
+        </div>
+
+        {/* Workspace switcher — own row so a long name can't push the avatar off */}
+        <div className="nav-tenant">
+          <select
+            className="tenant-sel"
+            value={tenant || ''}
+            onChange={(e) => setTenant(e.target.value || null)}
+          >
+            {isSuperAdmin && <option value="">All workspaces</option>}
+            {tenants.map((t) => (
+              <option key={t.id} value={t.id}>{t.name}</option>
+            ))}
+          </select>
         </div>
 
         {/* Desktop tab strip (hidden on mobile via CSS) */}

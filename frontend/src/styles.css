@@ -48,6 +48,10 @@ a { color: var(--brand-d); text-decoration: none; }
   background-repeat: no-repeat; background-position: right 10px center;
   padding-right: 28px;
 }
+/* Workspace switcher row — under the top bar, full-width so it never crowds the
+   logo / chat / avatar (which used to push the profile menu off-screen). */
+.nav-tenant { padding: 0 14px 10px; }
+.nav-tenant .tenant-sel { display: block; width: 100%; max-width: 420px; }
 .tenant-sel option { color: #0f172a; background: #fff; }
 .nav-logout {
   background: rgba(255,255,255,.15); border: none; color: #fff;

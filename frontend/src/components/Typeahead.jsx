@@ -85,8 +85,10 @@ export default function Typeahead({
     }
   };
 
-  // Reopen suggestion list if user clicks back into the field and has text
+  // Reopen suggestion list on focus. With minChars=0 (a select-like list), load
+  // the full list immediately so the user can browse it without typing.
   const handleFocus = () => {
+    if (minChars === 0 && items.length === 0) { runFetch(value); return; }
     if (value.length >= minChars && (items.length > 0 || allowCreate)) setOpen(true);
   };
 

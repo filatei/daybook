@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import Typeahead from '../components/Typeahead.jsx';
 
 const ST = {
   NOT_SEEN:  { bg: '#fee2e2', fg: '#991b1b', label: 'NOT SEEN' },
@@ -56,8 +57,15 @@ function CashForm({ sites, accounts, onSave, onClose }) {
         </div>
         <div>
           <label className="fl">Payee account (bank)</label>
-          <input className="input" list="cash-accts" value={f.payee_account} onChange={(e) => set('payee_account', e.target.value)} placeholder="e.g. fidofluidsGTB" />
-          <datalist id="cash-accts">{accounts.map((a) => <option key={a} value={a} />)}</datalist>
+          <Typeahead
+            value={f.payee_account}
+            onChange={(v) => set('payee_account', v)}
+            fetchFn={async (q) => accounts.filter((a) => a.toLowerCase().includes((q || '').toLowerCase())).map((a) => ({ label: a }))}
+            minChars={0}
+            allowCreate
+            createLabel={(q) => `➕ Use “${q}”`}
+            placeholder="Search bank account…"
+          />
         </div>
       </div>
       <label className="fl">Note (optional)</label>

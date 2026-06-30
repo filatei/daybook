@@ -506,7 +506,7 @@ export default function Expenses() {
     <div>
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={`seg-b${tab === 'list' ? ' on' : ''}`} onClick={() => setTab('list')}>💸 Expenses</button>
-        <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash</button>
+        <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash deposits</button>
         <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>
       </div>
 

@@ -38,7 +38,10 @@ function CashForm({ sites, accounts, onSave, onClose }) {
   return (
     <div>
       <div className="grip" />
-      <h3>Add Cash Payment</h3>
+      <h3>Record cash deposit</h3>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 10px' }}>
+        Cash collected from customers that staff paid into the bank, or handed to a POS agent who transferred it to our account. Attach the transfer/deposit receipt.
+      </p>
       <label className="fl">Amount</label>
       <input type="number" inputMode="decimal" className="input" value={f.amount} onChange={(e) => set('amount', e.target.value)} placeholder="0" autoFocus />
       <label className="fl">Depositor / agent</label>
@@ -215,8 +218,10 @@ export default function Cash() {
 
   return (
     <div>
+      <button className="btn" style={{ marginBottom: 12 }} onClick={openForm}>＋ Record cash deposit</button>
+
       <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
-        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Cash recorded today</span>
+        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Cash deposited today</span>
         <span style={{ fontWeight: 800, fontSize: 20 }}>{ngn(data.total)}</span>
       </div>
 

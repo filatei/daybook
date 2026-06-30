@@ -53,7 +53,6 @@ function GroupTotals({ from, to, rangeLabel }) {
   const totalSales = (rows || []).reduce((s, r) => s + r.sales, 0);
   const totalOrders = (rows || []).reduce((s, r) => s + r.orders, 0);
   const totalPacking = (rows || []).reduce((s, r) => s + r.packingBags, 0);
-  const allSites = (rows || []).flatMap((r) => r.sites || []).filter((x) => x.sales > 0).sort((a, b) => b.sales - a.sales);
 
   return (
     <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid var(--brand-d)' }}>
@@ -80,17 +79,6 @@ function GroupTotals({ from, to, rangeLabel }) {
           ))}
         </div>
       )}
-      {allSites.length > 0 && (
-        <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', marginBottom: 4 }}>BY SITE (ALL WORKSPACES)</div>
-          {allSites.map((x, i) => (
-            <div key={`${x.tenant}-${x.site}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0' }}>
-              <span style={{ color: 'var(--ink)' }}>{x.site} <span style={{ color: 'var(--muted)', fontSize: 11 }}>· {x.tenant}</span></span>
-              <span style={{ fontWeight: 700 }}>{ngn(x.sales)}</span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -106,6 +94,34 @@ const RANGES = [
 
 function daysAgo(n) {
   const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10);
+}
+
+// Merge several /pos/range responses (one per workspace) into one pos-shaped object
+// so the Group view renders the same combined dashboard as a single workspace.
+function mergeRanges(parts) {
+  const T = { sales: 0, orders: 0, cash: 0, transfer: 0, incentive: 0 };
+  const site = [], cust = [], day = {}, method = {}, product = {}, hour = {};
+  for (const { t, r } of parts) {
+    if (!r) continue;
+    const tot = r.totals || {};
+    T.sales += +tot.sales || 0; T.orders += +tot.orders || 0; T.cash += +tot.cash || 0;
+    T.transfer += +tot.transfer || 0; T.incentive += +tot.incentive || 0;
+    for (const s of (r.bySite || [])) site.push({ site: s.site, code: s.code, tenant: t.name, sales: +s.sales || 0, orders: +s.orders || 0 });
+    for (const c of (r.byCustomer || [])) cust.push({ ...c, sales: +c.sales || 0, orders: +c.orders || 0 });
+    for (const d of (r.byDay || [])) day[d.day] = (day[d.day] || 0) + (+d.sales || 0);
+    for (const m of (r.byMethod || [])) { const k = m.method || '—'; (method[k] = method[k] || { method: k, sales: 0, orders: 0 }); method[k].sales += +m.sales || 0; method[k].orders += +m.orders || 0; }
+    for (const p of (r.byProduct || [])) { const k = p.product || '—'; (product[k] = product[k] || { product: k, qty: 0, sales: 0 }); product[k].qty += +p.qty || 0; product[k].sales += +p.sales || 0; }
+    for (const h of (r.byHour || [])) hour[h.hour] = (hour[h.hour] || 0) + (+h.sales || 0);
+  }
+  return {
+    totals: T,
+    bySite: site.sort((a, b) => b.sales - a.sales),
+    byCustomer: cust.sort((a, b) => b.sales - a.sales).slice(0, 30),
+    byDay: Object.entries(day).map(([d, sales]) => ({ day: d, sales })).sort((a, b) => (a.day < b.day ? -1 : 1)),
+    byMethod: Object.values(method).sort((a, b) => b.sales - a.sales),
+    byProduct: Object.values(product).sort((a, b) => b.sales - a.sales).slice(0, 30),
+    byHour: Object.entries(hour).map(([h, sales]) => ({ hour: +h, sales })).sort((a, b) => a.hour - b.hour),
+  };
 }
 
 const ngnK = (n) => n >= 1000 ? `₦${Math.round(n / 1000)}k` : `₦${Math.round(n)}`;
@@ -164,7 +180,9 @@ function FoldSection({ title, count, open, onToggle, children }) {
 }
 
 export default function Dashboard() {
-  const { tenant, isGroup } = useStore();
+  const { tenant, isGroup, groupTenants } = useStore();
+  // Stable dependency — groupTenants is a fresh array each render, so depend on ids.
+  const groupKey = (groupTenants || []).map((g) => g.id).join(',');
   const [rangeIdx, setRangeIdx] = useState(0);
   const [day, setDay] = useState('');      // a specific picked day (overrides the range)
   const [data, setData] = useState(null);
@@ -210,16 +228,26 @@ export default function Dashboard() {
       const from = day || daysAgo(RANGES[rangeIdx].days);   // a picked day overrides the range
       const to = day || today();
       const cb = Date.now();   // cache-bust so switching workspace always refetches fresh
-      const [d, p] = await Promise.all([
-        api(scoped(`/dashboard?from=${from}&to=${to}&_=${cb}`)),
-        api(scoped(`/pos/range?from=${from}&to=${to}&_=${cb}`)).catch(() => null),  // imported + live POS sales
-      ]);
-      setData(d); setPos(p);
+      if (isGroup) {
+        // Combined dashboard across all group workspaces. There's no single tenant
+        // to scope to, so fetch each member's range and merge into one pos object.
+        const parts = await Promise.all((groupTenants || []).map((t) =>
+          api(`/pos/range?from=${from}&to=${to}&tenant=${t.id}&_=${cb}`)
+            .then((r) => ({ t, r })).catch(() => null)));
+        setPos(mergeRanges(parts.filter(Boolean))); setData(null);
+      } else {
+        const [d, p] = await Promise.all([
+          api(scoped(`/dashboard?from=${from}&to=${to}&_=${cb}`)),
+          api(scoped(`/pos/range?from=${from}&to=${to}&_=${cb}`)).catch(() => null),  // imported + live POS sales
+        ]);
+        setData(d); setPos(p);
+      }
     } catch { /* tenant not selected */ }
     setLoading(false);
-  }, [tenant, rangeIdx, day]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenant, rangeIdx, day, isGroup, groupKey]);
 
-  useEffect(() => { if (!isGroup) load(); }, [load, isGroup]);
+  useEffect(() => { load(); }, [load]);
 
   const t = data?.totals;
   // Prefer real POS sales for the headline numbers; fall back to daily-report totals.
@@ -232,6 +260,7 @@ export default function Dashboard() {
   const byProduct = usePos ? (pos.byProduct || []) : [];
   const byCustomer = usePos ? (pos.byCustomer || []) : [];
   const byHour = usePos ? (pos.byHour || []) : [];
+  const drillable = usePos && !isGroup;   // group view is read-only (no single tenant to drill)
   // A single calendar day is selected (Today or a picked day) → show hourly; a
   // multi-day range → show the daily trend.
   const isSingleDay = !!day || RANGES[rangeIdx].days === 0;
@@ -246,7 +275,8 @@ export default function Dashboard() {
     const to = day || today();
     return `from=${from}&to=${to}`;
   };
-  const openOrders = (title, extra = '') => setDrill({ title, query: rangeQS() + (extra ? `&${extra}` : '') });
+  // Order drill-downs need a single tenant to query — disabled in the group view.
+  const openOrders = (title, extra = '') => { if (isGroup) return; setDrill({ title, query: rangeQS() + (extra ? `&${extra}` : '') }); };
 
   return (
     <div>
@@ -295,29 +325,28 @@ export default function Dashboard() {
 
       <GroupTotals from={day || daysAgo(RANGES[rangeIdx].days)} to={day || today()} rangeLabel={day || RANGES[rangeIdx].label} />
 
-      {isGroup ? (
-        <div className="empty"><div className="ic">🏢</div><p>Group roll-up across your workspaces. Switch to a single workspace (top-left) for detailed reports, sell, gate and other tools.</p></div>
-      ) : loading ? (
+      {loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} style={{ height: 72 }} />)}</>
       ) : (!t && !usePos) ? (
-        <div className="empty"><div className="ic">📊</div><p>Select a workspace to see data</p></div>
+        <div className="empty"><div className="ic">{isGroup ? '🏢' : '📊'}</div><p>{isGroup ? 'No sales across your workspaces for this period yet. Switch to a single workspace (top-left) for sell, gate and detailed tools.' : 'Select a workspace to see data'}</p></div>
       ) : (
         <>
+          {isGroup && <div style={{ fontSize: 12, color: 'var(--muted)', margin: '0 2px 8px' }}>Combined · all workspaces</div>}
           <div className="stat-grid">
-            <button className="stat accent" onClick={() => usePos && openOrders('All orders')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
-              <div className="k">Total Sales{usePos ? ' ›' : ''}</div>
+            <button className="stat accent" onClick={() => drillable && openOrders('All orders')} style={{ cursor: drillable ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">Total Sales{drillable ? ' ›' : ''}</div>
               <div className="v">{ngn(sales)}</div>
             </button>
-            <button className="stat" onClick={() => usePos && openOrders('Cash orders', 'method=CASH')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
-              <div className="k">Cash{usePos ? ' ›' : ''}</div>
+            <button className="stat" onClick={() => drillable && openOrders('Cash orders', 'method=CASH')} style={{ cursor: drillable ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">Cash{drillable ? ' ›' : ''}</div>
               <div className="v">{ngn(cash)}</div>
             </button>
-            <button className="stat" onClick={() => usePos && setBankDrill(rangeQS())} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
-              <div className="k">{usePos ? 'Transfer/POS ›' : 'Deposits'}</div>
+            <button className="stat" onClick={() => drillable && setBankDrill(rangeQS())} style={{ cursor: drillable ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">{drillable ? 'Transfer/POS ›' : 'Transfer/POS'}</div>
               <div className="v">{ngn(transfer)}</div>
             </button>
-            <button className="stat" onClick={() => usePos && openOrders('All orders')} style={{ cursor: usePos ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
-              <div className="k">{usePos ? 'Orders ›' : 'Costs'}</div>
+            <button className="stat" onClick={() => drillable && openOrders('All orders')} style={{ cursor: drillable ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
+              <div className="k">{usePos ? `Orders${drillable ? ' ›' : ''}` : 'Costs'}</div>
               <div className="v">{usePos ? pos.totals.orders.toLocaleString() : ngn(t?.costs || 0)}</div>
             </button>
           </div>
@@ -348,10 +377,10 @@ export default function Dashboard() {
           {bySite?.length > 0 && (
             <FoldSection title="By Site" count={bySite.length} open={openSec.site} onToggle={() => toggleSec('site')}>
               {bySite.map((s, i) => (
-                <button className="list-item" key={s.site} onClick={() => usePos && openOrders(s.site, `site_code=${encodeURIComponent(s.code || s.site)}`)}
-                  style={{ width: '100%', border: 'none', background: 'none', cursor: usePos ? 'pointer' : 'default', textAlign: 'left' }}>
+                <button className="list-item" key={s.site} onClick={() => drillable && openOrders(s.site, `site_code=${encodeURIComponent(s.code || s.site)}`)}
+                  style={{ width: '100%', border: 'none', background: 'none', cursor: drillable ? 'pointer' : 'default', textAlign: 'left' }}>
                   <div className="av" style={{ borderRadius: 8, fontSize: 14, fontWeight: 800 }}>{i + 1}</div>
-                  <div className="meta"><div className="t">{s.site}{usePos ? ' ›' : ''}</div></div>
+                  <div className="meta"><div className="t">{s.site}{s.tenant ? <span style={{ color: 'var(--muted)', fontSize: 11, fontWeight: 600 }}> · {s.tenant}</span> : ''}{drillable ? ' ›' : ''}</div></div>
                   <div className="amt">{ngn(s.sales)}</div>
                 </button>
               ))}
@@ -361,10 +390,10 @@ export default function Dashboard() {
           {byProduct.length > 0 && (
             <FoldSection title="By Product" count={byProduct.length} open={openSec.product} onToggle={() => toggleSec('product')}>
               {byProduct.map((p, i) => (
-                <button className="list-item" key={p.product + i} onClick={() => openOrders(p.product, `product=${encodeURIComponent(p.product)}`)}
-                  style={{ width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                <button className="list-item" key={p.product + i} onClick={() => drillable && openOrders(p.product, `product=${encodeURIComponent(p.product)}`)}
+                  style={{ width: '100%', border: 'none', background: 'none', cursor: drillable ? 'pointer' : 'default', textAlign: 'left' }}>
                   <div className="av" style={{ borderRadius: 8, fontSize: 14, fontWeight: 800 }}>{i + 1}</div>
-                  <div className="meta"><div className="t">{p.product} ›</div>{p.qty ? <div className="s" style={{ fontSize: 12, color: 'var(--muted)' }}>{Number(p.qty).toLocaleString()} sold</div> : null}</div>
+                  <div className="meta"><div className="t">{p.product}{drillable ? ' ›' : ''}</div>{p.qty ? <div className="s" style={{ fontSize: 12, color: 'var(--muted)' }}>{Number(p.qty).toLocaleString()} sold</div> : null}</div>
                   <div className="amt">{ngn(p.sales)}</div>
                 </button>
               ))}
@@ -374,10 +403,10 @@ export default function Dashboard() {
           {byCustomer.length > 0 && (
             <FoldSection title="By Customer" count={byCustomer.length} open={openSec.customer} onToggle={() => toggleSec('customer')}>
               {byCustomer.map((c, i) => (
-                <button className="list-item" key={(c.customer_id || c.customer) + i} onClick={() => openOrders(c.customer, `customer=${encodeURIComponent(c.customer_id || c.customer)}`)}
-                  style={{ width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                <button className="list-item" key={(c.customer_id || c.customer) + i} onClick={() => drillable && openOrders(c.customer, `customer=${encodeURIComponent(c.customer_id || c.customer)}`)}
+                  style={{ width: '100%', border: 'none', background: 'none', cursor: drillable ? 'pointer' : 'default', textAlign: 'left' }}>
                   <div className="av" style={{ borderRadius: 8, fontSize: 14, fontWeight: 800 }}>{i + 1}</div>
-                  <div className="meta"><div className="t">{c.customer} ›</div>{c.orders ? <div className="s" style={{ fontSize: 12, color: 'var(--muted)' }}>{Number(c.orders).toLocaleString()} order{c.orders > 1 ? 's' : ''}</div> : null}</div>
+                  <div className="meta"><div className="t">{c.customer}{drillable ? ' ›' : ''}</div>{c.orders ? <div className="s" style={{ fontSize: 12, color: 'var(--muted)' }}>{Number(c.orders).toLocaleString()} order{c.orders > 1 ? 's' : ''}</div> : null}</div>
                   <div className="amt">{ngn(c.sales)}</div>
                 </button>
               ))}

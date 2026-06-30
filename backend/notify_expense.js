@@ -21,11 +21,12 @@ const mailer = require('./mailer');
 const ngn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 
 const STATE_LABEL = {
-  DRAFT: 'Draft', REVIEWED: 'Reviewed', APPROVED: 'Approved',
+  DRAFT: 'Draft', VALIDATED: 'Validated', REVIEWED: 'Reviewed', APPROVED: 'Approved',
   PAID: 'Paid', DELIVERED: 'Delivered', DECLINED: 'Declined',
 };
 const ACTION_NEEDED = {
-  DRAFT: 'Validate this expense to send it for approval',
+  DRAFT: 'Validate this expense',
+  VALIDATED: 'Review this expense to send it for approval',
   REVIEWED: 'Approve or decline this expense',
   APPROVED: 'Pay this expense and attach the receipt',
   PAID: 'Deliver the funds to the receiver',
@@ -35,6 +36,7 @@ const ACTION_NEEDED = {
 const EVENT_TEXT = {
   create: 'created this expense',
   validate: 'validated this expense',
+  review: 'reviewed this expense',
   approve: 'approved this expense',
   decline: 'declined this expense',
   pay: 'marked this expense paid',
@@ -51,7 +53,9 @@ function recipientsFor(mem, expense, targetState) {
   add(managersAtSite);
   if (expense.recorded_by) ids.add(expense.recorded_by);           // the creator
 
-  if (targetState === 'REVIEWED') {
+  if (targetState === 'VALIDATED') {
+    // Managers review validated tickets — they're already added above; nothing extra.
+  } else if (targetState === 'REVIEWED') {
     add(mem.filter((r) => r.role === 'ADMIN' || r.role === 'GENERAL_MANAGER'));
   } else if (targetState === 'APPROVED') {
     add(mem.filter((r) => ['ADMIN', 'GENERAL_MANAGER', 'SNR_ACCOUNTANT', 'ACCOUNTANT'].includes(r.role)));

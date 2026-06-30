@@ -59,12 +59,15 @@ function BadgeClock() {
 const POSITIONS = ['Secretary', 'Operator', 'Cleaner', 'Security', 'Sales', 'Driver', 'Supervisor', 'Manager', 'Accountant', 'Storekeeper', 'Technician'];
 
 // ── Add / edit staff form ─────────────────────────────────────────────────────
-function StaffForm({ sites, siteBound, defaultSite, onSaved, onClose }) {
+function StaffForm({ sites, siteBound, defaultSite, staff, onSaved, onClose }) {
   const { toast } = useStore();
+  const editing = !!(staff && staff.id);
   const [f, setF] = useState({
-    full_name: '', site_id: defaultSite || (sites[0]?.id || ''), staff_type: 'REGULAR',
-    role_title: '', phone: '', daily_rate: '', rate_loaded: '', rate_bagged: '',
-    bank_name: '', bank_account: '', pay_type: 'DAILY',
+    full_name: staff?.full_name || '', site_id: staff?.site_id || defaultSite || (sites[0]?.id || ''),
+    staff_type: staff?.staff_type || 'REGULAR',
+    role_title: staff?.role_title || '', phone: staff?.phone || '',
+    daily_rate: staff?.daily_rate ?? '', rate_loaded: staff?.rate_loaded ?? '', rate_bagged: staff?.rate_bagged ?? '',
+    bank_name: staff?.bank_name || '', bank_account: staff?.bank_account || '', pay_type: staff?.pay_type || 'DAILY',
   });
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
@@ -74,18 +77,20 @@ function StaffForm({ sites, siteBound, defaultSite, onSaved, onClose }) {
     if (!f.full_name.trim()) { toast('Enter the staff name', 'err'); return; }
     if (!f.site_id) { toast('Pick a site', 'err'); return; }
     setSaving(true);
+    const body = {
+      full_name: f.full_name.trim(), site_id: f.site_id, staff_type: f.staff_type,
+      role_title: isPiece ? null : (f.role_title.trim() || null), phone: f.phone.trim() || null,
+      pay_type: f.pay_type, daily_rate: +f.daily_rate || 0,
+      rate_loaded: +f.rate_loaded || 0, rate_bagged: +f.rate_bagged || 0,
+      bank_name: f.bank_name.trim() || null, bank_account: f.bank_account.trim() || null,
+    };
     try {
-      await api(scoped('/staff'), { method: 'POST', body: {
-        full_name: f.full_name.trim(), site_id: f.site_id, staff_type: f.staff_type,
-        role_title: isPiece ? null : (f.role_title.trim() || null), phone: f.phone.trim() || null,
-        pay_type: f.pay_type, daily_rate: +f.daily_rate || 0,
-        rate_loaded: +f.rate_loaded || 0, rate_bagged: +f.rate_bagged || 0,
-        bank_name: f.bank_name.trim() || null, bank_account: f.bank_account.trim() || null,
-      } });
-      toast('Staff added ✓', 'ok');
+      if (editing) await api(scoped(`/staff/${staff.id}`), { method: 'PATCH', body });
+      else await api(scoped('/staff'), { method: 'POST', body });
+      toast(editing ? 'Staff updated ✓' : 'Staff added ✓', 'ok');
       onSaved && onSaved();
       onClose && onClose();
-    } catch (e) { toast(e.message || 'Could not add staff', 'err'); }
+    } catch (e) { toast(e.message || (editing ? 'Could not update staff' : 'Could not add staff'), 'err'); }
     setSaving(false);
   };
 
@@ -93,7 +98,7 @@ function StaffForm({ sites, siteBound, defaultSite, onSaved, onClose }) {
   return (
     <div onClick={() => !saving && onClose()} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
       <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 420, margin: 0, maxHeight: '90vh', overflowY: 'auto' }}>
-        <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 12 }}>New staff</div>
+        <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 12 }}>{editing ? 'Edit staff' : 'New staff'}</div>
 
         <label className="fl">Full name</label>
         <input className="input" value={f.full_name} onChange={set('full_name')} placeholder="e.g. John Okoro" style={{ marginBottom: 10 }} />
@@ -158,7 +163,7 @@ function StaffForm({ sites, siteBound, defaultSite, onSaved, onClose }) {
 
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
-          <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Add staff'}</button>
+          <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : (editing ? 'Save changes' : 'Add staff')}</button>
         </div>
       </div>
     </div>
@@ -529,6 +534,7 @@ export default function Staff() {
     printBadges([{ ...s, photo }], brandFor(active), (id) => sites.find((x) => x.id === id)?.name || '');
   };
   const [showAdd, setShowAdd] = useState(false);
+  const [editStaff, setEditStaff] = useState(null);
   const role = useRole();
   const canManage = role && atLeast(role, 'SECRETARY');
   const siteBound = role && !atLeast(role, 'SNR_ACCOUNTANT');
@@ -639,6 +645,8 @@ export default function Staff() {
                   </button>
                 </>}
                 actions={canManage ? <>
+                  <button onClick={() => setEditStaff(s)} title="Edit staff details"
+                    style={{ border: 'none', background: '#eef2ff', color: '#4338ca', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>✏️</button>
                   <button onClick={() => setPhotoStaff(s)} title={s.has_photo ? 'Update staff photo' : 'Add staff photo'}
                     style={{ border: 'none', background: '#f1f5f9', color: s.has_photo ? '#166534' : 'var(--muted)', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>{s.has_photo ? '🖼' : '📷'}</button>
                   <button onClick={() => openClock(s, true)} title={s.face_enrolled ? 'Re-enrol face' : 'Enrol face'}
@@ -665,6 +673,16 @@ export default function Staff() {
           defaultSite={siteFilter || (sites[0]?.id || '')}
           onSaved={load}
           onClose={() => setShowAdd(false)}
+        />
+      )}
+
+      {editStaff && (
+        <StaffForm
+          sites={sites}
+          siteBound={siteBound}
+          staff={editStaff}
+          onSaved={load}
+          onClose={() => setEditStaff(null)}
         />
       )}
 

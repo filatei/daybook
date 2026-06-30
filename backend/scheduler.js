@@ -111,7 +111,9 @@ async function syncDay(dateStr, { email = false } = {}) {
       if (email && recs.length) {
         try {
           const report = await qone('SELECT * FROM daily_reports WHERE id=?', [id]);
-          const sent = await sendDailyReport({ tenant: t, site: s, report, to: recs, attachments: [] });
+          const opsRow = await qone('SELECT data FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [t.id, s.id, dateStr]).catch(() => null);
+          let ops = null; try { ops = opsRow ? JSON.parse(opsRow.data) : null; } catch { ops = null; }
+          const sent = await sendDailyReport({ tenant: t, site: s, report, ops, to: recs, attachments: [] });
           await qrun('UPDATE daily_reports SET status=?, emailed_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=?', ['EMAILED', id]);
           await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)',
             [uuid(), t.id, id, recs.join(','), sent.subject, 'SENT']);

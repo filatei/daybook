@@ -367,12 +367,14 @@ router.delete('/:id/attachments/:aid', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── Ticket lifecycle (Fido) — DRAFT→REVIEWED→APPROVED→PAID→DELIVERED / DECLINED ──
+// ── Ticket lifecycle (Fido) — DRAFT→VALIDATED→REVIEWED→APPROVED→PAID→DELIVERED / DECLINED ──
 // allow(ctx, expense, uid) decides who may run each transition.
 const isCreator = (e, uid) => e.recorded_by === uid;
 const FLOW = {
-  // Creator OR a manager validates a draft into review.
-  validate: { from: ['DRAFT'], to: 'REVIEWED', allow: (c, e, uid) => isCreator(e, uid) || atLeast(c.role, 'SITE_MANAGER') },
+  // Creator OR a secretary validates a draft (confirms what was entered).
+  validate: { from: ['DRAFT'], to: 'VALIDATED', allow: (c, e, uid) => isCreator(e, uid) || atLeast(c.role, 'SECRETARY') },
+  // A manager reviews a validated ticket and sends it for approval.
+  review:   { from: ['VALIDATED'], to: 'REVIEWED', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
   // Admins approve or decline a reviewed ticket.
   approve:  { from: ['REVIEWED'], to: 'APPROVED', allow: (c) => atLeast(c.role, 'ADMIN') },
   decline:  { from: ['REVIEWED'], to: 'DECLINED', allow: (c) => atLeast(c.role, 'ADMIN') },
@@ -381,7 +383,7 @@ const FLOW = {
   // Mark the cash handed to the receiver.
   deliver:  { from: ['APPROVED', 'PAID'], to: 'DELIVERED', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
   // Send a ticket back to draft to fix it.
-  reset:    { from: ['REVIEWED', 'APPROVED', 'PAID', 'DELIVERED', 'DECLINED'], to: 'DRAFT', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
+  reset:    { from: ['VALIDATED', 'REVIEWED', 'APPROVED', 'PAID', 'DELIVERED', 'DECLINED'], to: 'DRAFT', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
 };
 
 // Which transitions a given role may run from the ticket's current state.

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { api, scoped, ngn, today, getToken } from '../api.js';
+import { api, scoped, ngn, today, getToken, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import ReceiptPreview from '../components/ReceiptPreview.jsx';
@@ -160,10 +160,24 @@ function DayOpsView({ ops }) {
   return (
     <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
       <div style={{ fontWeight: 700, marginBottom: 2 }}>🛠 Day operations</div>
+      <KV title="Pure water production (bags)" obj={ops.production} rows={[['Opening', 'opening'], ['Produced', 'produced'], ['Sales', 'sales'], ['Bonus', 'bonus'], ['Incentive', 'incentive'], ['Staff water', 'staff_water']]} />
       <KV title="Packing bags" obj={ops.packing} rows={[['Opening', 'opening'], ['Received', 'received'], ['Used for production', 'used_production'], ['Sales bags', 'sales'], ['Re-bagging', 'rebagging'], ['Damage replacement', 'damage_replacement'], ['Available', 'available']]} />
       <KV title="Bag adjustments" obj={ops.bags} rows={[['Leakage', 'leakage'], ['Staff water', 'staff_water'], ['Extra / bonus', 'extra'], ['Re-bagging', 'rebagging'], ['Damage', 'damage']]} />
       <KV title="Rolls (number / kg)" obj={ops.rolls} rows={[['Opening (no.)', 'opening_count'], ['Opening (kg)', 'opening_kg'], ['Received (no.)', 'received_count'], ['Received (kg)', 'received_kg'], ['Used (no.)', 'used_count'], ['Used (kg)', 'used_kg'], ['Available (no.)', 'available_count'], ['Available (kg)', 'available_kg']]} />
-      <KV title="Crates" obj={ops.crates} rows={[['50cl available', 'c50_available'], ['50cl sold', 'c50_sold'], ['60cl available', 'c60_available'], ['75cl available', 'c75_available'], ['Dispenser available', 'dispenser_available']]} />
+      {(() => {
+        const cr = ops.crates || {}; const n = (v) => Number(v) || 0;
+        const rows = [['c50', '50cl'], ['c60', '60cl'], ['c75', '75cl'], ['disp', 'Dispenser']].map(([k, label]) => {
+          const op = n(cr[`${k}_opening`]), pd = n(cr[`${k}_produced`]), sd = n(cr[`${k}_sold`]);
+          if (!op && !pd && !sd) return null;
+          return (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+              <span>{label}</span>
+              <span style={{ color: 'var(--muted)' }}>Open {op.toLocaleString()} · Prod {pd.toLocaleString()} · Sold {sd.toLocaleString()} · <b style={{ color: 'var(--ink)' }}>Close {(op + pd - sd).toLocaleString()}</b></span>
+            </div>
+          );
+        }).filter(Boolean);
+        return rows.length ? <div style={{ marginTop: 8 }}><div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Crate production (bottles)</div>{rows}</div> : null;
+      })()}
       <KV title="Water analysis" obj={ops.water} rows={[['PH', 'ph'], ['TDS', 'tds']]} />
       <KV title="Public power (NEPA)" obj={ops.power} rows={[['NEPA hours today', 'nepa_hours']]} />
       {gens.length > 0 && (
@@ -1157,6 +1171,18 @@ export default function Reports() {
         <button className="btn" style={{ flex: 1 }} onClick={() => setGenOpen(true)}>✨ Generate daily report</button>
         <button className="btn btn-ghost" style={{ flex: '0 0 auto' }} onClick={() => openModal(
           <OpsForm sites={sites} siteBound={isSM} defaultDate={filters.from || today()} defaultSite={filters.site} onClose={closeModal} />, { guard: true })}>🛠 Day ops</button>
+      </div>
+
+      {/* Excel exports — honour the current date range + site filter */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => {
+          const p = new URLSearchParams(); if (filters.from) p.set('from', filters.from); if (filters.to) p.set('to', filters.to); if (filters.site) p.set('site', filters.site);
+          downloadFile(scoped(`/pos/sales.xlsx?${p}`), `sales_${filters.from || 'all'}_${filters.to || 'all'}.xlsx`).catch(() => toast('Export failed', 'err'));
+        }}>📊 Sales (Excel)</button>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => {
+          const p = new URLSearchParams(); if (filters.from) p.set('from', filters.from); if (filters.to) p.set('to', filters.to); if (filters.site) p.set('site', filters.site);
+          downloadFile(scoped(`/customers/report.xlsx?${p}`), `customers_${filters.from || 'all'}_${filters.to || 'all'}.xlsx`).catch(() => toast('Export failed', 'err'));
+        }}>👥 Customers (Excel)</button>
       </div>
 
       {/* Snr Accountant: key in the tenant-wide manual end-of-day report */}

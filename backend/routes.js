@@ -47,6 +47,19 @@ const payments = require('./payments');
 const ls = require('./lemonsqueezy');
 const { emitEvent, broadcastLive } = require('./realtime');
 const { sendPushToUser, saveSubscription, removeSubscription, getPublicKey } = require('./push');
+const XLSX = require('xlsx');
+
+// Build an .xlsx workbook from { sheetName: aoa } and stream it as a download.
+function sendWorkbook(res, sheets, filename) {
+  const wb = XLSX.utils.book_new();
+  for (const [name, rows] of Object.entries(sheets)) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), name.slice(0, 31));
+  }
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(buf);
+}
 
 const router = express.Router();
 
@@ -648,7 +661,8 @@ async function emailReportOnSubmit(tenant_id, reportId, site, user) {
     if (!to.length) return;
     const docs = (await qall('SELECT * FROM documents WHERE report_id=?', [reportId]))
       .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));
-    const sent = await sendDailyReport({ tenant, site, report, to, attachments: docs });
+    const opsRow = await qone('SELECT data FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [tenant_id, site.id, report.report_date]).catch(() => null);
+    const sent = await sendDailyReport({ tenant, site, report, ops: opsRow ? J(opsRow.data, null) : null, to, attachments: docs });
     await qrun('UPDATE daily_reports SET emailed_at=? WHERE id=?', [nowS(), reportId]).catch(() => {});
     await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)',
       [uuid(), tenant_id, reportId, to.join(','), sent.subject, 'SENT']);
@@ -927,7 +941,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
   // grand total, and a stock compilation (packing bags + rolls) from each site's
   // day-ops. Addresses "total stocks used & available" and "bags sold & available".
   let bagBySite = null, bagTotals = null, stockTotals = null, productionTotals = null;
-  let gensBySite = null, roTotals = null, incidentsBySite = null;
+  let gensBySite = null, roTotals = null, incidentsBySite = null, crateTotals = null;
   if (wantAll) {
     bagBySite = [];
     bagTotals = { product: null, opening: 0, produced: 0, total: 0, sold: 0, available: 0 };
@@ -939,7 +953,16 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       bagTotals.opening += br.opening; bagTotals.produced += br.produced;
       bagTotals.total += br.total; bagTotals.sold += br.sold; bagTotals.available += br.available;
     }
-    const oRows = await qall('SELECT o.data, s.name site_name FROM ops_daily o JOIN sites s ON s.id=o.site_id WHERE o.tenant_id=? AND o.ops_date=? ORDER BY s.name', [ctx.tenant_id, date]);
+  }
+  // Stock / production / generators / RO / incidents from each reported site's
+  // day-ops. Built for BOTH single-site and all-sites reports so the emailed
+  // report carries every section the app shows — not just the roll-up. The
+  // single-site daily report email was dropping the whole pure-water /
+  // packing / rolls block because this only ran for the all-sites view.
+  {
+    const oRows = await qall(`SELECT o.data, s.name site_name FROM ops_daily o JOIN sites s ON s.id=o.site_id
+      WHERE o.tenant_id=? AND o.ops_date=? AND o.site_id IN (${_siteIds.map(() => '?').join(',')}) ORDER BY s.name`,
+      [ctx.tenant_id, date, ..._siteIds]);
     if (oRows.length) {
       stockTotals = { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0, rolls_used_count: 0, rolls_available_count: 0 };
       gensBySite = [];                 // generator status grouped by site
@@ -958,6 +981,16 @@ async function buildGeneratedReport(ctx, date, siteArg) {
           productionTotals.incentive += inc; productionTotals.staff_water += stf;
           productionTotals.closing += open + prod - sal - bon - inc - stf;
         }
+        // Bottle-crate production ledger per size (opening + produced − sold = closing).
+        const cr = dd.crates || {};
+        for (const k of ['c50', 'c60', 'c75', 'disp']) {
+          const op = Number(cr[`${k}_opening`]) || 0, pd = Number(cr[`${k}_produced`]) || 0, sd = Number(cr[`${k}_sold`]) || 0;
+          if (!op && !pd && !sd) continue;
+          crateTotals = crateTotals || {};
+          crateTotals[k] = crateTotals[k] || { opening: 0, produced: 0, sold: 0, closing: 0 };
+          crateTotals[k].opening += op; crateTotals[k].produced += pd; crateTotals[k].sold += sd;
+          crateTotals[k].closing += op + pd - sd;
+        }
         stockTotals.packing_available += Number(pk.available) || 0;
         stockTotals.packing_used += Number(pk.used_production) || 0;
         stockTotals.rolls_used_kg += Number(rl.used_kg) || 0;
@@ -973,14 +1006,16 @@ async function buildGeneratedReport(ctx, date, siteArg) {
         if (inc) incidentsBySite.push({ site: o.site_name, text: inc });
       }
     }
-    // Apply the accountant's manual corrections for the two figures that can't be
-    // derived reliably (total available packing bags & rolls in kg).
-    const ov = await qone('SELECT packing_available, rolls_available_kg FROM daily_stock_overrides WHERE tenant_id=? AND report_date=?', [ctx.tenant_id, date]);
-    if (ov && (ov.packing_available != null || ov.rolls_available_kg != null)) {
-      stockTotals = stockTotals || { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0, rolls_used_count: 0, rolls_available_count: 0 };
-      if (ov.packing_available != null) stockTotals.packing_available = Number(ov.packing_available);
-      if (ov.rolls_available_kg != null) stockTotals.rolls_available_kg = Number(ov.rolls_available_kg);
-      stockTotals.overridden = true;
+    // Apply the accountant's manual corrections (all-sites totals only) for the
+    // two figures that can't be derived reliably (available packing bags & rolls kg).
+    if (wantAll) {
+      const ov = await qone('SELECT packing_available, rolls_available_kg FROM daily_stock_overrides WHERE tenant_id=? AND report_date=?', [ctx.tenant_id, date]);
+      if (ov && (ov.packing_available != null || ov.rolls_available_kg != null)) {
+        stockTotals = stockTotals || { sites: 0, packing_available: 0, packing_used: 0, rolls_used_kg: 0, rolls_available_kg: 0, rolls_used_count: 0, rolls_available_count: 0 };
+        if (ov.packing_available != null) stockTotals.packing_available = Number(ov.packing_available);
+        if (ov.rolls_available_kg != null) stockTotals.rolls_available_kg = Number(ov.rolls_available_kg);
+        stockTotals.overridden = true;
+      }
     }
   }
 
@@ -993,7 +1028,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       orders: tot.orders, totalLoaded: tot.totalLoaded, totalBagged: tot.totalBagged,
       diesel: tot.diesel, expenses: tot.expenses,
       loaders: single ? single.loaders : [], baggers: single ? single.baggers : [],
-      bagReport, ops, bagBySite, bagTotals, stockTotals, posByBank, productionTotals,
+      bagReport, ops, bagBySite, bagTotals, stockTotals, posByBank, productionTotals, crateTotals,
       gensBySite, roTotals, incidentsBySite, salesByProduct: productSales, salesByProductIncentive: productIncentive,
     },
     bySite: bySite.map(({ loaders, baggers, ...r }) => r),   // distribution table (no per-staff detail)
@@ -1363,7 +1398,8 @@ router.post('/reports/:id/email', requireAuth, async (req, res) => {
   const docs = (await qall('SELECT * FROM documents WHERE report_id=?', [r.id]))
     .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));
   try {
-    const sent = await sendDailyReport({ tenant, site, report: r, to, attachments: docs });
+    const opsRow = await qone('SELECT data FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [r.tenant_id, r.site_id, r.report_date]).catch(() => null);
+    const sent = await sendDailyReport({ tenant, site, report: r, ops: opsRow ? J(opsRow.data, null) : null, to, attachments: docs });
     await qrun('UPDATE daily_reports SET status=?, emailed_at=? WHERE id=?', ['EMAILED', nowS(), r.id]);
     await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)',
       [uuid(), r.tenant_id, r.id, to.join(','), sent.subject, 'SENT']);
@@ -2448,6 +2484,93 @@ router.get('/pos/range', requireAuth, async (req, res) => {
     byCustomer: byCustomerRows.map((r) => ({ customer: r.customer, customer_name: r.customer, sales: Number(r.sales), orders: Number(r.orders) })),
     byHour,
   });
+});
+
+// ── Excel exports (sales + customers) ────────────────────────────────────────
+// Build the native pos_sales WHERE clause for the caller's workspace + filters.
+function salesScopeWhere(ctx, q) {
+  const where = ['tenant_id=?'], args = [ctx.tenant_id];
+  if (siteBound(ctx)) { where.push('site_id=?'); args.push(ctx.site_id); }
+  else if (q.site) { where.push('site_id=?'); args.push(q.site); }
+  if (q.from) { where.push('sale_date>=?'); args.push(q.from); }
+  if (q.to) { where.push('sale_date<=?'); args.push(q.to); }
+  return { W: 'WHERE ' + where.join(' AND '), args };
+}
+
+// GET /pos/sales.xlsx?from&to&site — full sales workbook (summary + breakdowns + line detail).
+router.get('/pos/sales.xlsx', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const { from, to } = req.query;
+  const { W, args } = salesScopeWhere(s.ctx, req.query);
+  const Wn = W + " AND payment_method<>'INCENTIVE'";
+
+  const totals = await qone(`SELECT
+    COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN total ELSE 0 END),0) sales,
+    SUM(CASE WHEN payment_method<>'INCENTIVE' THEN 1 ELSE 0 END) orders,
+    COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0) cash,
+    COALESCE(SUM(CASE WHEN payment_method NOT IN ('CASH','INCENTIVE') THEN total ELSE 0 END),0) transfer,
+    COALESCE(SUM(CASE WHEN payment_method='INCENTIVE' THEN total ELSE 0 END),0) incentive
+    FROM pos_sales ${W}`, args);
+  const bySite = await qall(`SELECT s.name site, COALESCE(SUM(p.total),0) sales, COUNT(*) orders
+    FROM pos_sales p JOIN sites s ON s.id=p.site_id ${W.replace(/\b(tenant_id|site_id|sale_date)\b/g, 'p.$1')} AND p.payment_method<>'INCENTIVE'
+    GROUP BY s.id, s.name ORDER BY sales DESC`, args);
+  const byDay = await qall(`SELECT sale_date day, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY sale_date ORDER BY sale_date`, args);
+  const byMethod = await qall(`SELECT COALESCE(payment_method,'—') method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method ORDER BY sales DESC`, args);
+  const byCustomer = await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, args);
+  const detail = await qall(`SELECT p.sale_date, p.receipt_no, s.name site, p.customer_name, p.items_json, p.total, p.payment_method, p.status
+    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id ${W.replace(/\b(tenant_id|site_id|sale_date)\b/g, 'p.$1')} ORDER BY p.sale_date, p.receipt_no`, args);
+  // Per-product totals from items_json (TEXT) — aggregate in JS.
+  const prod = {};
+  for (const r of detail) for (const it of J(r.items_json, [])) {
+    if (String(r.payment_method).toUpperCase() === 'INCENTIVE') continue;
+    const k = (it.name || 'Unknown').trim() || 'Unknown';
+    if (!prod[k]) prod[k] = { product: k, qty: 0, sales: 0 };
+    prod[k].qty += Number(it.qty) || 0; prod[k].sales += Number(it.amount) || 0;
+  }
+  const byProduct = Object.values(prod).sort((a, b) => b.sales - a.sales);
+  const itemsText = (j) => J(j, []).map((it) => `${it.name || '?'}×${it.qty || 0}`).join(', ');
+
+  const sheets = {
+    Summary: [
+      ['Sales report'], ['Range', `${from || 'all'} → ${to || 'all'}`], [],
+      ['Total sales', Number(totals.sales)],
+      ['Orders', parseInt(totals.orders, 10)],
+      ['Cash', Number(totals.cash)],
+      ['Transfer / POS', Number(totals.transfer)],
+      ['Incentive (free)', Number(totals.incentive)],
+    ],
+    'By day': [['Date', 'Sales', 'Orders'], ...byDay.map((r) => [r.day, Number(r.sales), Number(r.orders)])],
+    'By site': [['Site', 'Sales', 'Orders'], ...bySite.map((r) => [r.site, Number(r.sales), Number(r.orders)])],
+    'By product': [['Product', 'Qty', 'Sales'], ...byProduct.map((r) => [r.product, r.qty, r.sales])],
+    'By payment': [['Method', 'Sales', 'Orders'], ...byMethod.map((r) => [r.method, Number(r.sales), Number(r.orders)])],
+    'By customer': [['Customer', 'Sales', 'Orders'], ...byCustomer.map((r) => [r.customer, Number(r.sales), Number(r.orders)])],
+    Detail: [['Date', 'Receipt', 'Site', 'Customer', 'Items', 'Total', 'Method', 'Status'],
+      ...detail.map((r) => [r.sale_date, r.receipt_no, r.site || '', r.customer_name || 'Walk-in', itemsText(r.items_json), Number(r.total), r.payment_method || '', r.status || ''])],
+  };
+  sendWorkbook(res, sheets, `sales_${from || 'all'}_${to || 'all'}.xlsx`);
+});
+
+// GET /customers/report.xlsx?from&to — per-customer daily + monthly + overall totals.
+router.get('/customers/report.xlsx', requireAuth, async (req, res) => {
+  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  const { from, to } = req.query;
+  const { W, args } = salesScopeWhere(s.ctx, req.query);
+  const Wn = W + " AND payment_method<>'INCENTIVE'";
+  const cust = "COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in')";
+
+  const daily = await qall(`SELECT ${cust} customer, sale_date, COALESCE(SUM(total),0) sales, COUNT(*) orders
+    FROM pos_sales ${Wn} GROUP BY 1, sale_date ORDER BY customer, sale_date`, args);
+  const monthly = await qall(`SELECT ${cust} customer, SUBSTR(sale_date,1,7) month, COALESCE(SUM(total),0) sales, COUNT(*) orders
+    FROM pos_sales ${Wn} GROUP BY 1, SUBSTR(sale_date,1,7) ORDER BY customer, month`, args);
+  const overall = await qall(`SELECT ${cust} customer, COALESCE(SUM(total),0) sales, COUNT(*) orders
+    FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, args);
+
+  const sheets = {
+    'Daily by customer': [['Customer', 'Date', 'Sales', 'Orders'], ...daily.map((r) => [r.customer, r.sale_date, Number(r.sales), Number(r.orders)])],
+    'Monthly by customer': [['Customer', 'Month', 'Sales', 'Orders'], ...monthly.map((r) => [r.customer, r.month, Number(r.sales), Number(r.orders)])],
+    'All-time': [['Customer', 'Sales', 'Orders'], ...overall.map((r) => [r.customer, Number(r.sales), Number(r.orders)])],
+  };
+  sendWorkbook(res, sheets, `customers_${from || 'all'}_${to || 'all'}.xlsx`);
 });
 
 // Today's individual sales (newest first) for the live Sell ticker.  For

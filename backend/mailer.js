@@ -155,7 +155,7 @@ const ngn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFract
  *  - to       array of email strings
  *  - attachments [{filename, path}]
  */
-async function sendDailyReport({ tenant, site, report, to, attachments = [] }) {
+async function sendDailyReport({ tenant, site, report, ops = null, to, attachments = [] }) {
   const brand = (tenant && tenant.brand_color) || '#2563eb';
   const sales = safeParse(report.sales_json, []);
   const prod = safeParse(report.production_json, {});
@@ -208,6 +208,8 @@ async function sendDailyReport({ tenant, site, report, to, attachments = [] }) {
 
       ${prodRows ? `<h3 style="margin:18px 0 6px;color:${brand}">Production / Inventory</h3>
       <table style="width:100%;border-collapse:collapse;font-size:14px">${prodRows}</table>` : ''}
+
+      ${opsHtml(ops) ? `<h3 style="margin:18px 0 6px;color:${brand}">Morning operations</h3>${opsHtml(ops)}` : ''}
 
       ${report.notes ? `<h3 style="margin:18px 0 6px;color:${brand}">Notes</h3>
       <p style="white-space:pre-wrap;color:#374151">${esc(report.notes)}</p>` : ''}
@@ -348,7 +350,24 @@ function opsHtml(ops) {
   const kv = (label, obj, rows) => !has(obj) ? '' :
     `<div style="font-weight:800;margin:8px 0 4px">${esc(label)}</div>
      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px">${rows.map(([k, key]) => (obj[key] === '' || obj[key] == null) ? '' : `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">${esc(k)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${esc(String(obj[key]))}</td></tr>`).join('')}</table>`;
+  const N = (v) => Number(v) || 0;
   let out = '';
+  // Pure-water (bagged) production ledger entered in the morning report.
+  if (has(ops.production)) {
+    const p = ops.production;
+    const closing = N(p.opening) + N(p.produced) - N(p.sales) - N(p.bonus) - N(p.incentive) - N(p.staff_water);
+    const r2 = (k, v, b) => `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">${esc(k)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right;${b ? 'font-weight:800' : ''}">${v}</td></tr>`;
+    out += `<div style="font-weight:800;margin:8px 0 4px">Pure water production (bags)</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px">
+        ${r2('Opening bags', N(p.opening).toLocaleString())}
+        ${r2('Add — production', N(p.produced).toLocaleString())}
+        ${N(p.sales) ? r2('Less — Sales', N(p.sales).toLocaleString()) : ''}
+        ${N(p.bonus) ? r2('Less — Bonus', N(p.bonus).toLocaleString()) : ''}
+        ${N(p.incentive) ? r2('Less — Incentive', N(p.incentive).toLocaleString()) : ''}
+        ${N(p.staff_water) ? r2('Less — Staff water', N(p.staff_water).toLocaleString()) : ''}
+        ${r2('Closing bags', closing.toLocaleString(), true)}
+      </table>`;
+  }
   out += kv('Packing bags', ops.packing, [['Opening', 'opening'], ['Received', 'received'], ['Used for production', 'used_production'], ['Sales bags', 'sales'], ['Re-bagging', 'rebagging'], ['Damage replacement', 'damage_replacement'], ['Available', 'available']]);
   out += kv('Bag adjustments', ops.bags, [['Leakage', 'leakage'], ['Staff water', 'staff_water'], ['Extra / bonus', 'extra'], ['Re-bagging', 'rebagging'], ['Damage', 'damage']]);
   out += kv('Rolls (number / kg)', ops.rolls, [
@@ -356,7 +375,23 @@ function opsHtml(ops) {
     ['Received (no.)', 'received_count'], ['Received (kg)', 'received_kg'],
     ['Used (no.)', 'used_count'], ['Used (kg)', 'used_kg'],
     ['Available (no.)', 'available_count'], ['Available (kg)', 'available_kg']]);
-  out += kv('Crates', ops.crates, [['50cl available', 'c50_available'], ['50cl sold', 'c50_sold'], ['60cl available', 'c60_available'], ['75cl available', 'c75_available'], ['Dispenser available', 'dispenser_available']]);
+  // Bottle-crate production ledger per size (opening + produced − sold = closing).
+  {
+    const cr = ops.crates || {};
+    const SIZES = [['c50', '50cl'], ['c60', '60cl'], ['c75', '75cl'], ['disp', 'Dispenser']];
+    const rows = SIZES.map(([k, label]) => {
+      const op = N(cr[`${k}_opening`]), pd = N(cr[`${k}_produced`]), sd = N(cr[`${k}_sold`]);
+      if (!op && !pd && !sd) return '';
+      return `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0">${esc(label)}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${op.toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${pd.toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${sd.toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:700">${(op + pd - sd).toLocaleString()}</td></tr>`;
+    }).join('');
+    if (rows) {
+      out += `<div style="font-weight:800;margin:8px 0 4px">Crate production (bottles)</div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px">
+          <thead><tr><th style="text-align:left;padding:4px 10px;color:#6b7280">Size</th><th style="text-align:right;padding:4px 10px;color:#6b7280">Opening</th><th style="text-align:right;padding:4px 10px;color:#6b7280">Produced</th><th style="text-align:right;padding:4px 10px;color:#6b7280">Sold</th><th style="text-align:right;padding:4px 10px;color:#6b7280">Closing</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+  }
   out += kv('Water analysis', ops.water, [['PH', 'ph'], ['TDS', 'tds']]);
   out += kv('Public power (NEPA)', ops.power, [['NEPA hours today', 'nepa_hours']]);
   if (Array.isArray(ops.generators) && ops.generators.some((g) => g && g.name)) {
@@ -467,6 +502,11 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to, attach
         <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Packing bags available</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.packing_available || 0).toLocaleString()}</td></tr>
         <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls used</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_used_count || 0).toLocaleString()} (${(s.stockTotals.rolls_used_kg || 0).toLocaleString()}kg)</td></tr>
         <tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;color:#64748b">Rolls available</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(s.stockTotals.rolls_available_count || 0).toLocaleString()} (${(s.stockTotals.rolls_available_kg || 0).toLocaleString()}kg)</td></tr>
+      </table>` : ''}
+      ${s.crateTotals ? `<div style="font-weight:800;margin:6px 0">Crate production — all sites</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px">
+        <thead><tr><th style="text-align:left;padding:5px 10px;color:#6b7280">Size</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Opening</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Produced</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Sold</th><th style="text-align:right;padding:5px 10px;color:#6b7280">Closing</th></tr></thead>
+        <tbody>${[['c50', '50cl'], ['c60', '60cl'], ['c75', '75cl'], ['disp', 'Dispenser']].map(([k, label]) => { const c = s.crateTotals[k]; return c ? `<tr><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0">${label}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(c.opening || 0).toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(c.produced || 0).toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right">${(c.sold || 0).toLocaleString()}</td><td style="padding:4px 10px;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:700">${(c.closing || 0).toLocaleString()}</td></tr>` : ''; }).join('')}</tbody>
       </table>` : ''}
       ${opsHtml(s.ops)}
       ${incidents ? `<div style="font-weight:800;margin:6px 0">Incidents / notes</div>

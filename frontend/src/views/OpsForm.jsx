@@ -8,7 +8,13 @@ const EMPTY = () => ({
   bags: { leakage: '', staff_water: '', extra: '', rebagging: '', damage: '' },
   packing: { opening: '', received: '', used_production: '', sales: '', rebagging: '', damage_replacement: '', available: '' },
   rolls: { opening_count: '', opening_kg: '', received_count: '', received_kg: '', used_count: '', used_kg: '', available_count: '', available_kg: '' },
-  crates: { c50_available: '', c50_sold: '', c60_available: '', c75_available: '', dispenser_available: '' },
+  // Bottle-crate production ledger per size: closing = opening + produced − sold.
+  crates: {
+    c50_opening: '', c50_produced: '', c50_sold: '',
+    c60_opening: '', c60_produced: '', c60_sold: '',
+    c75_opening: '', c75_produced: '', c75_sold: '',
+    disp_opening: '', disp_produced: '', disp_sold: '',
+  },
   water: { ph: '', tds: '' },
   power: { nepa_hours: '' },   // hours of NEPA / public-utility power for the day
   blown: { opening: '', blown: '', available: '' },   // blown PET bottles
@@ -196,13 +202,19 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
           {/* STEP 4 — crates + water + power */}
           {step === 3 && (
             <>
-              <Group title="Crates">
-                <Num label="50cl avail" value={d.crates.c50_available} onChange={(v) => setG('crates', 'c50_available', v)} />
-                <Num label="50cl sold" value={d.crates.c50_sold} onChange={(v) => setG('crates', 'c50_sold', v)} />
-                <Num label="60cl avail" value={d.crates.c60_available} onChange={(v) => setG('crates', 'c60_available', v)} />
-                <Num label="75cl avail" value={d.crates.c75_available} onChange={(v) => setG('crates', 'c75_available', v)} />
-                <Num label="Dispenser" value={d.crates.dispenser_available} onChange={(v) => setG('crates', 'dispenser_available', v)} />
-              </Group>
+              {[['c50', '50cl bottle'], ['c60', '60cl bottle'], ['c75', '75cl bottle'], ['disp', 'Dispenser']].map(([k, label]) => {
+                const closing = N(d.crates[`${k}_opening`]) + N(d.crates[`${k}_produced`]) - N(d.crates[`${k}_sold`]);
+                return (
+                  <Group key={k} title={`${label} crates`}>
+                    <Num label="Opening" value={d.crates[`${k}_opening`]} onChange={(v) => setG('crates', `${k}_opening`, v)} />
+                    <Num label="Produced" value={d.crates[`${k}_produced`]} onChange={(v) => setG('crates', `${k}_produced`, v)} />
+                    <Num label="Sold" value={d.crates[`${k}_sold`]} onChange={(v) => setG('crates', `${k}_sold`, v)} />
+                    <div style={{ flex: '1 1 30%', minWidth: 96, alignSelf: 'flex-end', fontSize: 12, color: 'var(--muted)', paddingBottom: 10 }}>
+                      Closing: <b style={{ color: 'var(--ink)' }}>{closing.toLocaleString()}</b>
+                    </div>
+                  </Group>
+                );
+              })}
               <Group title="Water analysis">
                 <Num label="PH" value={d.water.ph} onChange={(v) => setG('water', 'ph', v)} />
                 <Num label="TDS" value={d.water.tds} onChange={(v) => setG('water', 'tds', v)} />

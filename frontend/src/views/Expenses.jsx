@@ -199,6 +199,7 @@ const stOf = (e) => (Number(e.balance) <= 0.01 ? 'PAID' : (Number(e.amount_paid)
 // Lifecycle (Fido): DRAFT→REVIEWED→APPROVED→PAID→DELIVERED, plus DECLINED.
 const WF = {
   DRAFT:     { bg: '#e2e8f0', fg: '#334155', label: 'DRAFT' },
+  VALIDATED: { bg: '#fef9c3', fg: '#854d0e', label: 'VALIDATED' },
   REVIEWED:  { bg: '#dbeafe', fg: '#1e40af', label: 'REVIEWED' },
   APPROVED:  { bg: '#ede9fe', fg: '#5b21b6', label: 'APPROVED' },
   PAID:      { bg: '#dcfce7', fg: '#166534', label: 'PAID' },
@@ -207,6 +208,7 @@ const WF = {
 };
 const WF_ACTION = {
   validate: { label: '✓ Validate', kind: '' },
+  review:   { label: '✓ Review', kind: '' },
   approve:  { label: '✓ Approve', kind: '' },
   decline:  { label: '✗ Decline', kind: 'danger' },
   pay:      { label: '💵 Pay', kind: '' },
@@ -319,7 +321,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       setWf(r.wf_state); setActions(r.actions || []);
       loadLog();
       onChanged && onChanged();
-      const done = { validate: 'Validated ✓', approve: 'Approved ✓', decline: 'Declined', pay: 'Marked paid ✓', deliver: 'Delivered ✓', reset: 'Reset to draft' };
+      const done = { validate: 'Validated ✓', review: 'Reviewed ✓', approve: 'Approved ✓', decline: 'Declined', pay: 'Marked paid ✓', deliver: 'Delivered ✓', reset: 'Reset to draft' };
       toast(done[action] || 'Updated ✓', action === 'decline' ? 'info' : 'ok');
     } catch (e) { toast(e.message || 'Action failed', 'err'); }
     setActing('');

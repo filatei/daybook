@@ -456,41 +456,70 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 }
 
 export default function Expenses() {
-  const { openModal, closeModal, tenant, sites } = useStore();
+  const { openModal, closeModal, tenant, sites, isGroup, groupTenants } = useStore();
   const [expenses, setExpenses] = useState([]);
   const [categories, setCategories] = useState(CATS.map((c) => c.toUpperCase()));
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState({ cat: '', from: '', to: '', kind: '' });
+  // Default the date range to today so admins land on "today across all sites".
+  const [filter, setFilter] = useState({ cat: '', from: today(), to: today(), kind: '' });
   const [tab, setTab] = useState('list');   // list | cash | payables
   const [imprest, setImprest] = useState(null);   // per-site imprest summary
 
+  // Stable key so the per-tenant group fetch effect doesn't loop on array identity.
+  const groupKey = groupTenants.map((t) => t.id).join(',');
+
   useEffect(() => {
+    if (isGroup) return;   // categories are per-tenant; group view uses the defaults
     api(scoped('/expenses/categories')).then((c) => { if (Array.isArray(c) && c.length) setCategories(c); }).catch(() => {});
-  }, [tenant]);
+  }, [tenant, isGroup]);
 
   const load = useCallback(async () => {
     setLoading(true);
-    try {
+    const qs = () => {
       const p = new URLSearchParams();
       if (filter.cat) p.set('category', filter.cat);
       if (filter.from) p.set('from', filter.from);
       if (filter.to) p.set('to', filter.to);
       if (filter.kind) p.set('kind', filter.kind);
-      setExpenses(await api(scoped(`/expenses?${p}`)));
+      return p;
+    };
+    try {
+      if (isGroup) {
+        // Combined view (Snr Accountant/GM/Admin): fetch each member tenant and
+        // merge, tagging every row with its workspace name.
+        const parts = await Promise.all(groupTenants.map(async (t) => {
+          const p = qs(); p.set('tenant', t.id);
+          try { return (await api(`/expenses?${p}`)).map((e) => ({ ...e, tenant_name: t.name })); }
+          catch { return []; }
+        }));
+        const merged = parts.flat().sort((a, b) => (a.expense_date < b.expense_date ? 1 : a.expense_date > b.expense_date ? -1 : 0));
+        setExpenses(merged);
+      } else {
+        setExpenses(await api(scoped(`/expenses?${qs()}`)));
+      }
     } catch { setExpenses([]); }
     setLoading(false);
-  }, [tenant, filter]);
+  }, [tenant, filter, isGroup, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
   // When viewing imprests, show each site's daily total (→ transfer to Snr Acct).
   useEffect(() => {
     if (filter.kind !== 'IMPREST') { setImprest(null); return; }
-    const p = new URLSearchParams();
-    if (filter.from) p.set('from', filter.from);
-    if (filter.to) p.set('to', filter.to);
-    api(scoped(`/expenses/imprest-summary?${p}`)).then(setImprest).catch(() => setImprest(null));
-  }, [tenant, filter.kind, filter.from, filter.to, expenses]);
+    const buildQs = () => { const p = new URLSearchParams(); if (filter.from) p.set('from', filter.from); if (filter.to) p.set('to', filter.to); return p; };
+    if (isGroup) {
+      Promise.all(groupTenants.map(async (t) => {
+        const p = buildQs(); p.set('tenant', t.id);
+        try { const r = await api(`/expenses/imprest-summary?${p}`); return (r.sites || []).map((s) => ({ ...s, site_name: `${s.site_name || '—'} · ${t.name}` })); }
+        catch { return []; }
+      })).then((parts) => {
+        const merged = parts.flat().sort((a, b) => b.total - a.total);
+        setImprest({ grand: merged.reduce((a, s) => a + Number(s.total || 0), 0), sites: merged });
+      }).catch(() => setImprest(null));
+      return;
+    }
+    api(scoped(`/expenses/imprest-summary?${buildQs()}`)).then(setImprest).catch(() => setImprest(null));
+  }, [tenant, filter.kind, filter.from, filter.to, expenses, isGroup, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openForm = (exp = null) => {
     openModal(<ExpenseForm expense={exp} sites={sites} categories={categories} onSave={load} onClose={closeModal} />, { guard: true });
@@ -506,8 +535,8 @@ export default function Expenses() {
     <div>
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={`seg-b${tab === 'list' ? ' on' : ''}`} onClick={() => setTab('list')}>💸 Expenses</button>
-        <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash deposits</button>
-        <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>
+        {!isGroup && <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash deposits</button>}
+        {!isGroup && <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>}
       </div>
 
       {tab === 'cash' ? <Cash /> : tab === 'payables' ? <PayablesView onOpenExpense={openDetail} /> : (
@@ -561,13 +590,13 @@ export default function Expenses() {
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {expenses.map((e) => (
-            <button key={e.id} onClick={() => openDetail(e)}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
+            <button key={e.id} onClick={() => { if (!isGroup) openDetail(e); }} disabled={isGroup}
+              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: isGroup ? 'default' : 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700 }}>{e.description || e.category} <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: (WF[e.wf_state] || WF.DRAFT).bg, color: (WF[e.wf_state] || WF.DRAFT).fg }}>{(WF[e.wf_state] || WF.DRAFT).label}</span>{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  {e.expense_date} · {e.category}{e.vendor ? ` · ${e.vendor}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
+                  {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{isGroup && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
                 </div>
               </div>
               <div style={{ fontWeight: 800 }}>{ngn(e.amount)}</div>
@@ -578,7 +607,8 @@ export default function Expenses() {
       </>
       )}
 
-      <button className="fab" onClick={() => openForm()}>+</button>
+      {/* Group view is a read-only roll-up — new expenses are added inside a workspace. */}
+      {!isGroup && <button className="fab" onClick={() => openForm()}>+</button>}
     </div>
   );
 }

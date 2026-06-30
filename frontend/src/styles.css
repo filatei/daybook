@@ -153,7 +153,7 @@ a { color: var(--brand-d); text-decoration: none; }
   display: flex; align-items: center; justify-content: space-between;
   padding: 16px 20px; max-width: 960px; margin: 0 auto;
 }
-.lp-logo { font-size: 18px; font-weight: 900; letter-spacing: -.3px; }
+.lp-logo { font-size: 18px; font-weight: 900; letter-spacing: -.3px; background: none; border: none; padding: 0; cursor: pointer; color: var(--ink); }
 .lp-signin {
   background: var(--brand); color: #fff; border: none; border-radius: 999px;
   padding: 9px 20px; font-weight: 700; font-size: 14px; cursor: pointer;

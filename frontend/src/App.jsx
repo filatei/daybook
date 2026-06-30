@@ -260,7 +260,7 @@ function LoginScreen({ devLogin }) {
   return (
     <div className="lp">
       <header className="lp-top">
-        <span className="lp-logo">📒 Daybook</span>
+        <button className="lp-logo" onClick={() => setShowLogin(false)} title="Home">📒 Daybook</button>
         {!showLogin && (
           <button className="lp-signin" onClick={() => setShowLogin(true)}>Sign in</button>
         )}

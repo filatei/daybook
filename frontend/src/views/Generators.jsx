@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
-import { useStore, useRole, atLeast } from '../store.jsx';
+import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 
 function GeneratorForm({ gen, sites, onSave, onClose }) {
   const { toast } = useStore();
@@ -116,6 +116,7 @@ export default function Generators() {
   const canEdit = role && atLeast(role, 'SECRETARY');
   const [gens, setGens] = useState([]);
   const [sel, setSel] = useState(null);          // selected generator (logs view)
+  const [selLog, setSelLog] = useState(null);    // selected log record (detail view)
   const [logs, setLogs] = useState([]);
   const [dieselTotal, setDieselTotal] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -133,8 +134,44 @@ export default function Generators() {
     catch { setLogs([]); }
   }, [tenant]);
 
+  // Hardware/gesture Back steps UP one level (detail → logs → generator list)
+  // instead of jumping straight back to the "More" tab.
+  useBackHandler(!!sel && !selLog, () => { setSel(null); setLogs([]); });
+  useBackHandler(!!selLog, () => setSelLog(null));
+
   if (!canEdit) {
     return <div className="empty"><div className="ic">🔒</div><p>Generators are available to managers and above.</p></div>;
+  }
+
+  // Single maintenance/log record — detail view
+  if (selLog) {
+    const l = selLog;
+    const Row = ({ k, v }) => v == null || v === '' ? null : (
+      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 16px', borderBottom: '1px solid var(--line)' }}>
+        <span style={{ color: 'var(--muted)' }}>{k}</span>
+        <span style={{ fontWeight: 700, textAlign: 'right', maxWidth: '60%' }}>{v}</span>
+      </div>
+    );
+    return (
+      <div>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px', marginBottom: 12 }} onClick={() => setSelLog(null)}>← {sel?.name || 'Logs'}</button>
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ fontSize: 30 }}>{LOG_ICON[l.type] || '📝'}</div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800 }}>{l.type === 'MAINTENANCE' ? 'Maintenance' : l.type === 'DIESEL' ? 'Diesel' : 'Note'}</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)' }}>{l.log_date}{sel?.name ? ` · ${sel.name}` : ''}</div>
+          </div>
+        </div>
+        <div className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 12 }}>
+          <Row k="Date" v={l.log_date} />
+          <Row k="Type" v={l.type} />
+          {l.litres != null && <Row k="Litres" v={`${l.litres} L`} />}
+          {l.cost != null && <Row k="Cost" v={ngn(l.cost)} />}
+          {l.runtime_hours != null && <Row k="Runtime" v={`${l.runtime_hours} h`} />}
+          <Row k="Details" v={l.detail} />
+        </div>
+      </div>
+    );
   }
 
   // Logs detail view
@@ -158,14 +195,15 @@ export default function Generators() {
         ) : (
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
             {logs.map((l) => (
-              <div key={l.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+              <button key={l.id} onClick={() => setSelLog(l)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer' }}>
                 <div style={{ fontSize: 20 }}>{LOG_ICON[l.type] || '📝'}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700 }}>{l.type}{l.litres ? ` · ${l.litres} L` : ''}{l.runtime_hours ? ` · ${l.runtime_hours}h` : ''}</div>
                   <div style={{ fontSize: 12, color: 'var(--muted)' }}>{l.log_date}{l.detail ? ` · ${l.detail}` : ''}</div>
                 </div>
                 {l.cost != null && <div style={{ fontWeight: 700 }}>{ngn(l.cost)}</div>}
-              </div>
+                <div style={{ color: 'var(--muted)' }}>›</div>
+              </button>
             ))}
           </div>
         )}

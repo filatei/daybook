@@ -20,8 +20,9 @@ import { queueSale, syncOutbox, outboxCount } from '../offline.js';
 const saleTime = (at) => { try { return new Date(typeof at === 'number' ? at * 1000 : at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
 const safeJson = (s, d = []) => { try { return JSON.parse(s || ''); } catch { return d; } };
 
-const PAY = ['CASH', 'TRANSFER', 'POS'];
-const PAY_LABELS = { CASH: '💵 Cash', TRANSFER: '🏦 Transfer', POS: '💳 POS' };
+const PAY = ['CASH', 'TRANSFER', 'POS', 'INCENTIVE'];
+// INCENTIVE = goods given free (bonus/promo). Tracked apart — never counted in cash or sales.
+const PAY_LABELS = { CASH: '💵 Cash', TRANSFER: '🏦 Transfer', POS: '💳 POS', INCENTIVE: '🎁 Incentive' };
 
 const genUid = () => (typeof crypto !== 'undefined' && crypto.randomUUID
   ? crypto.randomUUID()
@@ -545,7 +546,7 @@ export default function Sell() {
           <div className="seg" style={{ marginTop: 14 }}>
             {PAY.map((m) => (
               <button key={m} className={`seg-b${payMethod === m ? ' on' : ''}`}
-                onClick={() => { setPayMethod(m); if (m === 'CASH') { setBank(''); setTerminal(''); } }}>
+                onClick={() => { setPayMethod(m); if (m === 'CASH' || m === 'INCENTIVE') { setBank(''); setTerminal(''); } }}>
                 {PAY_LABELS[m]}
               </button>
             ))}
@@ -577,6 +578,13 @@ export default function Sell() {
             </div>
           )}
           <datalist id="bank-list">{banks.map((b) => <option key={b} value={b} />)}</datalist>
+
+          {/* Incentive note — free goods, kept out of cash & sales */}
+          {payMethod === 'INCENTIVE' && (
+            <div style={{ marginTop: 10, fontSize: 12.5, color: '#92400e', background: '#fef9c3', border: '1px solid #fde68a', borderRadius: 10, padding: '8px 12px' }}>
+              🎁 Free / bonus goods. Recorded as <b>Incentive</b> — not counted in cash or sales; shown on its own line in reports.
+            </div>
+          )}
 
           {/* Cash tendered */}
           {payMethod === 'CASH' && (

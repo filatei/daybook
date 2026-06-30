@@ -392,6 +392,17 @@ async function migrate() {
       created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
 
+    -- WEB PUSH SUBSCRIPTIONS (one row per browser/device endpoint)
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      endpoint    TEXT PRIMARY KEY,
+      user_id     TEXT NOT NULL REFERENCES users(id),
+      p256dh      TEXT NOT NULL,
+      auth        TEXT NOT NULL,
+      ua          TEXT,
+      created_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS idx_push_sub_user ON push_subscriptions(user_id);
+
     -- FEATURE REQUESTS
     CREATE TABLE IF NOT EXISTS feature_requests (
       id          TEXT PRIMARY KEY,

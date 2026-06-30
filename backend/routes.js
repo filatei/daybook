@@ -46,6 +46,7 @@ const scheduler = require('./scheduler');
 const payments = require('./payments');
 const ls = require('./lemonsqueezy');
 const { emitEvent, broadcastLive } = require('./realtime');
+const { sendPushToUser, saveSubscription, removeSubscription, getPublicKey } = require('./push');
 
 const router = express.Router();
 
@@ -87,6 +88,8 @@ async function notify(tenant_id, userIds, { type, title, body, link } = {}) {
   for (const u of [...new Set((userIds || []).filter(Boolean))]) {
     await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
       [uuid(), tenant_id || null, u, type || null, title || null, body || null, link || null]);
+    // Mirror the in-app notification to a native push (no-op if user/device not subscribed).
+    sendPushToUser(u, { type, title, body, link: link ? `/?go=${link}` : '/' }).catch(() => {});
   }
 }
 async function tenantUserIds(tenant_id, minRole) {
@@ -2077,8 +2080,10 @@ router.patch('/generators/:id', requireAuth, needTenant('SECRETARY'), async (req
   if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (siteBound(req.ctx) && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const f = req.body || {};
+  // Coerce blank numeric fields to NULL so a cleared capacity/cost doesn't crash the update.
+  const num = (v, fallback) => (v === undefined ? fallback : (v === '' || v === null || Number.isNaN(Number(v)) ? null : Number(v)));
   await qrun(`UPDATE generators SET name=?,fuel_type=?,make_model=?,capacity_kva=?,serial_no=?,purchase_date=?,purchase_cost=?,status=?,notes=? WHERE id=?`,
-    [f.name ?? g.name, f.fuel_type ?? g.fuel_type, f.make_model ?? g.make_model, f.capacity_kva ?? g.capacity_kva, f.serial_no ?? g.serial_no, f.purchase_date ?? g.purchase_date, f.purchase_cost ?? g.purchase_cost, f.status ?? g.status, f.notes ?? g.notes, g.id]);
+    [f.name ?? g.name, f.fuel_type ?? g.fuel_type, f.make_model ?? g.make_model, num(f.capacity_kva, g.capacity_kva), f.serial_no ?? g.serial_no, f.purchase_date ?? g.purchase_date, num(f.purchase_cost, g.purchase_cost), f.status ?? g.status, f.notes ?? g.notes, g.id]);
   res.json(await qone('SELECT * FROM generators WHERE id=?', [g.id]));
 });
 router.get('/generators/:id/logs', requireAuth, async (req, res) => {
@@ -2099,10 +2104,13 @@ router.post('/generators/:id/logs', requireAuth, needTenant('SECRETARY'), async 
   if (siteBound(req.ctx) && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const b = req.body || {}; const type = (b.type || 'DIESEL').toUpperCase();
   if (!['DIESEL', 'MAINTENANCE', 'NOTE'].includes(type)) return res.status(400).json({ error: 'invalid type' });
+  // Empty form fields arrive as '' — coerce to NULL so numeric columns don't
+  // reject the insert (this blocked MAINTENANCE/NOTE logs, which leave litres/cost blank).
+  const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v))) ? null : Number(v);
   const id = uuid();
   await qrun(`INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,cost,runtime_hours,detail,recorded_by)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-    [id, g.tenant_id, g.id, g.site_id, b.log_date || new Date().toISOString().slice(0, 10), type, b.litres ?? null, b.cost ?? null, b.runtime_hours ?? null, b.detail || null, req.user.id]);
+    [id, g.tenant_id, g.id, g.site_id, b.log_date || new Date().toISOString().slice(0, 10), type, num(b.litres), num(b.cost), num(b.runtime_hours), b.detail || null, req.user.id]);
   res.status(201).json(await qone('SELECT * FROM generator_logs WHERE id=?', [id]));
 });
 
@@ -2742,6 +2750,27 @@ router.post('/notifications/read', requireAuth, async (req, res) => {
   } else {
     await qrun('UPDATE notifications SET read=1 WHERE user_id=?', [req.user.id]);
   }
+  res.json({ ok: true });
+});
+
+// ── WEB PUSH (native notifications) ───────────────────────────────────────────
+// The frontend needs the VAPID public key to create a PushSubscription.
+router.get('/push/vapid-public-key', (_req, res) => res.json({ key: getPublicKey() }));
+
+// Register (or refresh) this device's push subscription for the signed-in user.
+router.post('/push/subscribe', requireAuth, async (req, res) => {
+  const sub = req.body?.subscription || req.body;
+  if (!sub || !sub.endpoint || !sub.keys) return res.status(400).json({ error: 'invalid subscription' });
+  try {
+    await saveSubscription(req.user.id, sub, req.get('user-agent'));
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'could not save subscription' }); }
+});
+
+// Drop a subscription (called on logout / when permission is revoked).
+router.post('/push/unsubscribe', requireAuth, async (req, res) => {
+  const endpoint = req.body?.endpoint;
+  if (endpoint) await removeSubscription(endpoint).catch(() => {});
   res.json({ ok: true });
 });
 

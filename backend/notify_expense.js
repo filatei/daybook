@@ -84,6 +84,7 @@ async function notifyExpenseEvent({ tenant_id, expense, targetState, action, act
     for (const u of userIds) {
       await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
         [uuid(), tenant_id, u, 'expense', title, body, 'expenses']);
+      require('./push').sendPushToUser(u, { type: 'expense', title, body, link: '/?go=expenses' }).catch(() => {});
     }
 
     // 2) Email — single message to all who must see it

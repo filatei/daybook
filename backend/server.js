@@ -55,6 +55,13 @@ app.get('/sw.js', (_req, res) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.type('application/javascript').sendFile(path.join(FRONTEND, 'sw.js'));
 });
+// Digital Asset Links — verifies the Android TWA owns this domain so it runs
+// fullscreen. express.static ignores dotfiles, so serve /.well-known explicitly.
+app.get('/.well-known/assetlinks.json', (_req, res) => {
+  res.type('application/json').sendFile(path.join(FRONTEND, '.well-known/assetlinks.json'), (err) => {
+    if (err) res.status(404).json({ error: 'not found' });
+  });
+});
 app.use(express.static(FRONTEND, { maxAge: '1h', index: false }));
 // SPA fallback — everything not under /api and not a static asset → index.html.
 // index.html is no-cache so it always loads the current shell + service worker.

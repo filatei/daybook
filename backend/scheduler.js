@@ -194,9 +194,11 @@ async function checkComplianceExpiries() {
         `SELECT DISTINCT u.id, u.email FROM memberships m JOIN users u ON u.id=m.user_id
           WHERE m.tenant_id=? AND m.status='ACTIVE' AND m.role IN ('ADMIN','GENERAL_MANAGER')`, [tenant_id]);
       for (const a of admins) {
+        const cTitle = `${items.length} compliance document(s) need attention`;
+        const cBody = items.slice(0, 3).map((i) => `${i.title} — ${i.status === 'EXPIRED' ? 'expired' : i.days + 'd left'}`).join('; ');
         await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
-          [uuid(), tenant_id, a.id, 'compliance', `${items.length} compliance document(s) need attention`,
-            items.slice(0, 3).map((i) => `${i.title} — ${i.status === 'EXPIRED' ? 'expired' : i.days + 'd left'}`).join('; '), 'compliance']).catch(() => {});
+          [uuid(), tenant_id, a.id, 'compliance', cTitle, cBody, 'compliance']).catch(() => {});
+        require('./push').sendPushToUser(a.id, { type: 'compliance', title: cTitle, body: cBody, link: '/?go=compliance' }).catch(() => {});
       }
       // Email: Admin/GM addresses + the all-sites report inbox.
       const to = [...new Set([...admins.map((a) => a.email), tenant.report_email_all || REPORTS_INBOX].filter(Boolean))];

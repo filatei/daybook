@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useStore, useRole, useActiveTenant, atLeast, isGateRole } from '../store.jsx';
 import { api, scoped } from '../api.js';
 import { useRealtime } from '../hooks/useRealtime.js';
+import { pushSupported, pushPermission, enablePush } from '../push.js';
 import AIAssistant from './AIAssistant.jsx';
 
 // Live total of unread direct messages → the Nav chat badge.
@@ -38,7 +39,7 @@ function useInstallPrompt() {
 }
 
 // ── Profile avatar + dropdown (replaces the old sign-out icon) ─────────────────
-function ProfileMenu({ user, isGMup, isMgr, go, logout, canInstall, install }) {
+function ProfileMenu({ user, isGMup, isMgr, go, logout, canInstall, install, canPush, onEnablePush }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   useEffect(() => {
@@ -68,6 +69,7 @@ function ProfileMenu({ user, isGMup, isMgr, go, logout, canInstall, install }) {
           {!isGMup && isMgr && item('Members', '👥', () => go('admin'))}
           {item('Test plan', '✅', () => { setOpen(false); window.open('/testplan.html', '_blank'); })}
           {canInstall && item('Install app', '⬇', install)}
+          {canPush && item('Enable notifications', '🔔', onEnablePush)}
           <div style={{ borderTop: '1px solid var(--line)', margin: '4px 0' }} />
           {item('Sign out', '⏻', logout)}
         </div>
@@ -77,11 +79,19 @@ function ProfileMenu({ user, isGMup, isMgr, go, logout, canInstall, install }) {
 }
 
 export default function Nav() {
-  const { go, tab, tenants, tenant, setTenant, logout, user, openModal, closeModal } = useStore();
+  const { go, tab, tenants, tenant, setTenant, logout, user, openModal, closeModal, toast } = useStore();
   const role    = useRole();
   const active  = useActiveTenant();
   const { canInstall, install } = useInstallPrompt();
   const unread = useChatUnread(user?.id);
+
+  // Show "Enable notifications" only when supported and not already granted.
+  const [pushPerm, setPushPerm] = useState(() => pushPermission());
+  const canPush = pushSupported() && pushPerm !== 'granted' && pushPerm !== 'unsupported';
+  const onEnablePush = useCallback(async () => {
+    try { await enablePush(); setPushPerm('granted'); toast?.('Notifications enabled', 'ok'); }
+    catch (e) { toast?.(e.message || 'Could not enable notifications', 'err'); }
+  }, [toast]);
 
   const isGMup       = role && atLeast(role, 'GENERAL_MANAGER');
   const isMgr        = role && atLeast(role, 'SITE_MANAGER');
@@ -123,7 +133,7 @@ export default function Nav() {
             💬
             {unread > 0 && <span className="chat-badge nav">{unread > 99 ? '99+' : unread}</span>}
           </button>
-          <ProfileMenu user={user} isGMup={isGMup} isMgr={isMgr} go={go} logout={logout} canInstall={canInstall} install={install} />
+          <ProfileMenu user={user} isGMup={isGMup} isMgr={isMgr} go={go} logout={logout} canInstall={canInstall} install={install} canPush={canPush} onEnablePush={onEnablePush} />
         </div>
 
         {/* Workspace switcher — own row so a long name can't push the avatar off */}

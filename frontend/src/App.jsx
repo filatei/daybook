@@ -7,6 +7,7 @@ import Modal from './components/Modal.jsx';
 import ConfirmDialog from './components/ConfirmDialog.jsx';
 import Toast from './components/Toast.jsx';
 import InstallLanding, { isStandalone } from './components/InstallLanding.jsx';
+import { refreshPushIfGranted } from './push.js';
 import './chatOutbox.js';   // registers offline-message auto-flush on app boot
 
 // Views (lazy-ish — just plain imports for now; split later if bundle grows)
@@ -56,6 +57,19 @@ function Inner() {
 
   // Gate-only roles (Gateman, Supervisor) are confined to the Gate screen.
   useEffect(() => { if (isGateRole(role) && tab !== 'gate') go('gate'); }, [role, tab, go]);
+
+  // Deep-link from a tapped push notification: /?go=<tab> → open that tab once
+  // the user is signed in, then strip the param so a refresh won't re-trigger.
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const dest = new URLSearchParams(window.location.search).get('go');
+      if (dest) {
+        window.history.replaceState({}, '', window.location.pathname);
+        go(dest);
+      }
+    } catch { /* ignore */ }
+  }, [user, go]);
 
   // .main-content is the app shell's only scroll area, so it persists across tab
   // changes — reset it to the top whenever the tab switches.
@@ -116,6 +130,7 @@ function Inner() {
       .then((me) => {
         login(me.user, saved, me.tenants);
         setBooting(false);
+        refreshPushIfGranted();
       })
       .catch(() => {
         localStorage.removeItem('daybook_token');
@@ -137,6 +152,7 @@ function Inner() {
         localStorage.setItem('daybook_token', data.token);
         login(data.user, data.token, data.tenants);
         toast('Welcome back!', 'ok');
+        refreshPushIfGranted();
       } catch (e) {
         toast(e.message || 'Sign-in failed', 'err');
       }

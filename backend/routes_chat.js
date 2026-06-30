@@ -158,6 +158,7 @@ router.post('/send', requireAuth, async (req, res) => {
     await qrun(`DELETE FROM notifications WHERE user_id=? AND type='chat' AND title=? AND read=0`, [to, title]).catch(() => {});
     await qrun(`INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)`,
       [uuid(), tenant_id, to, 'chat', title, body.slice(0, 120), 'chat']).catch(() => {});
+    require('./push').sendPushToUser(to, { type: 'chat', title, body: body.slice(0, 120), link: '/?go=chat' }).catch(() => {});
   }
   res.status(201).json(msg);
 });

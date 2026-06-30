@@ -5,7 +5,7 @@
    - /api/*: network-only (never cache)
    - Images / icons: stale-while-revalidate
 */
-const CACHE = 'daybook-v1';
+const CACHE = 'daybook-v2';
 const STATIC = ['/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -68,4 +68,34 @@ self.addEventListener('fetch', (e) => {
 // Receive SKIP_WAITING message from the app
 self.addEventListener('message', (e) => {
   if (e.data === 'SKIP_WAITING') self.skipWaiting();
+});
+
+// ── Web Push ────────────────────────────────────────────────────────────────
+// Server sends { title, body, link, type }. Show a notification; on click, focus
+// an existing window (navigating it to the link) or open a new one.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data && e.data.text() }; }
+  const title = d.title || 'Daybook';
+  const options = {
+    body: d.body || '',
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    data: { link: d.link || '/' },
+    tag: d.type || 'daybook',
+    renotify: true,
+  };
+  e.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const link = (e.notification.data && e.notification.data.link) || '/';
+  e.waitUntil((async () => {
+    const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of all) {
+      if ('focus' in c) { try { await c.navigate(link); } catch (_) {} return c.focus(); }
+    }
+    if (clients.openWindow) return clients.openWindow(link);
+  })());
 });

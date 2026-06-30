@@ -353,6 +353,20 @@ function GeneratedReportBody({ gen, ov = null }) {
         </div>
       )}
 
+      {gen.summary?.salesByProductIncentive && gen.summary.salesByProductIncentive.length > 0 && (
+        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
+          <div style={{ fontWeight: 700 }}>Incentive / free items</div>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>Given out — not part of the sales total</div>
+          {gen.summary.salesByProductIncentive.map((p) => (
+            <div key={p.name} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+              <span>{p.name}</span>
+              <span style={{ textAlign: 'right' }}>{(p.qty || 0).toLocaleString()}</span>
+              <span style={{ textAlign: 'right' }}>{ngn(p.amount)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0 && (
         <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>Bags — all sites <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(sold excl. bonus)</span></div>

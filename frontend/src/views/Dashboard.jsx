@@ -26,9 +26,10 @@ function GroupTotals({ from, to, rangeLabel }) {
         const res = await Promise.all(groups.map(async (t) => {
           // Sales for the range + packing bags as of the range end date (bags are
           // a daily stock snapshot). Both endpoints are scoped by ?tenant=.
+          const cb = Date.now();   // cache-bust: never serve a stale per-tenant rollup
           const [p, c] = await Promise.all([
-            api(`/pos/range?from=${from}&to=${to}&tenant=${t.id}`).catch(() => null),
-            api(`/reports/consolidated?date=${to}&tenant=${t.id}`).catch(() => null),
+            api(`/pos/range?from=${from}&to=${to}&tenant=${t.id}&_=${cb}`).catch(() => null),
+            api(`/reports/consolidated?date=${to}&tenant=${t.id}&_=${cb}`).catch(() => null),
           ]);
           const st = c?.auto?.summary?.stockTotals;
           const sites = (p?.bySite || []).map((x) => ({ site: x.site, sales: Number(x.sales) || 0, tenant: t.name }));

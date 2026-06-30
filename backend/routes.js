@@ -895,6 +895,22 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       }
       posByBank = Object.entries(map).map(([bank, amount]) => ({ bank, amount })).sort((a, b) => b.amount - a.amount);
     } catch { /* leave null on legacy-source error */ }
+  } else {
+    // Native (post-cutover): POS/card sales grouped by acquiring bank from pos_sales.
+    const map = {};
+    for (const sid of _siteIds) {
+      let rows = [];
+      try {
+        rows = await qall(
+          `SELECT COALESCE(NULLIF(TRIM(bank),''),'Unspecified') bank, COALESCE(SUM(total),0) amount
+             FROM pos_sales WHERE tenant_id=? AND site_id=? AND sale_date=? AND payment_method='POS'
+             GROUP BY 1`,
+          [ctx.tenant_id, sid, date]);
+      } catch { rows = []; }
+      for (const r of rows) map[r.bank] = (map[r.bank] || 0) + (Number(r.amount) || 0);
+    }
+    const entries = Object.entries(map).map(([bank, amount]) => ({ bank, amount })).sort((a, b) => b.amount - a.amount);
+    if (entries.length) posByBank = entries;
   }
   const bagReport = single ? await bagDayReport(ctx, single.site_id, date) : null;
   // Operations the site keyed in (leakage, rolls, generators, RO, water analysis…)

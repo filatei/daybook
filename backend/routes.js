@@ -2427,9 +2427,9 @@ router.get('/pos/range', requireAuth, async (req, res) => {
     FROM pos_sales ${Wn} GROUP BY COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') ORDER BY sales DESC LIMIT 30`, args);
   // Single-day view → sales by hour-of-day (business timezone).
   const byHour = (from === to)
-    ? (await qall(`SELECT EXTRACT(HOUR FROM to_timestamp(created_at) AT TIME ZONE ?)::int hour, COALESCE(SUM(total),0) sales
-        FROM pos_sales ${Wn} AND created_at IS NOT NULL GROUP BY hour ORDER BY hour`, [process.env.SALES_TZ || 'Africa/Lagos', ...args]))
-      .map((r) => ({ hour: Number(r.hour), sales: Number(r.sales) }))
+    ? (await qall(`SELECT EXTRACT(HOUR FROM to_timestamp(created_at) AT TIME ZONE ?)::int AS hr, COALESCE(SUM(total),0) sales
+        FROM pos_sales ${Wn} AND created_at IS NOT NULL GROUP BY hr ORDER BY hr`, [process.env.SALES_TZ || 'Africa/Lagos', ...args]))
+      .map((r) => ({ hour: Number(r.hr), sales: Number(r.sales) }))
     : [];
   res.json({
     totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer), incentive: Number(totals.incentive) },

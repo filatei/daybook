@@ -838,6 +838,24 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_bank_acct_tenant ON bank_accounts(tenant_id, active);
 
+    -- GROUP DAILY REPORT — a combined end-of-day report spanning several tenants
+    -- (e.g. Fido + Fiafia), authored by Snr Accountant / GM / Admin. group_key is
+    -- the sorted member tenant-ids joined, so one report per group per date. data
+    -- is a JSON blob of the (prefilled, then edited) figures.
+    CREATE TABLE IF NOT EXISTS group_reports (
+      id          TEXT PRIMARY KEY,
+      group_key   TEXT NOT NULL,
+      report_date TEXT NOT NULL,
+      data        TEXT,
+      notes       TEXT,
+      status      TEXT DEFAULT 'SAVED',
+      created_by  TEXT,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      updated_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      UNIQUE(group_key, report_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_reports_date ON group_reports(group_key, report_date);
+
     -- Daily operations capture (the numbers a site keys in at day end that aren't
     -- derivable: leakage, packing-bag & roll stock, crates, water analysis,
     -- generator status, RO readings…). One row per site/day; data is a JSON blob.

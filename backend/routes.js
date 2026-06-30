@@ -2935,6 +2935,92 @@ router.delete('/bank-accounts/:id', requireAuth, needTenant('SNR_ACCOUNTANT'), a
   res.json({ ok: true });
 });
 
+// ── GROUP DAILY REPORT (combined across the user's Snr-Accountant+ tenants) ────
+// The Group workspace only exists for users who are Snr Accountant+ in 2+ tenants
+// (or superadmin). A group report aggregates the per-tenant all-sites figures into
+// one editable, savable end-of-day report that spans both companies.
+async function userGroupTenants(user) {
+  const all = await accessibleTenants(user);
+  return all
+    .filter((t) => user.is_superadmin || atLeast(t.role, 'SNR_ACCOUNTANT'))
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
+}
+const groupKeyOf = (tenants) => tenants.map((t) => t.id).sort().join('|');
+const gNum = (v) => Number(v) || 0;
+
+async function buildGroupPrefill(user, date) {
+  const tenants = await userGroupTenants(user);
+  if (tenants.length < 2) return null;
+  const summary = { total_sales: 0, cash: 0, pos: 0, transfer: 0, incentive: 0, diesel: 0, expenses_total: 0, imprest_expenses: 0, non_imprest_expenses: 0 };
+  const production = { opening: 0, produced: 0, sales: 0, bonus: 0, incentive: 0, staff_water: 0, closing: 0 };
+  const stock = { packing_used: 0, packing_available: 0, rolls_used_count: 0, rolls_used_kg: 0, rolls_available_count: 0, rolls_available_kg: 0 };
+  const crates = {};
+  const productMap = {};
+  for (const t of tenants) {
+    const ctx = await contextFor(user, t.id);
+    if (!ctx) continue;
+    let gen; try { gen = await buildGeneratedReport(ctx, date, 'ALL'); } catch { gen = { summary: {} }; }
+    const s = gen.summary || {};
+    summary.total_sales += gNum(s.totalSales); summary.cash += gNum(s.cash); summary.pos += gNum(s.pos);
+    summary.transfer += gNum(s.transfer); summary.incentive += gNum(s.incentive);
+    summary.diesel += gNum(s.diesel); summary.expenses_total += gNum(s.expenses);
+    // Imprest vs non-imprest split from the expenses table for the date.
+    const ex = await qall("SELECT COALESCE(kind,'NON_IMPREST') k, COALESCE(SUM(amount),0) total FROM expenses WHERE tenant_id=? AND expense_date=? GROUP BY 1", [t.id, date]).catch(() => []);
+    for (const r of ex) { if (String(r.k) === 'IMPREST') summary.imprest_expenses += gNum(r.total); else summary.non_imprest_expenses += gNum(r.total); }
+    if (s.productionTotals) for (const k of Object.keys(production)) production[k] += gNum(s.productionTotals[k]);
+    if (s.stockTotals) for (const k of Object.keys(stock)) stock[k] += gNum(s.stockTotals[k]);
+    if (s.crateTotals) for (const sz of Object.keys(s.crateTotals)) {
+      const c = s.crateTotals[sz]; crates[sz] = crates[sz] || { opening: 0, produced: 0, sold: 0, closing: 0 };
+      for (const k of ['opening', 'produced', 'sold', 'closing']) crates[sz][k] += gNum(c[k]);
+    }
+    for (const p of (s.salesByProduct || [])) {
+      const k = p.name || '—'; productMap[k] = productMap[k] || { name: k, qty: 0, amount: 0 };
+      productMap[k].qty += gNum(p.qty); productMap[k].amount += gNum(p.amount);
+    }
+  }
+  summary.balance = summary.total_sales - summary.non_imprest_expenses;
+  return { report_date: date, tenants: tenants.map((t) => t.name), summary, production, stock, crates, by_product: Object.values(productMap).sort((a, b) => b.amount - a.amount) };
+}
+
+router.get('/group/report/prefill', requireAuth, async (req, res) => {
+  const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+  const data = await buildGroupPrefill(req.user, date);
+  if (!data) return res.status(400).json({ error: 'a group report needs at least two workspaces you manage' });
+  res.json(data);
+});
+
+router.get('/group/report', requireAuth, async (req, res) => {
+  const tenants = await userGroupTenants(req.user);
+  if (tenants.length < 2) return res.json(null);
+  const row = await qone('SELECT * FROM group_reports WHERE group_key=? AND report_date=?', [groupKeyOf(tenants), req.query.date]);
+  res.json(row ? { ...row, data: J(row.data, {}) } : null);
+});
+
+router.get('/group/report/list', requireAuth, async (req, res) => {
+  const tenants = await userGroupTenants(req.user);
+  if (tenants.length < 2) return res.json([]);
+  const where = ['group_key=?'], args = [groupKeyOf(tenants)];
+  if (req.query.from) { where.push('report_date>=?'); args.push(req.query.from); }
+  if (req.query.to) { where.push('report_date<=?'); args.push(req.query.to); }
+  res.json(await qall(`SELECT id, report_date, status, created_at, updated_at FROM group_reports WHERE ${where.join(' AND ')} ORDER BY report_date DESC LIMIT 120`, args));
+});
+
+router.post('/group/report', requireAuth, async (req, res) => {
+  const tenants = await userGroupTenants(req.user);
+  if (tenants.length < 2) return res.status(403).json({ error: 'you must manage at least two workspaces' });
+  const gk = groupKeyOf(tenants);
+  const date = req.body?.report_date;
+  if (!date) return res.status(400).json({ error: 'report_date required' });
+  await qrun(
+    `INSERT INTO group_reports (id, group_key, report_date, data, notes, status, created_by)
+     VALUES (?,?,?,?,?, 'SAVED', ?)
+     ON CONFLICT (group_key, report_date) DO UPDATE SET
+       data=EXCLUDED.data, notes=EXCLUDED.notes, status='SAVED', updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT`,
+    [uuid(), gk, date, JSON.stringify(req.body?.data || {}), (req.body?.notes || '').trim() || null, req.user.id]);
+  const row = await qone('SELECT * FROM group_reports WHERE group_key=? AND report_date=?', [gk, date]);
+  res.status(201).json({ ...row, data: J(row.data, {}) });
+});
+
 // ── FEATURE REQUESTS ──────────────────────────────────────────────────────────
 router.get('/feature-requests', requireAuth, async (req, res) => {
   if (req.user.is_superadmin && !requestedTenant(req)) {

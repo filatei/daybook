@@ -976,6 +976,115 @@ function ManualReportDetail({ report, onEdit, onClose, onChanged }) {
   );
 }
 
+// ── Group daily report — combined across the user's tenants, prefilled + editable, saved/archived.
+function GroupReportModal({ date, onSaved, onClose }) {
+  const { toast } = useStore();
+  const [d, setD] = useState(null);
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        // Prefer an already-saved report for this date; otherwise auto-prefill.
+        const saved = await api(`/group/report?date=${date}`).catch(() => null);
+        if (saved && saved.data && saved.data.summary) { setD(saved.data); setNotes(saved.notes || ''); }
+        else setD(await api(`/group/report/prefill?date=${date}`));
+      } catch (e) { toast(e.message || 'Could not build report', 'err'); onClose(); }
+      setLoading(false);
+    })();
+  }, [date]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const setS = (k, v) => setD((p) => ({ ...p, summary: { ...p.summary, [k]: v === '' ? '' : Number(v) } }));
+  const setG = (grp, k, v) => setD((p) => ({ ...p, [grp]: { ...p[grp], [k]: v === '' ? '' : Number(v) } }));
+  const N = (v) => Number(v) || 0;
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api('/group/report', { method: 'POST', body: { report_date: date, data: d, notes } });
+      toast('Group report saved ✓', 'ok'); onSaved && onSaved(); onClose();
+    } catch (e) { toast(e.message || 'Save failed', 'err'); }
+    setSaving(false);
+  };
+
+  if (loading || !d) return <div><div className="grip" /><div className="skel" /><div className="skel" /><div className="skel" /></div>;
+  const s = d.summary || {};
+  const numIn = (val, on) => <input type="number" inputMode="decimal" className="input" value={val ?? ''} onChange={(e) => on(e.target.value)} />;
+  const fld = (label, val, on) => <div><label className="fl">{label}</label>{numIn(val, on)}</div>;
+
+  return (
+    <div style={{ maxHeight: '88vh', overflowY: 'auto' }}>
+      <div className="grip" />
+      <h3 style={{ margin: '0 0 2px' }}>Group daily report</h3>
+      <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 10 }}>
+        {date} · Site: <b>All</b> ({(d.tenants || []).join(' + ')}) · totals across all sites &amp; tenants
+      </div>
+      {/* Site = All, greyed (read-only) */}
+      <label className="fl">Site</label>
+      <input className="input" value={`All (${(d.tenants || []).join(' + ')})`} disabled style={{ marginBottom: 10, opacity: 0.6 }} />
+
+      <div style={{ fontWeight: 800, fontSize: 13, margin: '8px 0 4px' }}>Sales &amp; cash</div>
+      <div className="grid2">
+        {fld('Total sales', s.total_sales, (v) => setS('total_sales', v))}
+        {fld('Incentive (free)', s.incentive, (v) => setS('incentive', v))}
+        {fld('Cash', s.cash, (v) => setS('cash', v))}
+        {fld('POS / Card', s.pos, (v) => setS('pos', v))}
+        {fld('Transfer', s.transfer, (v) => setS('transfer', v))}
+        {fld('Diesel', s.diesel, (v) => setS('diesel', v))}
+      </div>
+
+      <div style={{ fontWeight: 800, fontSize: 13, margin: '12px 0 4px' }}>Expenses</div>
+      <div className="grid2">
+        {fld('Expenses total', s.expenses_total, (v) => setS('expenses_total', v))}
+        {fld('Imprest expenses', s.imprest_expenses, (v) => setS('imprest_expenses', v))}
+        {fld('Non-imprest expenses', s.non_imprest_expenses, (v) => setS('non_imprest_expenses', v))}
+        {fld('Balance (sales − non-imprest)', s.balance, (v) => setS('balance', v))}
+      </div>
+
+      <div style={{ fontWeight: 800, fontSize: 13, margin: '12px 0 4px' }}>Pure water production (bags)</div>
+      <div className="grid2">
+        {fld('Opening', d.production?.opening, (v) => setG('production', 'opening', v))}
+        {fld('Produced', d.production?.produced, (v) => setG('production', 'produced', v))}
+        {fld('Sales', d.production?.sales, (v) => setG('production', 'sales', v))}
+        {fld('Closing', d.production?.closing, (v) => setG('production', 'closing', v))}
+      </div>
+
+      <div style={{ fontWeight: 800, fontSize: 13, margin: '12px 0 4px' }}>Stock balances</div>
+      <div className="grid2">
+        {fld('Packing bags used', d.stock?.packing_used, (v) => setG('stock', 'packing_used', v))}
+        {fld('Packing bags available', d.stock?.packing_available, (v) => setG('stock', 'packing_available', v))}
+        {fld('Rolls used (kg)', d.stock?.rolls_used_kg, (v) => setG('stock', 'rolls_used_kg', v))}
+        {fld('Rolls available (kg)', d.stock?.rolls_available_kg, (v) => setG('stock', 'rolls_available_kg', v))}
+      </div>
+
+      {Array.isArray(d.by_product) && d.by_product.length > 0 && (
+        <>
+          <div style={{ fontWeight: 800, fontSize: 13, margin: '12px 0 4px' }}>Products sold (all sites)</div>
+          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+            {d.by_product.map((p) => (
+              <div key={p.name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 12px', borderBottom: '1px solid var(--line)' }}>
+                <span>{p.name} <span style={{ color: 'var(--muted)' }}>×{N(p.qty).toLocaleString()}</span></span>
+                <b>{ngn(p.amount)}</b>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <label className="fl" style={{ marginTop: 12 }}>Notes</label>
+      <textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="optional remarks" />
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
+        <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Save report'}</button>
+      </div>
+    </div>
+  );
+}
+
 // Merge several /pos/range results (one per group tenant) into one combined
 // shape so the existing POS summary + breakdowns render unchanged for the Group.
 function mergePosRanges(parts, tenantsById) {
@@ -1031,6 +1140,7 @@ export default function Reports() {
   const [manualOpen, setManualOpen] = useState(false);
   const [manualEditDate, setManualEditDate] = useState(null);
   const [manualReports, setManualReports] = useState([]);
+  const [groupReports, setGroupReports] = useState([]);   // saved combined group reports
   // Hardware Back steps up one level (close detail → close drill list) not exit.
   useBackHandler(genOpen, () => setGenOpen(false));
   useBackHandler(manualOpen, () => setManualOpen(false));
@@ -1058,6 +1168,7 @@ export default function Reports() {
         }));
         setPos(mergePosRanges(ranges, groupTenants.map((t) => t.name)));
         setReports([]); setOrders([]); setPosBanks([]); setManualReports([]);
+        try { setGroupReports(await api(`/group/report/list?from=${filters.from || ''}&to=${filters.to || ''}`)); } catch { setGroupReports([]); }
         setLoading(false);
         return;
       }
@@ -1211,6 +1322,28 @@ export default function Reports() {
             onClick={() => setFilters((p) => ({ ...p, from: '', to: '' }))}>All time</button>
         </div>
       </div>
+
+      {/* Group: combined daily report (prefilled across all sites + tenants, editable, saved). */}
+      {isGroup && (
+        <>
+          <button className="btn" style={{ width: '100%', marginBottom: 12 }}
+            onClick={() => openModal(<GroupReportModal date={filters.from || today()} onSaved={load} onClose={closeModal} />, { guard: true })}>
+            📋 Group daily report ({filters.from || 'today'})
+          </button>
+          {groupReports.length > 0 && (
+            <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 14 }}>
+              <div style={{ padding: '8px 14px', fontWeight: 800, fontSize: 13, borderBottom: '1px solid var(--line)' }}>📑 Saved group reports</div>
+              {groupReports.map((g) => (
+                <button key={g.id} onClick={() => openModal(<GroupReportModal date={g.report_date} onSaved={load} onClose={closeModal} />, { guard: true })}
+                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', border: 'none', background: 'none', padding: '10px 14px', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
+                  <span style={{ fontWeight: 700 }}>{g.report_date}</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)' }}>{g.status || 'SAVED'} ›</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
 
       {/* Authoring (generate / day-ops / manual / exports) is per-workspace — hidden in the combined Group report. */}
       {!isGroup && (<>

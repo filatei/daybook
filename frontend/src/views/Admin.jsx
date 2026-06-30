@@ -473,6 +473,86 @@ export function ProductForm({ product, onSave, onClose }) {
 }
 
 // ── Admin ────────────────────────────────────────────────────────────────────
+// ── Company bank accounts (curated payee list for cash deposits) ──────────────
+function BankAccountForm({ acct, onSave, onClose }) {
+  const { toast } = useStore();
+  const editing = !!(acct && acct.id);
+  const [f, setF] = useState({
+    label: acct?.label || '', bank_name: acct?.bank_name || '',
+    account_number: acct?.account_number || '', account_name: acct?.account_name || '',
+  });
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
+  const save = async () => {
+    if (!f.label.trim()) return toast('Enter a label (what shows in the picker)', 'err');
+    setSaving(true);
+    try {
+      if (editing) await api(scoped(`/bank-accounts/${acct.id}`), { method: 'PATCH', body: f });
+      else await api(scoped('/bank-accounts'), { method: 'POST', body: f });
+      toast(editing ? 'Account updated ✓' : 'Account added ✓', 'ok'); onSave(); onClose();
+    } catch (e) { toast(e.message, 'err'); }
+    setSaving(false);
+  };
+  return (
+    <div>
+      <div className="grip" />
+      <h3>{editing ? 'Edit bank account' : 'Add bank account'}</h3>
+      <label className="fl">Label (shown in cash deposit)</label>
+      <input className="input" value={f.label} onChange={set('label')} placeholder="e.g. UBA-Fido Fluids" autoFocus />
+      <div className="grid2">
+        <div><label className="fl">Bank</label><input className="input" value={f.bank_name} onChange={set('bank_name')} placeholder="e.g. UBA" /></div>
+        <div><label className="fl">Account number</label><input className="input" value={f.account_number} onChange={set('account_number')} placeholder="0123456789" /></div>
+      </div>
+      <label className="fl">Account name</label>
+      <input className="input" value={f.account_name} onChange={set('account_name')} placeholder="e.g. Fido Fluids Ltd" />
+      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
+        <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : (editing ? 'Save' : 'Add account')}</button>
+      </div>
+    </div>
+  );
+}
+
+function BankAccountsTab() {
+  const { openModal, closeModal, toast, tenant } = useStore();
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setRows(await api(scoped('/bank-accounts?all=1'))); } catch { setRows([]); }
+    setLoading(false);
+  }, [tenant]);
+  useEffect(() => { load(); }, [load]);
+  const openForm = (acct = null) => openModal(<BankAccountForm acct={acct} onSave={load} onClose={closeModal} />, { guard: true });
+  const toggle = async (a) => {
+    try { await api(scoped(`/bank-accounts/${a.id}`), { method: 'PATCH', body: { active: a.active ? 0 : 1 } }); load(); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 12px' }}>The accounts staff can pick when recording a cash deposit. Managed by Snr Accountant, GM and Admin.</p>
+      {loading ? (
+        <>{[...Array(3)].map((_, i) => <div className="skel" key={i} />)}</>
+      ) : rows.length === 0 ? (
+        <div className="empty"><div className="ic">🏦</div><p>No bank accounts yet — add your first</p></div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {rows.map((a) => (
+            <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', borderBottom: '1px solid var(--line)', opacity: a.active ? 1 : 0.5 }}>
+              <button onClick={() => openForm(a)} style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
+                <div style={{ fontWeight: 700 }}>{a.label} {!a.active && <span className="badge">inactive</span>}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{[a.bank_name, a.account_number, a.account_name].filter(Boolean).join(' · ') || 'No details'}</div>
+              </button>
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => toggle(a)}>{a.active ? 'Disable' : 'Enable'}</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <button className="fab" onClick={() => openForm()}>+</button>
+    </div>
+  );
+}
+
 export default function Admin() {
   const { openModal, closeModal, toast, tenant, tenants, confirm } = useStore();
   const role = useRole();
@@ -565,10 +645,11 @@ export default function Admin() {
         <button className={`seg-b${tab === 'members'  ? ' on' : ''}`} onClick={() => setTab('members')}>👥 Members</button>
         {isGM && <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>}
         {isSnr && <button className={`seg-b${tab === 'reportmail' ? ' on' : ''}`} onClick={() => setTab('reportmail')}>📧 Report emails</button>}
+        {isSnr && <button className={`seg-b${tab === 'banks' ? ' on' : ''}`} onClick={() => setTab('banks')}>🏦 Bank accounts</button>}
         {isAdmin && <button className={`seg-b${tab === 'settings' ? ' on' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>}
       </div>
 
-      {tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
+      {tab === 'banks' ? <BankAccountsTab /> : tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

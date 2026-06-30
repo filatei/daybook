@@ -823,6 +823,21 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_cash_att ON cash_attachments(cash_id);
 
+    -- Company bank accounts — the curated list cash deposits are paid into. Managed
+    -- by Snr Accountant / GM / Admin. label is what shows in the cash-deposit picker.
+    CREATE TABLE IF NOT EXISTS bank_accounts (
+      id             TEXT PRIMARY KEY,
+      tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+      label          TEXT NOT NULL,
+      bank_name      TEXT,
+      account_number TEXT,
+      account_name   TEXT,
+      active         INTEGER DEFAULT 1,
+      created_by     TEXT,
+      created_at     BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bank_acct_tenant ON bank_accounts(tenant_id, active);
+
     -- Daily operations capture (the numbers a site keys in at day end that aren't
     -- derivable: leakage, packing-bag & roll stock, crates, water analysis,
     -- generator status, RO readings…). One row per site/day; data is a JSON blob.

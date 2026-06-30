@@ -13,7 +13,7 @@
 'use strict';
 
 const { v4: uuid } = require('uuid');
-const { qone, qrun } = require('./db');
+const { qone, qall, qrun } = require('./db');
 
 const TENANTS = [
   { slug: 'fido', name: 'Fido Water', brand_color: '#0ea5e9', industry: 'Water production',
@@ -76,6 +76,21 @@ async function ensureSeed() {
       await qrun('INSERT INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?) ON CONFLICT (tenant_id,email) DO NOTHING',
         [uuid(), tenant.id, email, null]);
   }
+
+  // ── Backfill curated bank accounts from any payee accounts already typed into
+  // cash deposits, so the existing accounts carry over into the managed list. ──
+  try {
+    const allTenants = await qall('SELECT id FROM tenants');
+    for (const ten of allTenants) {
+      const used = await qall(
+        "SELECT DISTINCT payee_account FROM cash_deposits WHERE tenant_id=? AND payee_account IS NOT NULL AND payee_account<>''",
+        [ten.id]);
+      for (const r of used) {
+        const exists = await qone('SELECT 1 FROM bank_accounts WHERE tenant_id=? AND lower(label)=lower(?)', [ten.id, r.payee_account]);
+        if (!exists) await qrun('INSERT INTO bank_accounts (id,tenant_id,label,active) VALUES (?,?,?,1)', [uuid(), ten.id, r.payee_account]);
+      }
+    }
+  } catch (e) { console.error('[seed] bank-account backfill skipped:', e.message); }
 }
 
 module.exports = { ensureSeed };

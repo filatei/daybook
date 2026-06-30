@@ -62,9 +62,7 @@ function CashForm({ sites, accounts, onSave, onClose }) {
             onChange={(v) => set('payee_account', v)}
             fetchFn={async (q) => accounts.filter((a) => a.toLowerCase().includes((q || '').toLowerCase())).map((a) => ({ label: a }))}
             minChars={0}
-            allowCreate
-            createLabel={(q) => `➕ Use “${q}”`}
-            placeholder="Search bank account…"
+            placeholder={accounts.length ? 'Select bank account…' : 'No accounts set — ask an admin'}
           />
         </div>
       </div>
@@ -207,7 +205,7 @@ export default function Cash() {
   }, [tenant]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    api(scoped('/cash/accounts')).then((a) => setAccounts(Array.isArray(a) ? a : [])).catch(() => {});
+    api(scoped('/bank-accounts')).then((a) => setAccounts(Array.isArray(a) ? a.map((x) => x.label).filter(Boolean) : [])).catch(() => {});
     if (isAdminish) {
       const t = today();
       api(scoped(`/pos/range?from=${t}&to=${t}`)).then((r) => setCashSales(r?.totals?.cash ?? null)).catch(() => setCashSales(null));

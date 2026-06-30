@@ -2897,6 +2897,44 @@ router.post('/push/unsubscribe', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── COMPANY BANK ACCOUNTS (curated payee list for cash deposits) ──────────────
+// List is readable by anyone who records cash; only Snr Accountant/GM/Admin manage.
+router.get('/bank-accounts', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req);
+  if (!tid) return res.json([]);
+  const c = await contextFor(req.user, tid);
+  if (!c) return res.status(403).json({ error: 'forbidden' });
+  const all = req.query.all === '1' && atLeast(c.role, 'SNR_ACCOUNTANT');
+  const rows = await qall(
+    `SELECT * FROM bank_accounts WHERE tenant_id=?${all ? '' : ' AND active=1'} ORDER BY active DESC, label`, [tid]);
+  res.json(rows);
+});
+router.post('/bank-accounts', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const b = req.body || {};
+  const label = (b.label || '').trim();
+  if (!label) return res.status(400).json({ error: 'label required' });
+  const id = uuid();
+  await qrun('INSERT INTO bank_accounts (id,tenant_id,label,bank_name,account_number,account_name,active,created_by) VALUES (?,?,?,?,?,?,1,?)',
+    [id, req.ctx.tenant_id, label, (b.bank_name || '').trim() || null, (b.account_number || '').trim() || null, (b.account_name || '').trim() || null, req.user.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'CREATE', 'bank_account', id, { label });
+  res.status(201).json(await qone('SELECT * FROM bank_accounts WHERE id=?', [id]));
+});
+router.patch('/bank-accounts/:id', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const a = await qone('SELECT * FROM bank_accounts WHERE id=?', [req.params.id]);
+  if (!a || a.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  await qrun('UPDATE bank_accounts SET label=?,bank_name=?,account_number=?,account_name=?,active=? WHERE id=?',
+    [(b.label ?? a.label), b.bank_name ?? a.bank_name, b.account_number ?? a.account_number, b.account_name ?? a.account_name,
+      b.active != null ? (b.active ? 1 : 0) : a.active, a.id]);
+  res.json(await qone('SELECT * FROM bank_accounts WHERE id=?', [a.id]));
+});
+router.delete('/bank-accounts/:id', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const a = await qone('SELECT * FROM bank_accounts WHERE id=?', [req.params.id]);
+  if (!a || a.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  await qrun('UPDATE bank_accounts SET active=0 WHERE id=?', [a.id]);   // soft-deactivate (kept for history)
+  res.json({ ok: true });
+});
+
 // ── FEATURE REQUESTS ──────────────────────────────────────────────────────────
 router.get('/feature-requests', requireAuth, async (req, res) => {
   if (req.user.is_superadmin && !requestedTenant(req)) {

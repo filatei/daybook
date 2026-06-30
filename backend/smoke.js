@@ -97,12 +97,14 @@ const check = (n, c, x) => { if (c) { pass++; console.log('  ✅ ' + n); } else 
   const opsGet = await api('GET', `/api/reports/ops?tenant=${fido.id}&date=2026-06-12&site=${kpansia.id}`, { token: su });
   check('reports/ops read back', opsGet.json.data && opsGet.json.data.water && opsGet.json.data.water.ph === '7.2', opsGet.json);
 
-  // ── expense lifecycle: create → validate → approve → pay (+ imprest tagging) ──
+  // ── expense lifecycle: create → validate → review → approve → pay (+ imprest tagging) ──
   const exp = await api('POST', `/api/expenses?tenant=${fido.id}`, { token: su, body: { site_id: kpansia.id, category: 'DIESEL', description: 'Smoke diesel', kind: 'IMPREST', items: [{ name: 'Diesel', qty: 10, price: 1000 }] } });
   check('create expense (DRAFT, imprest)', exp.status === 201 && !!exp.json.id && exp.json.wf_state === 'DRAFT' && exp.json.kind === 'IMPREST', exp.json);
   const eid = exp.json.id;
   const t1 = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'validate' } });
-  check('expense validate → REVIEWED', t1.json.wf_state === 'REVIEWED', t1.json);
+  check('expense validate → VALIDATED', t1.json.wf_state === 'VALIDATED', t1.json);
+  const t1b = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'review' } });
+  check('expense review → REVIEWED', t1b.json.wf_state === 'REVIEWED', t1b.json);
   const t2 = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'approve' } });
   check('expense approve → APPROVED', t2.json.wf_state === 'APPROVED', t2.json);
   const t3 = await api('POST', `/api/expenses/${eid}/transition`, { token: su, body: { action: 'pay' } });

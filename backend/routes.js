@@ -2982,6 +2982,65 @@ async function buildGroupPrefill(user, date) {
   return { report_date: date, tenants: tenants.map((t) => t.name), summary, production, stock, crates, by_product: Object.values(productMap).sort((a, b) => b.amount - a.amount) };
 }
 
+// Combined sales workbook across the user's group tenants (Workspace column).
+router.get('/group/sales.xlsx', requireAuth, async (req, res) => {
+  const tenants = await userGroupTenants(req.user);
+  if (tenants.length < 2) return res.status(403).json({ error: 'group export needs two or more workspaces' });
+  const { from, to } = req.query;
+  const dateW = `${from ? ' AND sale_date>=?' : ''}${to ? ' AND sale_date<=?' : ''}`;
+  const dArgs = (tid) => { const a = [tid]; if (from) a.push(from); if (to) a.push(to); return a; };
+  let tSales = 0, tOrders = 0, tCash = 0, tTransfer = 0, tIncentive = 0;
+  const dayMap = {}, methodMap = {}, prodMap = {}; const siteRows = [], custRows = [], detailRows = [];
+  const itemsText = (j) => J(j, []).map((it) => `${it.name || '?'}×${it.qty || 0}`).join(', ');
+  for (const t of tenants) {
+    const W = `WHERE tenant_id=?${dateW}`; const Wn = W + " AND payment_method<>'INCENTIVE'"; const a = dArgs(t.id);
+    const tot = await qone(`SELECT COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN total ELSE 0 END),0) sales, SUM(CASE WHEN payment_method<>'INCENTIVE' THEN 1 ELSE 0 END) orders, COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0) cash, COALESCE(SUM(CASE WHEN payment_method NOT IN ('CASH','INCENTIVE') THEN total ELSE 0 END),0) transfer, COALESCE(SUM(CASE WHEN payment_method='INCENTIVE' THEN total ELSE 0 END),0) incentive FROM pos_sales ${W}`, a);
+    tSales += Number(tot.sales); tOrders += parseInt(tot.orders, 10); tCash += Number(tot.cash); tTransfer += Number(tot.transfer); tIncentive += Number(tot.incentive);
+    (await qall(`SELECT sale_date day, COALESCE(SUM(total),0) sales FROM pos_sales ${Wn} GROUP BY sale_date`, a)).forEach((r) => { dayMap[r.day] = (dayMap[r.day] || 0) + Number(r.sales); });
+    (await qall(`SELECT s.name site, COALESCE(SUM(p.total),0) sales, COUNT(*) orders FROM pos_sales p JOIN sites s ON s.id=p.site_id WHERE p.tenant_id=?${dateW.replace(/sale_date/g, 'p.sale_date')} AND p.payment_method<>'INCENTIVE' GROUP BY s.id,s.name ORDER BY sales DESC`, a)).forEach((r) => siteRows.push([r.site, t.name, Number(r.sales), Number(r.orders)]));
+    (await qall(`SELECT COALESCE(payment_method,'—') method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method`, a)).forEach((r) => { (methodMap[r.method] = methodMap[r.method] || { sales: 0, orders: 0 }); methodMap[r.method].sales += Number(r.sales); methodMap[r.method].orders += Number(r.orders); });
+    (await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, a)).forEach((r) => custRows.push([r.customer, t.name, Number(r.sales), Number(r.orders)]));
+    const det = await qall(`SELECT p.sale_date, p.receipt_no, s.name site, p.customer_name, p.items_json, p.total, p.payment_method, p.status FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE p.tenant_id=?${dateW.replace(/sale_date/g, 'p.sale_date')} ORDER BY p.sale_date, p.receipt_no`, a);
+    for (const r of det) {
+      detailRows.push([r.sale_date, r.receipt_no, r.site || '', t.name, r.customer_name || 'Walk-in', itemsText(r.items_json), Number(r.total), r.payment_method || '', r.status || '']);
+      for (const it of J(r.items_json, [])) { if (String(r.payment_method).toUpperCase() === 'INCENTIVE') continue; const k = (it.name || 'Unknown').trim() || 'Unknown'; prodMap[k] = prodMap[k] || { qty: 0, sales: 0 }; prodMap[k].qty += Number(it.qty) || 0; prodMap[k].sales += Number(it.amount) || 0; }
+    }
+  }
+  const sheets = {
+    Summary: [['Group sales report'], ['Workspaces', tenants.map((t) => t.name).join(', ')], ['Range', `${from || 'all'} → ${to || 'all'}`], [], ['Total sales', tSales], ['Orders', tOrders], ['Cash', tCash], ['Transfer / POS', tTransfer], ['Incentive (free)', tIncentive]],
+    'By day': [['Date', 'Sales'], ...Object.entries(dayMap).sort().map(([d, s]) => [d, s])],
+    'By site': [['Site', 'Workspace', 'Sales', 'Orders'], ...siteRows.sort((a, b) => b[2] - a[2])],
+    'By product': [['Product', 'Qty', 'Sales'], ...Object.entries(prodMap).sort((a, b) => b[1].sales - a[1].sales).map(([k, v]) => [k, v.qty, v.sales])],
+    'By payment': [['Method', 'Sales', 'Orders'], ...Object.entries(methodMap).sort((a, b) => b[1].sales - a[1].sales).map(([k, v]) => [k, v.sales, v.orders])],
+    'By customer': [['Customer', 'Workspace', 'Sales', 'Orders'], ...custRows.sort((a, b) => b[2] - a[2])],
+    Detail: [['Date', 'Receipt', 'Site', 'Workspace', 'Customer', 'Items', 'Total', 'Method', 'Status'], ...detailRows],
+  };
+  sendWorkbook(res, sheets, `group_sales_${from || 'all'}_${to || 'all'}.xlsx`);
+});
+
+// Combined per-customer daily + monthly + all-time across the group tenants.
+router.get('/group/customers.xlsx', requireAuth, async (req, res) => {
+  const tenants = await userGroupTenants(req.user);
+  if (tenants.length < 2) return res.status(403).json({ error: 'group export needs two or more workspaces' });
+  const { from, to } = req.query;
+  const dateW = `${from ? ' AND sale_date>=?' : ''}${to ? ' AND sale_date<=?' : ''}`;
+  const dArgs = (tid) => { const a = [tid]; if (from) a.push(from); if (to) a.push(to); return a; };
+  const cust = "COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in')";
+  const daily = [], monthly = [], overall = [];
+  for (const t of tenants) {
+    const Wn = `WHERE tenant_id=?${dateW} AND payment_method<>'INCENTIVE'`; const a = dArgs(t.id);
+    (await qall(`SELECT ${cust} customer, sale_date, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1, sale_date ORDER BY customer, sale_date`, a)).forEach((r) => daily.push([r.customer, t.name, r.sale_date, Number(r.sales), Number(r.orders)]));
+    (await qall(`SELECT ${cust} customer, SUBSTR(sale_date,1,7) month, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1, SUBSTR(sale_date,1,7) ORDER BY customer, month`, a)).forEach((r) => monthly.push([r.customer, t.name, r.month, Number(r.sales), Number(r.orders)]));
+    (await qall(`SELECT ${cust} customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, a)).forEach((r) => overall.push([r.customer, t.name, Number(r.sales), Number(r.orders)]));
+  }
+  const sheets = {
+    'Daily by customer': [['Customer', 'Workspace', 'Date', 'Sales', 'Orders'], ...daily],
+    'Monthly by customer': [['Customer', 'Workspace', 'Month', 'Sales', 'Orders'], ...monthly],
+    'All-time': [['Customer', 'Workspace', 'Sales', 'Orders'], ...overall.sort((a, b) => b[2] - a[2])],
+  };
+  sendWorkbook(res, sheets, `group_customers_${from || 'all'}_${to || 'all'}.xlsx`);
+});
+
 router.get('/group/report/prefill', requireAuth, async (req, res) => {
   const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
   const data = await buildGroupPrefill(req.user, date);

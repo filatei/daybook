@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { api, scoped, ngn, today } from '../api.js';
+import { api, scoped, ngn, today, downloadFile } from '../api.js';
 import { useStore, useBackHandler } from '../store.jsx';
 import { useRealtime } from '../hooks/useRealtime.js';
 import { OrdersListModal, OrderDetailModal, BankBreakdownModal } from '../components/OrderViews.jsx';
@@ -180,7 +180,7 @@ function FoldSection({ title, count, open, onToggle, children }) {
 }
 
 export default function Dashboard() {
-  const { tenant, isGroup, groupTenants } = useStore();
+  const { tenant, isGroup, groupTenants, toast } = useStore();
   // Stable dependency — groupTenants is a fresh array each render, so depend on ids.
   const groupKey = (groupTenants || []).map((g) => g.id).join(',');
   const [rangeIdx, setRangeIdx] = useState(0);
@@ -260,7 +260,7 @@ export default function Dashboard() {
   const byProduct = usePos ? (pos.byProduct || []) : [];
   const byCustomer = usePos ? (pos.byCustomer || []) : [];
   const byHour = usePos ? (pos.byHour || []) : [];
-  const drillable = usePos && !isGroup;   // group view is read-only (no single tenant to drill)
+  const drillable = usePos;   // drills work in Group too (each modal fetches per-tenant + merges)
   // A single calendar day is selected (Today or a picked day) → show hourly; a
   // multi-day range → show the daily trend.
   const isSingleDay = !!day || RANGES[rangeIdx].days === 0;
@@ -276,7 +276,7 @@ export default function Dashboard() {
     return `from=${from}&to=${to}`;
   };
   // Order drill-downs need a single tenant to query — disabled in the group view.
-  const openOrders = (title, extra = '') => { if (isGroup) return; setDrill({ title, query: rangeQS() + (extra ? `&${extra}` : '') }); };
+  const openOrders = (title, extra = '') => { setDrill({ title, query: rangeQS() + (extra ? `&${extra}` : '') }); };
 
   return (
     <div>
@@ -332,6 +332,21 @@ export default function Dashboard() {
       ) : (
         <>
           {isGroup && <div style={{ fontSize: 12, color: 'var(--muted)', margin: '0 2px 8px' }}>Combined · all workspaces</div>}
+
+          {/* Excel exports — combined across workspaces in Group, single-tenant otherwise. */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => {
+              const ef = day || daysAgo(RANGES[rangeIdx].days), et = day || today();
+              const p = new URLSearchParams(); p.set('from', ef); p.set('to', et);
+              downloadFile(isGroup ? `/group/sales.xlsx?${p}` : scoped(`/pos/sales.xlsx?${p}`), `sales_${ef}_${et}.xlsx`).catch(() => toast?.('Export failed', 'err'));
+            }}>📊 Sales (Excel)</button>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => {
+              const ef = day || daysAgo(RANGES[rangeIdx].days), et = day || today();
+              const p = new URLSearchParams(); p.set('from', ef); p.set('to', et);
+              downloadFile(isGroup ? `/group/customers.xlsx?${p}` : scoped(`/customers/report.xlsx?${p}`), `customers_${ef}_${et}.xlsx`).catch(() => toast?.('Export failed', 'err'));
+            }}>👥 Customers (Excel)</button>
+          </div>
+
           <div className="stat-grid">
             <button className="stat accent" onClick={() => drillable && openOrders('All orders')} style={{ cursor: drillable ? 'pointer' : 'default', textAlign: 'left', border: 'none' }}>
               <div className="k">Total Sales{drillable ? ' ›' : ''}</div>
@@ -423,6 +438,7 @@ export default function Dashboard() {
         <BankBreakdownModal
           title="Transfer / POS breakdown"
           query={bankDrill}
+          tenants={isGroup ? groupTenants : null}
           onClose={() => setBankDrill(null)}
           onPick={(r) => {
             const f = r.bank ? `bank=${encodeURIComponent(r.bank)}` : '';
@@ -431,7 +447,7 @@ export default function Dashboard() {
           }}
         />
       )}
-      {drill && <OrdersListModal title={drill.title} query={drill.query} onClose={() => setDrill(null)} />}
+      {drill && <OrdersListModal title={drill.title} query={drill.query} tenants={isGroup ? groupTenants : null} onClose={() => setDrill(null)} />}
       {detailId && <OrderDetailModal orderId={detailId} onClose={() => setDetailId(null)} />}
     </div>
   );

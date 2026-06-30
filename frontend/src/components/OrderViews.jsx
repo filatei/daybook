@@ -110,9 +110,17 @@ function BankGroup({ heading, list, icon, onPick }) {
   );
 }
 
-export function BankBreakdownModal({ title, query, onClose, onPick }) {
+export function BankBreakdownModal({ title, query, tenants, onClose, onPick }) {
   const [rows, setRows] = useState(null);
-  useEffect(() => { api(scoped(`/pos/banks?${query}`)).then(setRows).catch(() => setRows([])); }, [query]);
+  const tkey = Array.isArray(tenants) ? tenants.map((t) => t.id).join(',') : '';
+  useEffect(() => {
+    if (tkey) {
+      Promise.all(tenants.map((t) => api(`/pos/banks?${query}&tenant=${t.id}`).catch(() => [])))
+        .then((parts) => setRows(parts.flat()));
+    } else {
+      api(scoped(`/pos/banks?${query}`)).then(setRows).catch(() => setRows([]));
+    }
+  }, [query, tkey]); // eslint-disable-line react-hooks/exhaustive-deps
   const pos = byOwner((rows || []).filter((r) => r.kind === 'POS'));
   const tr = byOwner((rows || []).filter((r) => r.kind === 'TRANSFER'));
   return (
@@ -129,12 +137,22 @@ export function BankBreakdownModal({ title, query, onClose, onPick }) {
 }
 
 // Orders list for a filter (site/method/date range) → click a row for detail.
-export function OrdersListModal({ title, query, onClose }) {
+export function OrdersListModal({ title, query, tenants, onClose }) {
   const [rows, setRows] = useState(null);
   const [sel, setSel] = useState(null);
   const [q, setQ] = useState('');
   const [showUndated, setShowUndated] = useState(false);   // hide timestamp-less orders by default
-  useEffect(() => { api(scoped(`/pos/orders?${query}`)).then(setRows).catch(() => setRows([])); }, [query]);
+  // Group view → fetch each member workspace's orders and merge (tag the tenant).
+  const tkey = Array.isArray(tenants) ? tenants.map((t) => t.id).join(',') : '';
+  useEffect(() => {
+    if (tkey) {
+      Promise.all(tenants.map((t) => api(`/pos/orders?${query}&tenant=${t.id}`)
+        .then((r) => (r || []).map((o) => ({ ...o, _tenant: t.name }))).catch(() => [])))
+        .then((parts) => setRows(parts.flat().sort((a, b) => (b.at || 0) - (a.at || 0))));
+    } else {
+      api(scoped(`/pos/orders?${query}`)).then(setRows).catch(() => setRows([]));
+    }
+  }, [query, tkey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const all = rows || [];
   const undatedCount = all.filter((o) => !o.at).length;
@@ -165,7 +183,7 @@ export function OrdersListModal({ title, query, onClose }) {
                   <button key={o.id} onClick={() => setSel(o)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 700 }}>{o.order_no ? `#${o.order_no}` : '—'} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer || 'Walk-in'}</span></div>
-                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o.entry_by ? ` · ${o.entry_by}` : ''}{o.at ? ` · ${fmt(o.at)}` : ' · no timestamp'}</div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o._tenant ? ` · ${o._tenant}` : ''}{o.entry_by ? ` · ${o.entry_by}` : ''}{o.at ? ` · ${fmt(o.at)}` : ' · no timestamp'}</div>
                     </div>
                     <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.amount)}</div>
                     <span style={{ color: 'var(--muted)' }}>›</span>

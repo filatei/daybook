@@ -209,9 +209,10 @@ export default function Dashboard() {
     try {
       const from = day || daysAgo(RANGES[rangeIdx].days);   // a picked day overrides the range
       const to = day || today();
+      const cb = Date.now();   // cache-bust so switching workspace always refetches fresh
       const [d, p] = await Promise.all([
-        api(scoped(`/dashboard?from=${from}&to=${to}`)),
-        api(scoped(`/pos/range?from=${from}&to=${to}`)).catch(() => null),  // imported + live POS sales
+        api(scoped(`/dashboard?from=${from}&to=${to}&_=${cb}`)),
+        api(scoped(`/pos/range?from=${from}&to=${to}&_=${cb}`)).catch(() => null),  // imported + live POS sales
       ]);
       setData(d); setPos(p);
     } catch { /* tenant not selected */ }

@@ -146,7 +146,7 @@ export default function Generators() {
   // Single maintenance/log record — detail view
   if (selLog) {
     const l = selLog;
-    const Row = ({ k, v }) => v == null || v === '' ? null : (
+    const row = (k, v) => v == null || v === '' ? null : (
       <div style={{ display: 'flex', justifyContent: 'space-between', padding: '11px 16px', borderBottom: '1px solid var(--line)' }}>
         <span style={{ color: 'var(--muted)' }}>{k}</span>
         <span style={{ fontWeight: 700, textAlign: 'right', maxWidth: '60%' }}>{v}</span>
@@ -163,12 +163,12 @@ export default function Generators() {
           </div>
         </div>
         <div className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 12 }}>
-          <Row k="Date" v={l.log_date} />
-          <Row k="Type" v={l.type} />
-          {l.litres != null && <Row k="Litres" v={`${l.litres} L`} />}
-          {l.cost != null && <Row k="Cost" v={ngn(l.cost)} />}
-          {l.runtime_hours != null && <Row k="Runtime" v={`${l.runtime_hours} h`} />}
-          <Row k="Details" v={l.detail} />
+          {row('Date', l.log_date)}
+          {row('Type', l.type)}
+          {l.litres != null && row('Litres', `${l.litres} L`)}
+          {l.cost != null && row('Cost', ngn(l.cost))}
+          {l.runtime_hours != null && row('Runtime', `${l.runtime_hours} h`)}
+          {row('Details', l.detail)}
         </div>
       </div>
     );

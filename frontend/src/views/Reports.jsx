@@ -976,8 +976,37 @@ function ManualReportDetail({ report, onEdit, onClose, onChanged }) {
   );
 }
 
+// Merge several /pos/range results (one per group tenant) into one combined
+// shape so the existing POS summary + breakdowns render unchanged for the Group.
+function mergePosRanges(parts, tenantsById) {
+  const out = {
+    totals: { sales: 0, orders: 0, cash: 0, transfer: 0, incentive: 0 },
+    bySite: [], byDay: {}, byMethod: {}, byProduct: {}, byCustomer: [], byHour: [],
+  };
+  parts.forEach((p, i) => {
+    if (!p) return;
+    const tn = tenantsById[i] || '';
+    const t = p.totals || {};
+    out.totals.sales += +t.sales || 0; out.totals.orders += +t.orders || 0;
+    out.totals.cash += +t.cash || 0; out.totals.transfer += +t.transfer || 0; out.totals.incentive += +t.incentive || 0;
+    (p.bySite || []).forEach((r) => out.bySite.push({ ...r, site: `${r.site || '—'} · ${tn}` }));
+    (p.byDay || []).forEach((r) => { out.byDay[r.day] = (out.byDay[r.day] || 0) + (+r.sales || 0); });
+    (p.byMethod || []).forEach((r) => { const k = r.method || '—'; (out.byMethod[k] = out.byMethod[k] || { method: k, sales: 0, orders: 0 }); out.byMethod[k].sales += +r.sales || 0; out.byMethod[k].orders += +r.orders || 0; });
+    (p.byProduct || []).forEach((r) => { const k = r.product || '—'; (out.byProduct[k] = out.byProduct[k] || { product: k, qty: 0, sales: 0 }); out.byProduct[k].qty += +r.qty || 0; out.byProduct[k].sales += +r.sales || 0; });
+    (p.byCustomer || []).forEach((r) => out.byCustomer.push({ ...r, customer: `${r.customer || 'Walk-in'} · ${tn}` }));
+  });
+  return {
+    ...out,
+    bySite: out.bySite.sort((a, b) => b.sales - a.sales),
+    byDay: Object.entries(out.byDay).map(([day, sales]) => ({ day, sales })).sort((a, b) => (a.day < b.day ? -1 : 1)),
+    byMethod: Object.values(out.byMethod).sort((a, b) => b.sales - a.sales),
+    byProduct: Object.values(out.byProduct).sort((a, b) => b.sales - a.sales).slice(0, 40),
+    byCustomer: out.byCustomer.sort((a, b) => b.sales - a.sales).slice(0, 40),
+  };
+}
+
 export default function Reports() {
-  const { openModal, closeModal, sites, tenant, tenants, toast } = useStore();
+  const { openModal, closeModal, sites, tenant, tenants, toast, isGroup, groupTenants } = useStore();
   const role = useRole();
   const isSM = role && !atLeast(role, 'SNR_ACCOUNTANT');   // site-bound = below Snr Accountant
   const isGM = atLeast(role, 'GENERAL_MANAGER');
@@ -1009,6 +1038,8 @@ export default function Reports() {
   useBackHandler(!!viewOrder, () => { setViewOrder(null); setReadOnly(false); });
   useBackHandler(askDelete, () => setAskDelete(false));   // deepest sub-step first
 
+  const groupKey = (groupTenants || []).map((t) => t.id).join(',');
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -1016,6 +1047,21 @@ export default function Reports() {
       if (filters.site) params.set('site', filters.site);
       if (filters.from) params.set('from', filters.from);
       if (filters.to) params.set('to', filters.to);
+
+      // Combined Group report (Snr Accountant/GM/Admin): per-tenant POS ranges
+      // merged into one sales overview. Authoring (generate/ops/manual) is per
+      // workspace, so it's hidden in the Group view.
+      if (isGroup) {
+        const ranges = await Promise.all(groupTenants.map((t) => {
+          const p = new URLSearchParams(params); p.set('tenant', t.id);
+          return api(`/pos/range?${p}`).catch(() => null);
+        }));
+        setPos(mergePosRanges(ranges, groupTenants.map((t) => t.name)));
+        setReports([]); setOrders([]); setPosBanks([]); setManualReports([]);
+        setLoading(false);
+        return;
+      }
+
       const [data, posData, ord, banks] = await Promise.all([
         api(scoped(`/reports?${params}`)),
         api(scoped(`/pos/range?${params}`)).catch(() => null),  // imported + live POS sales
@@ -1028,7 +1074,7 @@ export default function Reports() {
       } else setManualReports([]);
     } catch { setReports([]); }
     setLoading(false);
-  }, [tenant, filters, isSM]);
+  }, [tenant, filters, isSM, isGroup, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Build the print/preview payload for an order row (tolerates both the in-app
   // pos_sales shape and the live-fido /pos/orders shape).
@@ -1166,6 +1212,8 @@ export default function Reports() {
         </div>
       </div>
 
+      {/* Authoring (generate / day-ops / manual / exports) is per-workspace — hidden in the combined Group report. */}
+      {!isGroup && (<>
       {/* End-of-day: auto-generate a daily report from the app's data */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
         <button className="btn" style={{ flex: 1 }} onClick={() => setGenOpen(true)}>✨ Generate daily report</button>
@@ -1195,6 +1243,7 @@ export default function Reports() {
       {!isSM && (
         <MorningReportStatus date={(filters.from && filters.from === filters.to) ? filters.from : today()} />
       )}
+      </>)}
 
       {/* POS sales summary (imported Fido history + live in-app sales) */}
       {pos && pos.totals.orders > 0 && (
@@ -1206,8 +1255,8 @@ export default function Reports() {
             <span style={{ fontWeight: 800 }}>{ngn(pos.totals.sales)}</span>
           </div>
           <div className="stat-grid" style={{ marginBottom: pos.bySite.length > 1 ? 8 : 0 }}>
-            <button className="stat" onClick={openOrdersList} style={{ cursor: 'pointer', textAlign: 'left', border: '1px solid var(--brand-l)' }} title="Tap to list orders">
-              <div className="k">Orders ›</div><div className="v" style={{ fontSize: 18 }}>{pos.totals.orders.toLocaleString()}</div>
+            <button className="stat" onClick={() => { if (!isGroup) openOrdersList(); }} disabled={isGroup} style={{ cursor: isGroup ? 'default' : 'pointer', textAlign: 'left', border: '1px solid var(--brand-l)' }} title={isGroup ? '' : 'Tap to list orders'}>
+              <div className="k">Orders{isGroup ? '' : ' ›'}</div><div className="v" style={{ fontSize: 18 }}>{pos.totals.orders.toLocaleString()}</div>
             </button>
             <div className="stat"><div className="k">Cash</div><div className="v" style={{ fontSize: 18 }}>{ngn(pos.totals.cash)}</div></div>
             <div className="stat"><div className="k">Transfer/POS</div><div className="v" style={{ fontSize: 18 }}>{ngn(pos.totals.transfer)}</div></div>

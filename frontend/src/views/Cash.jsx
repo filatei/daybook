@@ -79,8 +79,12 @@ function CashForm({ sites, accounts, onSave, onClose }) {
 }
 
 // ── Cash detail — review (SEEN / VALIDATE) + receipts ───────────────────────
-function CashDetail({ id, onChanged, onClose }) {
+function CashDetail({ id, tenantId, onChanged, onClose }) {
   const { toast, confirm } = useStore();
+  // Pin to the deposit's workspace so review/validate works from the Group view.
+  const ts = (path) => tenantId
+    ? path + (path.includes('?') ? '&' : '?') + 'tenant=' + tenantId
+    : scoped(path);
   const role = useRole();
   const canReview = role && atLeast(role, 'SNR_ACCOUNTANT');
   const canValidate = role && atLeast(role, 'ADMIN');
@@ -91,13 +95,13 @@ function CashDetail({ id, onChanged, onClose }) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    try { setD(await api(scoped(`/cash/${id}`))); } catch (e) { toast(e.message || 'Could not load', 'err'); }
-  }, [id]);
+    try { setD(await api(ts(`/cash/${id}`))); } catch (e) { toast(e.message || 'Could not load', 'err'); }
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
   const act = async (path2, body, ok) => {
     setBusy(true);
-    try { await api(scoped(`/cash/${id}/${path2}`), { method: 'POST', body }); toast(ok, 'ok'); load(); onChanged && onChanged(); }
+    try { await api(ts(`/cash/${id}/${path2}`), { method: 'POST', body }); toast(ok, 'ok'); load(); onChanged && onChanged(); }
     catch (e) { toast(e.message || 'Failed', 'err'); }
     setBusy(false);
   };
@@ -108,7 +112,7 @@ function CashDetail({ id, onChanged, onClose }) {
       const fd = new FormData();
       if (file) fd.append('file', file);
       if (note.trim()) fd.append('note', note.trim());
-      await api(scoped(`/cash/${id}/attachments`), { method: 'POST', form: fd });
+      await api(ts(`/cash/${id}/attachments`), { method: 'POST', form: fd });
       setNote(''); setFile(null);
       const inp = document.getElementById('cash-att'); if (inp) inp.value = '';
       load(); toast('Receipt added ✓', 'ok');
@@ -126,7 +130,7 @@ function CashDetail({ id, onChanged, onClose }) {
   };
   const remove = async () => {
     if (!await confirm({ title: 'Delete this cash entry?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true })) return;
-    try { await api(scoped(`/cash/${id}`), { method: 'DELETE' }); toast('Deleted', 'ok'); onChanged && onChanged(); onClose(); }
+    try { await api(ts(`/cash/${id}`), { method: 'DELETE' }); toast('Deleted', 'ok'); onChanged && onChanged(); onClose(); }
     catch (e) { toast(e.message || 'Could not delete', 'err'); }
   };
 
@@ -189,7 +193,7 @@ function CashDetail({ id, onChanged, onClose }) {
 }
 
 export default function Cash() {
-  const { openModal, closeModal, tenant, sites } = useStore();
+  const { openModal, closeModal, tenant, sites, isGroup, groupTenants } = useStore();
   const role = useRole();
   const isAdminish = role && atLeast(role, 'SNR_ACCOUNTANT');
   const [data, setData] = useState({ rows: [], total: 0 });
@@ -197,23 +201,37 @@ export default function Cash() {
   const [cashSales, setCashSales] = useState(null);   // today's CASH collected (reconcile)
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
+  const groupKey = groupTenants.map((t) => t.id).join(',');
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setData(await api(scoped('/cash'))); } catch { setData({ rows: [], total: 0 }); }
+    try {
+      if (isGroup) {
+        // Combined deposits across the member workspaces (read + review/validate).
+        const parts = await Promise.all(groupTenants.map(async (t) => {
+          try { const r = await api(`/cash?tenant=${t.id}`); return (r.rows || []).map((row) => ({ ...row, tenant_name: t.name })); }
+          catch { return []; }
+        }));
+        const rows2 = parts.flat().sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+        setData({ rows: rows2, total: rows2.reduce((a, r) => a + Number(r.amount || 0), 0) });
+      } else {
+        setData(await api(scoped('/cash')));
+      }
+    } catch { setData({ rows: [], total: 0 }); }
     setLoading(false);
-  }, [tenant]);
+  }, [tenant, isGroup, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
+    if (isGroup) return;   // recording + per-site reconcile happen inside a workspace
     api(scoped('/bank-accounts')).then((a) => setAccounts(Array.isArray(a) ? a.map((x) => x.label).filter(Boolean) : [])).catch(() => {});
     if (isAdminish) {
       const t = today();
       api(scoped(`/pos/range?from=${t}&to=${t}`)).then((r) => setCashSales(r?.totals?.cash ?? null)).catch(() => setCashSales(null));
     }
-  }, [tenant, isAdminish]);
+  }, [tenant, isAdminish, isGroup]);
 
   const openForm = () => openModal(<CashForm sites={sites} accounts={accounts} onSave={load} onClose={closeModal} />, { guard: true });
-  const openDetail = (row) => openModal(<CashDetail id={row.id} onChanged={load} onClose={closeModal} />);
+  const openDetail = (row) => openModal(<CashDetail id={row.id} tenantId={row.tenant_id} onChanged={load} onClose={closeModal} />);
 
   const rows = (data.rows || []).filter((r) => {
     if (!q) return true;
@@ -224,10 +242,11 @@ export default function Cash() {
 
   return (
     <div>
-      <button className="btn" style={{ marginBottom: 12 }} onClick={openForm}>＋ Record cash deposit</button>
+      {/* New deposits are recorded inside a workspace; Group is a combined review. */}
+      {!isGroup && <button className="btn" style={{ marginBottom: 12 }} onClick={openForm}>＋ Record cash deposit</button>}
 
       <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
-        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>Cash deposited today</span>
+        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{isGroup ? 'Cash deposited (all sites)' : 'Cash deposited today'}</span>
         <span style={{ fontWeight: 800, fontSize: 20 }}>{ngn(data.total)}</span>
       </div>
 
@@ -258,7 +277,7 @@ export default function Cash() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 800, fontSize: 16 }}>{ngn(r.amount)}</div>
                   <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                    {r.site_name || '—'}{r.depositor ? ` · by ${r.depositor}` : ''}{r.payee_account ? ` · ${r.payee_account}` : ''}
+                    {r.site_name || '—'}{isGroup && r.tenant_name ? ` · ${r.tenant_name}` : ''}{r.depositor ? ` · by ${r.depositor}` : ''}{r.payee_account ? ` · ${r.payee_account}` : ''}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--muted)' }}>{when(r.created_at)}{r.receipts ? ` · 🧾${r.receipts}` : ''}</div>
                 </div>
@@ -269,7 +288,7 @@ export default function Cash() {
         </div>
       )}
 
-      <button className="fab" onClick={openForm}>+</button>
+      {!isGroup && <button className="fab" onClick={openForm}>+</button>}
     </div>
   );
 }

@@ -9,14 +9,18 @@ const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transpo
 function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
   const { toast, tenant, setDirty } = useStore();
   const [saving, setSaving] = useState(false);
+  // Editing from the combined Group view → pin to this ticket's workspace.
+  const ts = (path) => expense?.tenant_id
+    ? path + (path.includes('?') ? '&' : '?') + 'tenant=' + expense.tenant_id
+    : scoped(path);
   const fetchVendors = useCallback(async (q) => {
-    const rows = await api(scoped(`/suggest/vendors?q=${encodeURIComponent(q)}`));
+    const rows = await api(ts(`/suggest/vendors?q=${encodeURIComponent(q)}`));
     return rows.map((r) => ({ label: r.vendor || r.label, sub: r.sub || '' }));
-  }, [tenant]);
+  }, [tenant]); // eslint-disable-line react-hooks/exhaustive-deps
   const fetchItems = useCallback(async (q) => {
-    try { return (await api(scoped(`/suggest/expense-items?q=${encodeURIComponent(q)}`))).map((r) => ({ label: r.label })); }
+    try { return (await api(ts(`/suggest/expense-items?q=${encodeURIComponent(q)}`))).map((r) => ({ label: r.label })); }
     catch { return []; }
-  }, [tenant]);
+  }, [tenant]); // eslint-disable-line react-hooks/exhaustive-deps
   const [f, setF] = useState({
     category: expense?.category || categories[0] || 'OTHER',
     description: expense?.description || '',
@@ -49,7 +53,7 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     setSaving(true);
     try {
       const body = { ...f, items, amount: total };
-      if (expense?.id) await api(scoped(`/expenses/${expense.id}`), { method: 'PATCH', body });
+      if (expense?.id) await api(ts(`/expenses/${expense.id}`), { method: 'PATCH', body });
       else await api(scoped('/expenses'), { method: 'POST', body });
       toast('Saved ✓', 'ok'); onSave(); onClose();
     } catch (e) { toast(e.message, 'err'); }
@@ -65,15 +69,15 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
   const balance = Math.max(0, Math.round((billed - paid) * 100) / 100);
   const loadPayments = useCallback(async () => {
     if (!expense?.id) return;
-    try { setPayments(await api(scoped(`/expenses/${expense.id}/payments`))); } catch { /* ignore */ }
-  }, [expense?.id]);
+    try { setPayments(await api(ts(`/expenses/${expense.id}/payments`))); } catch { /* ignore */ }
+  }, [expense?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { loadPayments(); }, [loadPayments]);
   const recordPayment = async () => {
     const amt = +payForm.amount || 0;
     if (!(amt > 0)) return toast('Enter an amount', 'err');
     setPaying(true);
     try {
-      const r = await api(scoped(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, date: payForm.date, method: payForm.method || null, bank: payForm.bank || null, memo: payForm.memo || null } });
+      const r = await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, date: payForm.date, method: payForm.method || null, bank: payForm.bank || null, memo: payForm.memo || null } });
       setPaid(r.amount_paid); setPayForm(null); loadPayments(); onSave && onSave();
       toast(r.status === 'PAID' ? 'Fully paid ✓' : 'Payment recorded ✓', 'ok');
     } catch (e) { toast(e.message || 'Payment failed', 'err'); }
@@ -280,6 +284,11 @@ function PayablesView({ onOpenExpense }) {
 // View-first detail: read the ticket, attach receipts/notes, then choose to edit.
 function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const { toast, confirm } = useStore();
+  // Pin every request to THIS expense's workspace so the detail + approval flow
+  // works from the combined Group view too (no single active tenant there).
+  const ts = (path) => expense.tenant_id
+    ? path + (path.includes('?') ? '&' : '?') + 'tenant=' + expense.tenant_id
+    : scoped(path);
   const [pays, setPays] = useState([]);
   const [atts, setAtts] = useState([]);
   const [note, setNote] = useState('');
@@ -299,15 +308,15 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const siteName = (sites || []).find((s) => s.id === expense?.site_id)?.name;
 
   const loadPays = useCallback(async () => {
-    try { setPays(await api(scoped(`/expenses/${expense.id}/payments`))); } catch { /* ignore */ }
-  }, [expense.id]);
+    try { setPays(await api(ts(`/expenses/${expense.id}/payments`))); } catch { /* ignore */ }
+  }, [expense.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const loadAtts = useCallback(async () => {
-    try { setAtts(await api(scoped(`/expenses/${expense.id}/attachments`))); } catch { /* ignore */ }
-  }, [expense.id]);
+    try { setAtts(await api(ts(`/expenses/${expense.id}/attachments`))); } catch { /* ignore */ }
+  }, [expense.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const loadLog = useCallback(async () => {
-    try { const r = await api(scoped(`/expenses/${expense.id}/log`)); setWf(r.wf_state); setActions(r.actions || []); setLog(r.log || []); }
+    try { const r = await api(ts(`/expenses/${expense.id}/log`)); setWf(r.wf_state); setActions(r.actions || []); setLog(r.log || []); }
     catch { /* ignore */ }
-  }, [expense.id]);
+  }, [expense.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { loadPays(); loadAtts(); loadLog(); }, [loadPays, loadAtts, loadLog]);
 
   const runAction = async (action) => {
@@ -317,7 +326,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     }
     setActing(action);
     try {
-      const r = await api(scoped(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action, note: note2 } });
+      const r = await api(ts(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action, note: note2 } });
       setWf(r.wf_state); setActions(r.actions || []);
       loadLog();
       onChanged && onChanged();
@@ -334,7 +343,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       const fd = new FormData();
       if (file) fd.append('file', file);
       if (note.trim()) fd.append('note', note.trim());
-      await api(scoped(`/expenses/${expense.id}/attachments`), { method: 'POST', form: fd });
+      await api(ts(`/expenses/${expense.id}/attachments`), { method: 'POST', form: fd });
       setNote(''); setFile(null);
       const inp = document.getElementById('exp-att-file'); if (inp) inp.value = '';
       loadAtts();
@@ -355,7 +364,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   };
   const delAttachment = async (a) => {
     if (!await confirm({ title: 'Remove this receipt/note?', confirmText: 'Remove', danger: true })) return;
-    try { await api(scoped(`/expenses/${expense.id}/attachments/${a.id}`), { method: 'DELETE' }); loadAtts(); }
+    try { await api(ts(`/expenses/${expense.id}/attachments/${a.id}`), { method: 'DELETE' }); loadAtts(); }
     catch (e) { toast(e.message || 'Could not remove', 'err'); }
   };
 
@@ -535,7 +544,7 @@ export default function Expenses() {
     <div>
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={`seg-b${tab === 'list' ? ' on' : ''}`} onClick={() => setTab('list')}>💸 Expenses</button>
-        {!isGroup && <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash deposits</button>}
+        <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash deposits</button>
         {!isGroup && <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>}
       </div>
 
@@ -590,8 +599,8 @@ export default function Expenses() {
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {expenses.map((e) => (
-            <button key={e.id} onClick={() => { if (!isGroup) openDetail(e); }} disabled={isGroup}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: isGroup ? 'default' : 'pointer', textAlign: 'left' }}>
+            <button key={e.id} onClick={() => openDetail(e)}
+              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700 }}>{e.description || e.category} <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: (WF[e.wf_state] || WF.DRAFT).bg, color: (WF[e.wf_state] || WF.DRAFT).fg }}>{(WF[e.wf_state] || WF.DRAFT).label}</span>{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>

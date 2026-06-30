@@ -183,7 +183,7 @@ function Inner() {
         <div className="ptr" style={{ height: ptr, opacity: ptr ? 1 : 0 }}>
           <span className={`ptr-ic ${refreshing || ptr >= 70 ? 'go' : ''}`}>↻</span>
         </div>
-        {isGroup && tab !== 'dashboard' && tab !== 'expenses' ? (
+        {isGroup && tab !== 'dashboard' && tab !== 'expenses' && tab !== 'reports' ? (
           <div className="empty">
             <div className="ic">🏢</div>
             <p>This section works inside a single workspace. You’re viewing the Group roll-up — switch to Fido or Fiafia (top-left) to use it.</p>

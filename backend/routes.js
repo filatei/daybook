@@ -3117,6 +3117,112 @@ router.get('/group/customers.xlsx', requireAuth, async (req, res) => {
   } catch (e) { console.error('[group/customers.xlsx]', e.message); if (!res.headersSent) res.status(500).json({ error: e.message }); }
 });
 
+// ── YEAR-END ACCOUNT STATEMENT (Snr Accountant+ — finance-only, hidden from users)
+// Aggregates the year's sales, expenses, inventory and payroll into an income-
+// statement-style workbook that can be filed with NRS (FIRS) or handed to an
+// auditor. Prepared from Daybook records — subject to audit adjustment.
+router.get('/accounts/year-statement.xlsx', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  try {
+    const tid = req.ctx.tenant_id;
+    const year = String(req.query.year || new Date().getFullYear()).slice(0, 4);
+    const y0 = `${year}-01-01`, y1 = `${year}-12-31`;
+    const tenant = await tenantById(tid);
+    const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+    // Revenue (net of incentive/free goods) + incentive memo.
+    const rev = await qone(
+      `SELECT COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN total ELSE 0 END),0) net,
+              COALESCE(SUM(CASE WHEN payment_method='INCENTIVE' THEN total ELSE 0 END),0) incentive,
+              COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN 1 ELSE 0 END),0) orders
+         FROM pos_sales WHERE tenant_id=? AND sale_date>=? AND sale_date<=?`, [tid, y0, y1]);
+    const byMonth = await qall(
+      `SELECT SUBSTR(sale_date,1,7) AS "mon", COALESCE(SUM(total),0) net
+         FROM pos_sales WHERE tenant_id=? AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE'
+         GROUP BY 1 ORDER BY 1`, [tid, y0, y1]);
+    // Revenue by product (items_json is TEXT — aggregate in JS).
+    const prodRows = await qall(`SELECT items_json FROM pos_sales WHERE tenant_id=? AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE'`, [tid, y0, y1]);
+    const prod = {};
+    for (const r of prodRows) for (const it of J(r.items_json, [])) { const k = (it.name || 'Unknown').trim() || 'Unknown'; prod[k] = prod[k] || { qty: 0, amount: 0 }; prod[k].qty += Number(it.qty) || 0; prod[k].amount += Number(it.amount) || 0; }
+    const byProduct = Object.entries(prod).map(([name, v]) => ({ name, qty: v.qty, amount: v.amount })).sort((a, b) => b.amount - a.amount);
+
+    // Expenses by category (staff salaries handled via payroll below — excluded here to avoid double count).
+    const exRows = await qall(
+      `SELECT COALESCE(NULLIF(TRIM(category),''),'UNCATEGORISED') cat, COALESCE(kind,'NON_IMPREST') kind, COALESCE(SUM(amount),0) total
+         FROM expenses WHERE tenant_id=? AND expense_date>=? AND expense_date<=? GROUP BY 1,2 ORDER BY total DESC`, [tid, y0, y1]);
+    const isSalaryCat = (c) => /SALAR|WAGE|PAYROLL/i.test(c || '');
+    const opexTotal = exRows.filter((r) => !isSalaryCat(r.cat)).reduce((a, r) => a + Number(r.total), 0);
+    const salaryInExpenses = exRows.filter((r) => isSalaryCat(r.cat)).reduce((a, r) => a + Number(r.total), 0);
+
+    // Payroll (staff cost) + statutory memos.
+    const pay = await qone(`SELECT COALESCE(SUM(total_gross),0) gross, COALESCE(SUM(total_net),0) net, COALESCE(SUM(total_deductions),0) ded FROM pay_runs WHERE tenant_id=? AND period_from>=? AND period_from<=?`, [tid, y0, y1]);
+    const staffCost = Math.max(Number(pay.gross) || 0, salaryInExpenses);   // avoid double count; use the larger, disclosed
+    const nsitf = money(staffCost * 0.01);
+    const itf = money(staffCost * 0.01);
+    const pensionEmployer = money(staffCost * 0.10);
+
+    // Depreciation — straight-line 20%/yr on generator/asset cost.
+    const asset = await qone(`SELECT COALESCE(SUM(purchase_cost),0) cost FROM generators WHERE tenant_id=? AND status<>'RETIRED'`, [tid]);
+    const assetCost = Number(asset.cost) || 0;
+    const depreciation = money(assetCost * 0.20);
+
+    const revenue = Number(rev.net) || 0;
+    const netProfit = money(revenue - opexTotal - staffCost - depreciation);
+
+    // Tax computation memo — small-company test (NRS / Nigeria Tax Act 2025).
+    const smallCompany = revenue <= 100000000 && assetCost <= 250000000;
+    const indicativeCIT = smallCompany ? 0 : money(Math.max(0, netProfit) * 0.30);
+    const devLevy = smallCompany ? 0 : money(Math.max(0, netProfit) * 0.04);
+
+    const sheets = {
+      Cover: [
+        [`${tenant?.name || 'Company'} — Account Statement`],
+        ['Financial year', year], ['Currency', 'NGN (₦)'],
+        ['Basis', 'Management accounts prepared from Daybook records — subject to audit adjustment'],
+        ['Tax authority', 'Nigeria Revenue Service (NRS, formerly FIRS)'],
+        [], ['Prepared', new Date().toISOString().slice(0, 10)],
+        ['Note', 'Not a substitute for a chartered accountant / auditor. Figures to be reviewed and certified before filing.'],
+      ],
+      'Income Statement': [
+        ['Line', 'Amount (₦)'],
+        ['Revenue (net of free/incentive goods)', revenue],
+        ['Less: Operating & production expenses', -opexTotal],
+        ['Less: Staff costs (payroll)', -staffCost],
+        ['Less: Depreciation (assets, 20% SL)', -depreciation],
+        ['Net profit before tax', netProfit],
+        [],
+        ['Memo — Free/incentive goods given (not revenue)', Number(rev.incentive) || 0],
+        ['Memo — Sales orders (count)', parseInt(rev.orders, 10)],
+      ],
+      'Revenue by month': [['Month', 'Net sales (₦)'], ...byMonth.map((r) => [r.mon, money(r.net)])],
+      'Revenue by product': [['Product', 'Qty', 'Amount (₦)'], ...byProduct.map((p) => [p.name, p.qty, money(p.amount)])],
+      Expenses: [['Category', 'Type', 'Total (₦)'], ...exRows.map((r) => [r.cat, r.kind, money(r.total)]), [], ['Operating expenses (excl. salaries)', '', opexTotal]],
+      'Payroll & statutory': [
+        ['Item', 'Amount (₦)'],
+        ['Total gross payroll (year)', staffCost],
+        ['Total net paid', money(pay.net)],
+        ['Total deductions', money(pay.ded)],
+        [],
+        ['NSITF (1% of payroll — employer cost)', nsitf],
+        ['ITF (1% of payroll — annual)', itf],
+        ['Employer pension (10% — memo)', pensionEmployer],
+      ],
+      'Tax computation': [
+        ['Test / line', 'Value'],
+        ['Turnover (revenue)', revenue],
+        ['Fixed assets (approx — generators/plant)', assetCost],
+        ['Small-company thresholds', 'Turnover ≤ ₦100m AND assets ≤ ₦250m'],
+        ['Small company?', smallCompany ? 'YES — exempt from CIT, CGT & Development Levy' : 'NO — CIT/Development Levy may apply'],
+        ['Net profit before tax', netProfit],
+        ['Indicative CIT (30%) — confirm with adviser', indicativeCIT],
+        ['Indicative Development Levy (4%) — confirm with adviser', devLevy],
+        [],
+        ['Note', 'Even if CIT-exempt, file the annual return to claim small-company status; PAYE, NSITF, ITF and pension still apply. Water/basic food are typically VAT-exempt.'],
+      ],
+    };
+    sendWorkbook(res, sheets, `account_statement_${(tenant?.slug || 'company')}_${year}.xlsx`);
+  } catch (e) { console.error('[accounts/year-statement]', e.message); if (!res.headersSent) res.status(500).json({ error: e.message }); }
+});
+
 router.get('/group/report/prefill', requireAuth, async (req, res) => {
   const date = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
   const data = await buildGroupPrefill(req.user, date);

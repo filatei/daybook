@@ -2,8 +2,9 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 
-const TYPES = ['LICENSE', 'CERTIFICATE', 'PERMIT', 'LETTER', 'OTHER'];
-const TYPE_ICON = { LICENSE: '📜', CERTIFICATE: '🎖️', PERMIT: '🪪', LETTER: '✉️', OTHER: '📁' };
+const TYPES = ['LICENSE', 'CERTIFICATE', 'PERMIT', 'TAX_FILING', 'NSITF', 'ITF', 'PENSION', 'PAYE', 'NAFDAC', 'SON', 'ENVIRONMENTAL', 'WASTE', 'COUNCIL', 'LETTER', 'OTHER'];
+const TYPE_ICON = { LICENSE: '📜', CERTIFICATE: '🎖️', PERMIT: '🪪', TAX_FILING: '🧾', NSITF: '🛡️', ITF: '🎓', PENSION: '👵', PAYE: '💼', NAFDAC: '💊', SON: '✅', ENVIRONMENTAL: '🌱', WASTE: '♻️', COUNCIL: '🏛️', LETTER: '✉️', OTHER: '📁' };
+const typeLabel = (t) => t.split('_').map((w) => w.charAt(0) + w.slice(1).toLowerCase()).join(' ');
 const STATUS = {
   EXPIRED: { bg: '#fee2e2', fg: '#991b1b', label: 'Expired' },
   EXPIRING: { bg: '#fef3c7', fg: '#92400e', label: 'Expiring' },
@@ -15,7 +16,7 @@ const statusText = (d) => d.status === 'EXPIRED' ? 'Expired' : d.status === 'EXP
 function ComplianceForm({ doc, sites, siteBound, onSaved, onClose }) {
   const { toast } = useStore();
   const [f, setF] = useState({
-    doc_type: doc?.doc_type || 'LICENSE', title: doc?.title || '', issuer: doc?.issuer || '',
+    doc_type: doc?.doc_type || 'LICENSE', direction: doc?.direction || 'INBOUND', title: doc?.title || '', issuer: doc?.issuer || '',
     reference_no: doc?.reference_no || '', issue_date: doc?.issue_date || '', expiry_date: doc?.expiry_date || '',
     site_id: doc?.site_id || '', notes: doc?.notes || '',
   });
@@ -48,7 +49,14 @@ function ComplianceForm({ doc, sites, siteBound, onSaved, onClose }) {
         <div>
           <label className="fl">Type</label>
           <select className="input" value={f.doc_type} onChange={(e) => set('doc_type', e.target.value)}>
-            {TYPES.map((t) => <option key={t} value={t}>{TYPE_ICON[t]} {t.charAt(0) + t.slice(1).toLowerCase()}</option>)}
+            {TYPES.map((t) => <option key={t} value={t}>{TYPE_ICON[t]} {typeLabel(t)}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="fl">Direction</label>
+          <select className="input" value={f.direction} onChange={(e) => set('direction', e.target.value)}>
+            <option value="INBOUND">📥 Inbound — received from regulator</option>
+            <option value="OUTBOUND">📤 Outbound — filed / sent to regulator</option>
           </select>
         </div>
         {!siteBound && sites.length > 0 && (
@@ -104,12 +112,13 @@ export default function Compliance() {
   const canManage = role && atLeast(role, 'SITE_MANAGER');
   const siteBound = role && !atLeast(role, 'SNR_ACCOUNTANT');
   const [docs, setDocs] = useState(null);
-  const [filter, setFilter] = useState({ type: '', status: '' });
+  const [filter, setFilter] = useState({ type: '', status: '', direction: '' });
 
   const load = useCallback(() => {
     const p = new URLSearchParams();
     if (filter.type) p.set('type', filter.type);
     if (filter.status) p.set('status', filter.status);
+    if (filter.direction) p.set('direction', filter.direction);
     api(scoped(`/compliance?${p}`)).then((r) => setDocs(Array.isArray(r) ? r : [])).catch(() => setDocs([]));
   }, [tenant, filter]);
   useEffect(() => { load(); }, [load]);
@@ -138,12 +147,17 @@ export default function Compliance() {
         <div className="section-title" style={{ margin: 0 }}>🏛️ Compliance</div>
         {canManage && <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 14px' }} onClick={() => openForm()}>＋ Add</button>}
       </div>
-      <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>Government & regulator letters, licenses, certificates and permits — with expiry reminders.</p>
+      <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0 }}>Every document in &amp; out to/from regulators — tax filings, NSITF, ITF, pension, PAYE, NAFDAC, SON, environmental, waste &amp; council licenses, permits and letters — with expiry reminders.</p>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         <select className="input" style={{ flex: '1 1 140px' }} value={filter.type} onChange={(e) => setFilter((p) => ({ ...p, type: e.target.value }))}>
           <option value="">All types</option>
-          {TYPES.map((t) => <option key={t} value={t}>{TYPE_ICON[t]} {t.charAt(0) + t.slice(1).toLowerCase()}</option>)}
+          {TYPES.map((t) => <option key={t} value={t}>{TYPE_ICON[t]} {typeLabel(t)}</option>)}
+        </select>
+        <select className="input" style={{ flex: '1 1 140px' }} value={filter.direction} onChange={(e) => setFilter((p) => ({ ...p, direction: e.target.value }))}>
+          <option value="">In &amp; out</option>
+          <option value="INBOUND">📥 Inbound</option>
+          <option value="OUTBOUND">📤 Outbound</option>
         </select>
         <select className="input" style={{ flex: '1 1 140px' }} value={filter.status} onChange={(e) => setFilter((p) => ({ ...p, status: e.target.value }))}>
           <option value="">All statuses</option>
@@ -166,6 +180,7 @@ export default function Compliance() {
                     <button onClick={() => d.stored_name && download(d)} style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', textAlign: 'left', cursor: d.stored_name ? 'pointer' : 'default', padding: 0 }}>
                       <div style={{ fontWeight: 700 }}>{d.title}{d.stored_name ? ' ↓' : ''}</div>
                       <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                        {d.direction === 'OUTBOUND' ? '📤 ' : '📥 '}
                         {[d.issuer, d.reference_no, d.site_name || 'Company-wide'].filter(Boolean).join(' · ')}
                       </div>
                       <div style={{ fontSize: 11.5, marginTop: 3 }}>

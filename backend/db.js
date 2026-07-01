@@ -574,6 +574,9 @@ async function migrate() {
       created_at    BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
     );
     CREATE INDEX IF NOT EXISTS idx_compliance_tenant ON compliance_docs(tenant_id, expiry_date);
+    -- Regulator-docs vault: track whether a document was received from a regulator
+    -- (INBOUND) or filed/sent to one (OUTBOUND). Existing rows default to INBOUND.
+    ALTER TABLE compliance_docs ADD COLUMN IF NOT EXISTS direction TEXT DEFAULT 'INBOUND';
   `);
 
   // Cutover quarantine — fido orders rejected during migration (no usable

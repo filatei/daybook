@@ -34,7 +34,9 @@ const upload = multer({
   fileFilter: (_q, f, cb) => { const ok = ALLOWED.has(path.extname(f.originalname).toLowerCase()); cb(ok ? null : new Error('File type not allowed'), ok); },
 });
 
-const TYPES = ['LICENSE', 'CERTIFICATE', 'PERMIT', 'LETTER', 'OTHER'];
+const TYPES = ['LICENSE', 'CERTIFICATE', 'PERMIT', 'TAX_FILING', 'NSITF', 'ITF', 'PENSION', 'PAYE', 'NAFDAC', 'SON', 'ENVIRONMENTAL', 'WASTE', 'COUNCIL', 'LETTER', 'OTHER'];
+const DIRS = ['INBOUND', 'OUTBOUND'];
+const normDir = (v) => DIRS.includes(String(v || '').toUpperCase()) ? String(v).toUpperCase() : 'INBOUND';
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
 const daysTo = (d) => { if (!d) return null; const ms = new Date(`${d}T00:00:00`).getTime() - new Date(`${today()}T00:00:00`).getTime(); return Math.round(ms / 86400000); };
 const statusOf = (days) => days == null ? 'NO_EXPIRY' : days < 0 ? 'EXPIRED' : days <= 30 ? 'EXPIRING' : 'VALID';
@@ -60,6 +62,7 @@ router.get('/', requireAuth, async (req, res) => {
   if (siteBound(c)) { where.push('(site_id=? OR site_id IS NULL)'); args.push(c.site_id); }
   else if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
   if (req.query.type) { where.push('doc_type=?'); args.push(String(req.query.type).toUpperCase()); }
+  if (req.query.direction) { where.push('direction=?'); args.push(normDir(req.query.direction)); }
   const rows = await qall(
     `SELECT d.*, s.name site_name, u.name uploader FROM compliance_docs d
        LEFT JOIN sites s ON s.id=d.site_id LEFT JOIN users u ON u.id=d.uploaded_by
@@ -79,9 +82,9 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
   const f = req.file;
   const id = uuid();
   await qrun(
-    `INSERT INTO compliance_docs (id,tenant_id,site_id,doc_type,title,issuer,reference_no,issue_date,expiry_date,notes,file_name,stored_name,mime,size,uploaded_by)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [id, c.tenant_id, site_id, doc_type, String(b.title).trim(), b.issuer || null, b.reference_no || null,
+    `INSERT INTO compliance_docs (id,tenant_id,site_id,doc_type,direction,title,issuer,reference_no,issue_date,expiry_date,notes,file_name,stored_name,mime,size,uploaded_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, c.tenant_id, site_id, doc_type, normDir(b.direction), String(b.title).trim(), b.issuer || null, b.reference_no || null,
       b.issue_date || null, b.expiry_date || null, b.notes || null,
       f ? f.originalname : null, f ? f.filename : null, f ? f.mimetype : null, f ? f.size : null, req.user.id]);
   res.status(201).json(view(await qone('SELECT * FROM compliance_docs WHERE id=?', [id])));
@@ -97,9 +100,10 @@ router.patch('/:id', requireAuth, async (req, res) => {
   const newExpiry = b.expiry_date !== undefined ? (b.expiry_date || null) : d.expiry_date;
   // If the expiry moved later, clear the reminder stage so future alerts fire.
   const reset = (newExpiry && newExpiry !== d.expiry_date && daysTo(newExpiry) > 0) ? 0 : d.reminded_stage;
+  const direction = b.direction !== undefined ? normDir(b.direction) : d.direction;
   await qrun(
-    `UPDATE compliance_docs SET doc_type=?, title=?, issuer=?, reference_no=?, issue_date=?, expiry_date=?, notes=?, site_id=?, reminded_stage=? WHERE id=?`,
-    [doc_type, b.title ?? d.title, b.issuer ?? d.issuer, b.reference_no ?? d.reference_no,
+    `UPDATE compliance_docs SET doc_type=?, direction=?, title=?, issuer=?, reference_no=?, issue_date=?, expiry_date=?, notes=?, site_id=?, reminded_stage=? WHERE id=?`,
+    [doc_type, direction, b.title ?? d.title, b.issuer ?? d.issuer, b.reference_no ?? d.reference_no,
       b.issue_date !== undefined ? (b.issue_date || null) : d.issue_date, newExpiry, b.notes ?? d.notes,
       siteBound(c) ? d.site_id : (b.site_id !== undefined ? (b.site_id || null) : d.site_id), reset, d.id]);
   res.json(view(await qone('SELECT * FROM compliance_docs WHERE id=?', [d.id])));

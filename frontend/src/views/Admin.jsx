@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { api, scoped, ngn } from '../api.js';
+import { api, scoped, ngn, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast, ROLE_LABELS } from '../store.jsx';
 
 function SiteForm({ site, onSave, onClose }) {
@@ -553,6 +553,40 @@ function BankAccountsTab() {
   );
 }
 
+// Finance-only (Snr Accountant+). Turns the year's sales/expenses/payroll/assets
+// into a management-accounts workbook fileable with NRS (FIRS) or given to an auditor.
+function AccountsTab() {
+  const { toast } = useStore();
+  const now = new Date().getFullYear();
+  const years = [now, now - 1, now - 2, now - 3];
+  const [year, setYear] = useState(now);
+  const [busy, setBusy] = useState(false);
+  const download = async () => {
+    setBusy(true);
+    try { await downloadFile(scoped(`/accounts/year-statement.xlsx?year=${year}`), `account_statement_${year}.xlsx`); }
+    catch (e) { toast(e.message || 'Download failed', 'err'); }
+    setBusy(false);
+  };
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 12px' }}>
+        Year-end <b>Account Statement</b> — an income statement with revenue, expenses, payroll and
+        statutory (NSITF/ITF/pension) memos plus a small-company tax test. Prepared from Daybook
+        records; review with your accountant before filing with NRS (FIRS). Snr Accountant, GM &amp; Admin only.
+      </p>
+      <div className="card" style={{ padding: 16 }}>
+        <label style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Financial year</label>
+        <select value={year} onChange={(e) => setYear(Number(e.target.value))} style={{ display: 'block', width: '100%', margin: '6px 0 14px', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--line)' }}>
+          {years.map((y) => <option key={y} value={y}>{y}</option>)}
+        </select>
+        <button className="btn btn-primary" onClick={download} disabled={busy}>
+          {busy ? 'Preparing…' : `⬇️ Download ${year} Account Statement (.xlsx)`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Admin() {
   const { openModal, closeModal, toast, tenant, tenants, confirm } = useStore();
   const role = useRole();
@@ -646,10 +680,11 @@ export default function Admin() {
         {isGM && <button className={`seg-b${tab === 'products' ? ' on' : ''}`} onClick={() => setTab('products')}>🛒 Products</button>}
         {isSnr && <button className={`seg-b${tab === 'reportmail' ? ' on' : ''}`} onClick={() => setTab('reportmail')}>📧 Report emails</button>}
         {isSnr && <button className={`seg-b${tab === 'banks' ? ' on' : ''}`} onClick={() => setTab('banks')}>🏦 Bank accounts</button>}
+        {isSnr && <button className={`seg-b${tab === 'accounts' ? ' on' : ''}`} onClick={() => setTab('accounts')}>📒 Accounts</button>}
         {isAdmin && <button className={`seg-b${tab === 'settings' ? ' on' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>}
       </div>
 
-      {tab === 'banks' ? <BankAccountsTab /> : tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
+      {tab === 'accounts' ? <AccountsTab /> : tab === 'banks' ? <BankAccountsTab /> : tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

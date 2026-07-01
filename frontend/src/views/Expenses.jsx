@@ -398,6 +398,12 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
         {canDelete && <button className="btn btn-ghost" style={{ width: 'auto', padding: '4px 8px', color: 'var(--err)' }} disabled={busy} onClick={del} title="Delete this unpaid expense">🗑</button>}
       </div>
 
+      {expense.kind === 'IMPREST' && (
+        <div style={{ fontSize: 11.5, color: 'var(--muted)', margin: '8px 0 0' }}>
+          Cash-at-hand — Snr Accountant & GM can approve, then Pay to close.
+        </div>
+      )}
+
       {/* Lifecycle actions — server decides which the current user may run */}
       {actions.length > 0 && (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0 2px' }}>
@@ -554,7 +560,12 @@ function AIExpenseModal({ onCreated, onClose }) {
 }
 
 export default function Expenses() {
-  const { openModal, closeModal, tenant, sites, isGroup, groupTenants } = useStore();
+  const { openModal, closeModal, toast, tenant, sites, isGroup, groupTenants } = useStore();
+  const role = useRole();
+  const canBulk = role && atLeast(role, 'SNR_ACCOUNTANT');   // Snr Accountant / GM / Admin
+  const [selMode, setSelMode] = useState(false);
+  const [sel, setSel] = useState(() => new Set());
+  const [bulking, setBulking] = useState(false);
   const [expenses, setExpenses] = useState([]);
   const [categories, setCategories] = useState(CATS.map((c) => c.toUpperCase()));
   const [loading, setLoading] = useState(true);
@@ -636,10 +647,33 @@ export default function Expenses() {
     const q = search.trim().toLowerCase();
     if (!q) return expenses;
     return expenses.filter((e) => [
-      e.ext_id, String(e.id || '').slice(0, 8), e.vendor, e.site_name, e.description, e.category, e.tenant_name,
+      e.ext_id, String(e.id || '').slice(0, 8), e.vendor, e.site_name, e.description, e.category, e.tenant_name, e.items_json,
     ].some((v) => (v || '').toString().toLowerCase().includes(q)));
   })();
   const total = shown.reduce((s, e) => s + (+e.amount || 0), 0);
+
+  // Group the (filtered) list by workflow status, in lifecycle order.
+  const STATE_ORDER = ['DRAFT', 'VALIDATED', 'REVIEWED', 'APPROVED', 'PAID', 'DELIVERED', 'DECLINED'];
+  const NEXT = { DRAFT: 'validate', VALIDATED: 'review', REVIEWED: 'approve', APPROVED: 'pay', PAID: 'deliver' };
+  const groups = STATE_ORDER
+    .map((st) => ({ state: st, rows: shown.filter((e) => (e.wf_state || 'DRAFT') === st) }))
+    .filter((g) => g.rows.length);
+
+  const toggleSel = (id) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleGroup = (rows) => setSel((s) => { const n = new Set(s); const all = rows.every((r) => n.has(r.id)); rows.forEach((r) => (all ? n.delete(r.id) : n.add(r.id))); return n; });
+  const selCount = (rows) => rows.reduce((a, r) => a + (sel.has(r.id) ? 1 : 0), 0);
+  const bulkApply = async (state, rows) => {
+    const action = NEXT[state]; if (!action) return;
+    const ids = rows.filter((r) => sel.has(r.id)).map((r) => r.id);
+    if (!ids.length) return toast('Select at least one ticket', 'err');
+    setBulking(true);
+    try {
+      const r = await api('/expenses/bulk-transition', { method: 'POST', body: { ids, action } });
+      toast(`${r.moved} moved${r.skipped ? ` · ${r.skipped} skipped` : ''}`, r.moved ? 'ok' : 'err');
+      setSel(new Set()); load();
+    } catch (e) { toast(e.message || 'Bulk action failed', 'err'); }
+    setBulking(false);
+  };
 
   return (
     <div>
@@ -670,9 +704,9 @@ export default function Expenses() {
           onChange={(e) => setFilter((p) => ({ ...p, to: e.target.value }))} />
       </div>
 
-      {/* Free-text search — id / vendor / site (works across tenants in Group) */}
+      {/* Free-text search — id / vendor / site / description / item names */}
       <input className="input" style={{ marginBottom: 12 }} value={search} onChange={(e) => setSearch(e.target.value)}
-        placeholder="🔍 Search by expense ID, vendor or site…" />
+        placeholder="🔍 Search by ID, vendor, site, description or item…" />
 
       {/* AI: type or speak an expense in plain English */}
       {!isGroup && (
@@ -699,8 +733,15 @@ export default function Expenses() {
       )}
 
       {!loading && shown.length > 0 && (
-        <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
+        <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 16px' }}>
           <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{shown.length} expense{shown.length === 1 ? '' : 's'}{search.trim() ? ' matched' : ''}</span>
+          <span style={{ flex: 1 }} />
+          {canBulk && (
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+              onClick={() => { setSelMode((v) => !v); setSel(new Set()); }}>
+              {selMode ? '✕ Done' : '☑︎ Select'}
+            </button>
+          )}
           <span style={{ fontWeight: 800, fontSize: 18 }}>{ngn(total)}</span>
         </div>
       )}
@@ -710,21 +751,54 @@ export default function Expenses() {
       ) : shown.length === 0 ? (
         <div className="empty"><div className="ic">💸</div><p>{search.trim() ? `No expenses match “${search.trim()}”` : 'No expenses found'}</p></div>
       ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {shown.map((e) => (
-            <button key={e.id} onClick={() => openDetail(e)}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
-              <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{e.description || e.category} <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: (WF[e.wf_state] || WF.DRAFT).bg, color: (WF[e.wf_state] || WF.DRAFT).fg }}>{(WF[e.wf_state] || WF.DRAFT).label}</span>{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>
-                <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  #{e.ext_id || String(e.id).slice(0, 6)} · {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{isGroup && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
-                </div>
+        groups.map((g) => {
+          const wf = WF[g.state] || WF.DRAFT;
+          const gTotal = g.rows.reduce((a, r) => a + (+r.amount || 0), 0);
+          const nextAct = NEXT[g.state];
+          const nSel = selCount(g.rows);
+          return (
+            <div key={g.state} style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px 6px' }}>
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: wf.bg, color: wf.fg }}>{wf.label}</span>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{g.rows.length} · {ngn(gTotal)}</span>
+                <span style={{ flex: 1 }} />
+                {canBulk && selMode && (
+                  <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }} onClick={() => toggleGroup(g.rows)}>
+                    {g.rows.every((r) => sel.has(r.id)) ? 'Clear' : 'All'}
+                  </button>
+                )}
+                {canBulk && selMode && nextAct && (
+                  <button className="btn btn-sm" style={{ width: 'auto', padding: '3px 12px' }} disabled={bulking || nSel === 0}
+                    onClick={() => bulkApply(g.state, g.rows)}>
+                    {bulking ? <span className="spin" /> : `${WF_ACTION[nextAct]?.label || nextAct} (${nSel})`}
+                  </button>
+                )}
               </div>
-              <div style={{ fontWeight: 800 }}>{ngn(e.amount)}</div>
-            </button>
-          ))}
-        </div>
+              <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                {g.rows.map((e) => (
+                  <div key={e.id} style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--line)' }}>
+                    {canBulk && selMode && (
+                      <label style={{ padding: '0 2px 0 14px', display: 'flex', alignItems: 'center', cursor: 'pointer' }} onClick={(ev) => ev.stopPropagation()}>
+                        <input type="checkbox" checked={sel.has(e.id)} onChange={() => toggleSel(e.id)} style={{ width: 18, height: 18 }} />
+                      </label>
+                    )}
+                    <button onClick={() => (selMode ? toggleSel(e.id) : openDetail(e))}
+                      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', flex: 1, minWidth: 0, cursor: 'pointer', textAlign: 'left' }}>
+                      <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 700 }}>{e.description || e.category}{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>
+                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                          #{e.ext_id || String(e.id).slice(0, 6)} · {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{isGroup && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
+                        </div>
+                      </div>
+                      <div style={{ fontWeight: 800 }}>{ngn(e.amount)}</div>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })
       )}
       </>
       )}

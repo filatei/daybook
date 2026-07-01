@@ -76,8 +76,9 @@ router.get('/', requireAuth, async (req, res) => {
   const qq = (q || '').trim();
   if (qq) {
     const like = `%${qq}%`;
-    where.push('(e.ext_id ILIKE ? OR e.vendor ILIKE ? OR s.name ILIKE ? OR e.description ILIKE ? OR e.category ILIKE ? OR e.id ILIKE ?)');
-    args.push(like, like, like, like, like, like);
+    // Search id / vendor / site / description / category / item names (items_json).
+    where.push('(e.ext_id ILIKE ? OR e.vendor ILIKE ? OR s.name ILIKE ? OR e.description ILIKE ? OR e.category ILIKE ? OR e.id ILIKE ? OR e.items_json ILIKE ?)');
+    args.push(like, like, like, like, like, like, like);
   } else {
     if (from) { where.push('e.expense_date>=?'); args.push(from); }
     if (to)   { where.push('e.expense_date<=?'); args.push(to); }
@@ -395,14 +396,20 @@ router.delete('/:id/attachments/:aid', requireAuth, async (req, res) => {
 // ── Ticket lifecycle (Fido) — DRAFT→VALIDATED→REVIEWED→APPROVED→PAID→DELIVERED / DECLINED ──
 // allow(ctx, expense, uid) decides who may run each transition.
 const isCreator = (e, uid) => e.recorded_by === uid;
+// Imprest = paid from cash at hand (e.g. diesel). These can be approved/declined
+// by Snr Accountant & GM (atLeast SNR_ACCOUNTANT covers Snr Acct=GM=7, Admin=8+),
+// then paid to close. Every other (non-imprest) expense still needs ADMIN approval.
+const isImprest = (e) => String(e.kind || 'NON_IMPREST').toUpperCase() === 'IMPREST';
+const approveRole = (e) => (isImprest(e) ? 'SNR_ACCOUNTANT' : 'ADMIN');
 const FLOW = {
   // Creator OR a secretary validates a draft (confirms what was entered).
   validate: { from: ['DRAFT'], to: 'VALIDATED', allow: (c, e, uid) => isCreator(e, uid) || atLeast(c.role, 'SECRETARY') },
   // A manager reviews a validated ticket and sends it for approval.
   review:   { from: ['VALIDATED'], to: 'REVIEWED', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
-  // Admins approve or decline a reviewed ticket.
-  approve:  { from: ['REVIEWED'], to: 'APPROVED', allow: (c) => atLeast(c.role, 'ADMIN') },
-  decline:  { from: ['REVIEWED'], to: 'DECLINED', allow: (c) => atLeast(c.role, 'ADMIN') },
+  // Approve/decline a reviewed ticket: imprest (cash-at-hand) → Snr Accountant/GM;
+  // everything else → Admin.
+  approve:  { from: ['REVIEWED'], to: 'APPROVED', allow: (c, e) => atLeast(c.role, approveRole(e)) },
+  decline:  { from: ['REVIEWED'], to: 'DECLINED', allow: (c, e) => atLeast(c.role, approveRole(e)) },
   // Managers / Accountants / GM / Snr Acct / Admin pay (then attach the receipt).
   pay:      { from: ['APPROVED'], to: 'PAID', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
   // Mark the cash handed to the receiver.
@@ -418,24 +425,63 @@ function allowedActions(state, ctx, expense, uid) {
     .map(([k]) => k);
 }
 
-router.post('/:id/transition', requireAuth, async (req, res) => {
-  const a = await expenseAccess(req, req.params.id);
-  if (!a) return res.status(404).json({ error: 'not found' });
-  const action = String((req.body && req.body.action) || '').toLowerCase();
+// Run one transition on one accessible ticket. Returns { ok, to } or { error, code }.
+async function performTransition(a, action, req, note = null) {
   const f = FLOW[action];
-  if (!f) return res.status(400).json({ error: 'unknown action' });
+  if (!f) return { error: 'unknown action', code: 400 };
   const cur = a.expense.wf_state || 'DRAFT';
-  if (!f.from.includes(cur)) return res.status(409).json({ error: `cannot ${action} from ${cur}` });
-  if (!f.allow(a.ctx, a.expense, req.user.id)) return res.status(403).json({ error: `you cannot ${action} this ticket` });
-  const note = (req.body && req.body.note ? String(req.body.note) : '').trim() || null;
+  if (!f.from.includes(cur)) return { error: `cannot ${action} from ${cur}`, code: 409 };
+  if (!f.allow(a.ctx, a.expense, req.user.id)) return { error: `you cannot ${action} this ticket`, code: 403 };
   await qrun('UPDATE expenses SET wf_state=? WHERE id=?', [f.to, a.expense.id]);
+  // Paying an imprest (cash-at-hand) ticket closes it: settle the outstanding
+  // balance with a CASH payment so it shows fully paid (and the GL/vendor
+  // balances reflect the cash going out).
+  if (action === 'pay' && isImprest(a.expense)) {
+    const total = +a.expense.amount || 0;
+    const already = +a.expense.amount_paid || 0;
+    const remaining = Math.max(0, Math.round((total - already) * 100) / 100);
+    if (remaining > 0.001) {
+      await qrun('INSERT INTO expense_payments (id,tenant_id,expense_id,pay_date,amount,method,memo,paid_by) VALUES (?,?,?,?,?,?,?,?)',
+        [uuid(), a.expense.tenant_id, a.expense.id, new Date().toISOString().slice(0, 10), remaining, 'CASH', 'Imprest cash — closed on pay', req.user.id]);
+      await qrun('UPDATE expenses SET amount_paid=?, status=? WHERE id=?', [total, 'PAID', a.expense.id]);
+    }
+  }
   await qrun(
     `INSERT INTO expense_wf_log (id,tenant_id,expense_id,action,from_state,to_state,note,actor,actor_name)
      VALUES (?,?,?,?,?,?,?,?,?)`,
     [uuid(), a.expense.tenant_id, a.expense.id, action, cur, f.to, note, req.user.id, req.user.name || req.user.email || null]);
-  // Notify whoever must action the ticket next (+ managers always).
   notifyExpenseEvent({ tenant_id: a.expense.tenant_id, expense: { ...a.expense, wf_state: f.to }, targetState: f.to, action, actorId: req.user.id, actorName: req.user.name || req.user.email });
-  res.json({ wf_state: f.to, actions: allowedActions(f.to, a.ctx, { ...a.expense, wf_state: f.to }, req.user.id) });
+  return { ok: true, to: f.to };
+}
+
+router.post('/:id/transition', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const action = String((req.body && req.body.action) || '').toLowerCase();
+  const note = (req.body && req.body.note ? String(req.body.note) : '').trim() || null;
+  const r = await performTransition(a, action, req, note);
+  if (r.error) return res.status(r.code || 400).json({ error: r.error });
+  res.json({ wf_state: r.to, actions: allowedActions(r.to, a.ctx, { ...a.expense, wf_state: r.to }, req.user.id) });
+});
+
+// Bulk apply one transition to many tickets (Admin/Snr/GM select several in a
+// status and push them all to the next state). Per-ticket permission + state is
+// still enforced; the response reports what moved and what was skipped.
+router.post('/bulk-transition', requireAuth, async (req, res) => {
+  const b = req.body || {};
+  const ids = Array.isArray(b.ids) ? b.ids.slice(0, 500) : [];
+  const action = String(b.action || '').toLowerCase();
+  const note = (b.note ? String(b.note) : '').trim() || null;
+  if (!ids.length) return res.status(400).json({ error: 'no tickets selected' });
+  if (!FLOW[action]) return res.status(400).json({ error: 'unknown action' });
+  const done = [], skipped = [];
+  for (const id of ids) {
+    const a = await expenseAccess(req, id);
+    if (!a) { skipped.push({ id, reason: 'not found / no access' }); continue; }
+    const r = await performTransition(a, action, req, note);
+    if (r.ok) done.push(id); else skipped.push({ id, reason: r.error });
+  }
+  res.json({ action, moved: done.length, skipped: skipped.length, done, skippedDetail: skipped });
 });
 
 // Lifecycle audit trail + the actions the caller may run right now.

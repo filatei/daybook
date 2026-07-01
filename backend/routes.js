@@ -2660,9 +2660,9 @@ router.get('/pos/recent', requireAuth, async (req, res) => {
   }
   const where = ['p.tenant_id=?', 'p.sale_date=?'], args = [s.ctx.tenant_id, date];
   if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); }
-  const rows = await qall(`SELECT p.id, p.receipt_no, p.total amount, p.payment_method, p.customer_name customer, s.name site, p.created_at
+  const rows = await qall(`SELECT p.id, p.receipt_no, p.total amount, p.payment_method, p.customer_name customer, s.name site, p.created_at, p.sale_date
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT ${limit}`, args);
-  res.json(rows.map((r) => ({ id: String(r.id), receipt_no: r.receipt_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, at: r.created_at })));
+  res.json(rows.map((r) => ({ id: String(r.id), receipt_no: r.receipt_no, site: r.site || '', customer: r.customer || null, amount: Number(r.amount), payment_method: r.payment_method, at: r.created_at, sale_date: r.sale_date })));
 });
 
 // Individual orders for a date range + site (drill-down from the Reports POS
@@ -2695,9 +2695,9 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
     if (customer === 'null' || customer === 'WALKIN' || customer === 'Walk-in') where.push("COALESCE(NULLIF(TRIM(p.customer_name),''),'')=''");
     else { where.push('LOWER(TRIM(p.customer_name))=LOWER(?)'); args.push(String(customer).trim()); }
   }
-  const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at
+  const rows = await qall(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at, p.sale_date
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 800`, args);
-  res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at })));
+  res.json(rows.map((r) => ({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at, sale_date: r.sale_date })));
 });
 
 // Non-cash sales broken down by POS terminal / transfer bank (dashboard drill).
@@ -2738,11 +2738,11 @@ router.get('/pos/orders/:id', requireAuth, async (req, res) => {
       }
     } catch (e) { /* fall through */ }
   }
-  const r = await qone(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at, p.tenant_id, p.site_id
+  const r = await qone(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at, p.sale_date, p.tenant_id, p.site_id
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE p.id=?`, [req.params.id]);
   if (!r || r.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (siteBound(s.ctx) && r.site_id && r.site_id !== s.ctx.site_id) return res.status(404).json({ error: 'not found' });
-  res.json({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at });
+  res.json({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at, sale_date: r.sale_date });
 });
 
 // POS terminals available to this tenant (for the Sell "which POS?" picker).

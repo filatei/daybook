@@ -17,7 +17,29 @@ import Typeahead from '../components/Typeahead.jsx';
 import ReceiptPreview from '../components/ReceiptPreview.jsx';
 import { queueSale, syncOutbox, outboxCount } from '../offline.js';
 
-const saleTime = (at) => { try { return new Date(typeof at === 'number' ? at * 1000 : at).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+// Parse an order timestamp (epoch seconds, ms, or ISO) → Date, or null. `at` may
+// be missing/invalid for legacy orders — callers fall back to sale_date.
+const toDate = (at) => {
+  if (at == null || at === '') return null;
+  const ms = typeof at === 'number' ? (at < 1e12 ? at * 1000 : at) : Date.parse(at);
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const saleTime = (at) => { const d = toDate(at); return d ? d.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) : ''; };
+// Build receipt date/time strings from a timestamp, falling back to a plain
+// YYYY-MM-DD sale_date, else today — so a receipt never prints "Invalid Date".
+const receiptWhen = (at, saleDate) => {
+  const d = toDate(at) || (saleDate ? toDate(`${saleDate}T00:00:00`) : null);
+  if (d) return {
+    date_str: d.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+    time_str: toDate(at) ? d.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) : '',
+  };
+  const now = new Date();
+  return {
+    date_str: now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
+    time_str: now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+  };
+};
 const safeJson = (s, d = []) => { try { return JSON.parse(s || ''); } catch { return d; } };
 
 const PAY = ['CASH', 'TRANSFER', 'POS', 'INCENTIVE'];
@@ -227,13 +249,13 @@ export default function Sell() {
     setReprinting(true);
     try {
       const o = await api(scoped(`/pos/orders/${oid}`));
-      const at = new Date(typeof o.at === 'number' ? o.at * 1000 : o.at);
+      const when = receiptWhen(o.at, o.sale_date);
       setReceipt({
         company: activeTenant?.name || 'FIDO WATER',
         site_name: o.site || null,
         receipt_no: o.order_no,
-        date_str: at.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
-        time_str: at.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+        date_str: when.date_str,
+        time_str: when.time_str,
         items: o.items || [],
         total: o.amount,
         payment_method: o.payment_method,
@@ -259,7 +281,8 @@ export default function Sell() {
   }, [subtotal, payMethod, tenderedEdited]);
   const tenderedAmt = payMethod === 'CASH' ? (parseFloat(tendered) || 0) : subtotal;
   const change      = payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0;
-  const canCharge   = cartLines.length > 0 && !posting && (payMethod !== 'CASH' || tenderedAmt >= subtotal);
+  const hasCustomer = !!custName.trim();   // customer is compulsory on a sale
+  const canCharge   = cartLines.length > 0 && hasCustomer && !posting && (payMethod !== 'CASH' || tenderedAmt >= subtotal);
 
   const filtered = products.filter((p) =>
     !search || p.name.toLowerCase().includes(search.toLowerCase())
@@ -303,6 +326,7 @@ export default function Sell() {
 
   // Charge (and optionally print)
   const charge = async (withPrint = false) => {
+    if (cartLines.length > 0 && !hasCustomer) { toast('Select or add a customer first', 'err'); return; }
     if (!canCharge) return;
     setPosting(true);
     const items = cartLines.map((c) => ({
@@ -426,7 +450,7 @@ export default function Sell() {
                   title={canReprint ? 'Tap to view / reprint receipt' : ''}
                   style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 8, border: 'none', background: 'none', textAlign: 'left', cursor: canReprint ? 'pointer' : 'default', color: 'var(--ink)', font: 'inherit' }}>
                   <strong style={{ fontWeight: 700 }}>{s.customer || 'Walk-in'}</strong>
-                  <span style={{ color: 'var(--muted)' }}>{s.site ? ` · ${s.site}` : ''}{s.payment_method ? ` · ${s.payment_method}` : ''} · {saleTime(s.at)}</span>
+                  <span style={{ color: 'var(--muted)' }}>{s.site ? ` · ${s.site}` : ''}{s.payment_method ? ` · ${s.payment_method}` : ''}{(saleTime(s.at) || s.sale_date) ? ` · ${saleTime(s.at) || s.sale_date}` : ''}</span>
                 </button>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap' }}>
                   <span style={{ fontWeight: 700 }}>{ngn(s.amount)}</span>
@@ -512,9 +536,9 @@ export default function Sell() {
             <button className="btn btn-ghost btn-sm" onClick={() => setCart([])}>Clear</button>
           </div>
 
-          {/* Customer — type to search existing or add a new name (blank = walk-in) */}
+          {/* Customer — required: type to search existing or add a new name */}
           <div style={{ marginBottom: 10 }}>
-            <label className="fl">Customer</label>
+            <label className="fl">Customer <span style={{ color: 'var(--err)' }}>*</span></label>
             <Typeahead
               value={custName}
               onChange={setCustName}
@@ -522,8 +546,9 @@ export default function Sell() {
               allowCreate
               minChars={1}
               createLabel={(q) => `➕ Add new customer “${q}”`}
-              placeholder="Search or add a name (blank = walk-in)"
+              placeholder="Search or add a customer (required)"
             />
+            {!hasCustomer && <div style={{ fontSize: 11.5, color: 'var(--err)', marginTop: 4 }}>Select or add a customer to complete the sale.</div>}
           </div>
 
           {/* Grid header */}

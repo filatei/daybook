@@ -1,11 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import { api, scoped, ngn } from '../api.js';
 
+const toDate = (at) => {
+  if (at == null || at === '') return null;
+  const ms = typeof at === 'number' ? (at < 1e12 ? at * 1000 : at) : Date.parse(at);
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
 const fmt = (at) => {
-  if (!at) return '';
-  const d = new Date(typeof at === 'number' ? at * 1000 : at);
-  if (Number.isNaN(d.getTime())) return '';   // never render "Invalid Date"
-  return d.toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const d = toDate(at);
+  return d ? d.toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+};
+// Date only — falls back to a plain YYYY-MM-DD sale_date so legacy orders with no
+// usable timestamp still show their day instead of nothing.
+const fmtDate = (at, saleDate) => {
+  const d = toDate(at) || (saleDate ? toDate(`${saleDate}T00:00:00`) : null);
+  return d ? d.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }) : (saleDate || '');
 };
 
 const Backdrop = ({ onClose, children, z = 120 }) => (
@@ -48,6 +58,7 @@ export function OrderDetailModal({ order, orderId, onClose }) {
           <Row k="Payment" v={o.payment_method} />
           <Row k="Terminal" v={o.terminal} />
           <Row k="Bank" v={o.bank} />
+          <Row k="Date" v={fmtDate(o.at, o.sale_date)} />
           <Row k="Time" v={fmt(o.at)} />
           {Array.isArray(o.items) && o.items.length > 0 && (
             <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
@@ -155,10 +166,10 @@ export function OrdersListModal({ title, query, tenants, onClose }) {
   }, [query, tkey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const all = rows || [];
-  const undatedCount = all.filter((o) => !o.at).length;
+  const undatedCount = all.filter((o) => !o.at && !o.sale_date).length;
   const needle = q.trim().toLowerCase();
   const shown = all.filter((o) => {
-    if (!showUndated && !o.at) return false;                  // hide undated unless toggled
+    if (!showUndated && !o.at && !o.sale_date) return false;  // hide fully-undated unless toggled
     if (!needle) return true;
     return String(o.order_no || '').toLowerCase().includes(needle)
       || (o.customer || '').toLowerCase().includes(needle)
@@ -183,7 +194,7 @@ export function OrdersListModal({ title, query, tenants, onClose }) {
                   <button key={o.id} onClick={() => setSel(o)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 700 }}>{o.order_no ? `#${o.order_no}` : '—'} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer || 'Walk-in'}</span></div>
-                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o._tenant ? ` · ${o._tenant}` : ''}{o.entry_by ? ` · ${o.entry_by}` : ''}{o.at ? ` · ${fmt(o.at)}` : ' · no timestamp'}</div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o._tenant ? ` · ${o._tenant}` : ''}{o.entry_by ? ` · ${o.entry_by}` : ''}{o.at ? ` · ${fmt(o.at)}` : (o.sale_date ? ` · ${fmtDate(o.at, o.sale_date)}` : ' · no timestamp')}</div>
                     </div>
                     <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.amount)}</div>
                     <span style={{ color: 'var(--muted)' }}>›</span>

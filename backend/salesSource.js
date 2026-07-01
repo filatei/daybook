@@ -107,6 +107,7 @@ async function recentOrders({ sites, date, limit = 40 }) {
     payment_method: isIncentiveOrder(o) ? 'INCENTIVE' : String(o.paymentMethod || 'CASH').toUpperCase(),
     items: Array.isArray(o.products) ? o.products.length : 0,
     at: toEpoch(o),
+    sale_date: saleDate(o),
   }));
 }
 
@@ -121,6 +122,13 @@ const toEpoch = (o) => {
   const d = o.createdAt || o.clientTime || o.trans_date || o.received_date || o.date_teller;
   const t = d ? new Date(d).getTime() : NaN;
   return Number.isNaN(t) ? null : Math.floor(t / 1000);
+};
+// A plain YYYY-MM-DD for the order (date-only fallback when there's no usable
+// timestamp) so the UI can always show at least the day, never "Invalid Date".
+const saleDate = (o) => {
+  const d = o.createdAt || o.clientTime || o.trans_date || o.received_date || o.date_teller;
+  const t = d ? new Date(d) : null;
+  return t && !Number.isNaN(t.getTime()) ? t.toISOString().slice(0, 10) : null;
 };
 const ORDER_PROJ = { site: 1, txn_amount: 1, paymentMethod: 1, orderType: 1, customer: 1, customerName: 1, customer_name: 1, transfer_from_account_name: 1, name_teller: 1, contactPhone: 1, products: 1, createdAt: 1, clientTime: 1, trans_date: 1, received_date: 1, date_teller: 1, fidoOrderId: 1, orderId: 1, userName: 1, tellerId: 1, acquirer: 1, bank: 1, card_bank: 1, transfer_from_bank: 1, terminal_location: 1 };
 
@@ -183,6 +191,7 @@ const mapOrder = (o, nameMap) => ({
     name: p.name || 'Item', qty: n2(p.qty), price: n2(p.price), amount: Math.round(n2(p.amount) || n2(p.qty) * n2(p.price)),
   })),
   at: toEpoch(o),
+  sale_date: saleDate(o),
 });
 // `method`: 'CASH' | 'TRANSFER' | 'POS' | 'NONCASH' (transfer+pos)
 function methodMatch(method) {

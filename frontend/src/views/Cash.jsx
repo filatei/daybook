@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
+import { useVoiceInput } from '../hooks/useVoiceInput.js';
 
 const ST = {
   NOT_SEEN:  { bg: '#fee2e2', fg: '#991b1b', label: 'NOT SEEN' },
@@ -74,6 +75,76 @@ function CashForm({ sites, accounts, onSave, onClose }) {
         <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={busy}>Cancel</button>
         <button className="btn" style={{ flex: 1 }} onClick={submit} disabled={busy}>{busy ? <span className="spin" /> : 'Submit'}</button>
       </div>
+    </div>
+  );
+}
+
+// ── AI cash deposit — type or speak; the model fills the deposit for you. ─────
+function AICashModal({ onCreated, onClose }) {
+  const { toast, tenant } = useStore();
+  const [text, setText] = useState('');
+  const [draft, setDraft] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const { supported, listening, start, stop } = useVoiceInput((t) => setText(t));
+
+  const interpret = async () => {
+    if (!text.trim()) return toast('Say the amount and who paid it in', 'err');
+    setBusy(true);
+    try { const r = await api(scoped('/ai/cash-parse'), { method: 'POST', body: { text: text.trim() } }); setDraft(r.draft); }
+    catch (e) { toast(e.message || 'Could not interpret', 'err'); }
+    setBusy(false);
+  };
+  const create = async () => {
+    if (!draft || !(draft.amount > 0)) return toast('No amount detected — rephrase', 'err');
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('amount', draft.amount);
+      if (draft.depositor) fd.append('depositor', draft.depositor);
+      if (draft.site_id) fd.append('site_id', draft.site_id);
+      if (draft.payee_account) fd.append('payee_account', draft.payee_account);
+      if (draft.memo) fd.append('memo', draft.memo);
+      if (tenant) fd.append('tenant_id', tenant);
+      await api(scoped('/cash'), { method: 'POST', form: fd });
+      toast('Cash deposit recorded ✓', 'ok'); onCreated && onCreated(); onClose();
+    } catch (e) { toast(e.message || 'Could not record', 'err'); }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ maxHeight: '88vh', overflowY: 'auto' }}>
+      <div className="grip" />
+      <h3 style={{ margin: '0 0 4px' }}>✨ Record deposit by sentence</h3>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 10px' }}>
+        e.g. “Uzezi paid ₦50,000 into UBA-Fido Fluids for Akenfa.”
+      </p>
+      <div style={{ position: 'relative' }}>
+        <textarea className="input" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type or tap the mic to speak…" />
+        {supported && (
+          <button onClick={() => (listening ? stop() : start())} title={listening ? 'Stop' : 'Speak'}
+            style={{ position: 'absolute', right: 8, bottom: 10, border: 'none', borderRadius: '50%', width: 38, height: 38, cursor: 'pointer', fontSize: 18, background: listening ? 'var(--err)' : 'var(--brand)', color: '#fff' }}>
+            {listening ? '⏹' : '🎤'}
+          </button>
+        )}
+      </div>
+      <button className="btn" style={{ width: '100%', marginTop: 10 }} onClick={interpret} disabled={busy}>{busy && !draft ? <span className="spin" /> : '✨ Interpret'}</button>
+
+      {draft && (
+        <div className="card" style={{ marginTop: 12, padding: '12px 14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <strong>{draft.depositor || 'Depositor —'}</strong>
+            <strong style={{ color: 'var(--brand-d)' }}>{ngn(draft.amount)}</strong>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+            {draft.site_name || 'Site —'}{draft.payee_account ? ` · ${draft.payee_account}` : ''}{draft.memo ? ` · ${draft.memo}` : ''}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setDraft(null)} disabled={busy}>↺ Redo</button>
+            <button className="btn" style={{ flex: 1.4 }} onClick={create} disabled={busy}>{busy ? <span className="spin" /> : '✓ Record deposit'}</button>
+          </div>
+        </div>
+      )}
+      <button className="btn btn-ghost" style={{ width: '100%', marginTop: 10 }} onClick={onClose} disabled={busy}>Close</button>
     </div>
   );
 }
@@ -243,7 +314,12 @@ export default function Cash() {
   return (
     <div>
       {/* New deposits are recorded inside a workspace; Group is a combined review. */}
-      {!isGroup && <button className="btn" style={{ marginBottom: 12 }} onClick={openForm}>＋ Record cash deposit</button>}
+      {!isGroup && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          <button className="btn" style={{ flex: 1 }} onClick={openForm}>＋ Record</button>
+          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => openModal(<AICashModal onCreated={load} onClose={closeModal} />)}>✨ By sentence / voice</button>
+        </div>
+      )}
 
       <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
         <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{isGroup ? 'Cash deposited (all sites)' : 'Cash deposited today'}</span>

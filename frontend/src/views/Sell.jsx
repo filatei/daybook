@@ -175,6 +175,7 @@ export default function Sell() {
   // Testing: delete an in-app sale (GM only). Restores stock server-side.
   const [confirmDel, setConfirmDel] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [confirmSale, setConfirmSale] = useState(null);   // { withPrint } → review before charging
   const doDelete = async () => {
     if (!confirmDel) return;
     setDeleting(true);
@@ -325,6 +326,13 @@ export default function Sell() {
   };
 
   // Charge (and optionally print)
+  // Open the review sheet (Cancel / Confirm) before actually charging.
+  const askCharge = (withPrint = false) => {
+    if (cartLines.length > 0 && !hasCustomer) { toast('Select or add a customer first', 'err'); return; }
+    if (!canCharge) return;
+    setConfirmSale({ withPrint });
+  };
+
   const charge = async (withPrint = false) => {
     if (cartLines.length > 0 && !hasCustomer) { toast('Select or add a customer first', 'err'); return; }
     if (!canCharge) return;
@@ -641,14 +649,60 @@ export default function Sell() {
           {/* Charge buttons */}
           <div style={{ display: 'grid', gridTemplateColumns: bt.status === 'ready' ? '1fr 1.5fr' : '1fr', gap: 8, marginTop: 16 }}>
             {bt.status === 'ready' && (
-              <button className="btn btn-ghost" onClick={() => charge(false)} disabled={!canCharge || posting}>
+              <button className="btn btn-ghost" onClick={() => askCharge(false)} disabled={!canCharge || posting}>
                 {posting ? <span className="spin" /> : null} Charge only
               </button>
             )}
-            <button className="btn" onClick={() => charge(bt.status === 'ready')} disabled={!canCharge || posting}>
+            <button className="btn" onClick={() => askCharge(bt.status === 'ready')} disabled={!canCharge || posting}>
               {posting ? <span className="spin" /> : (bt.status === 'ready' ? '🖨 ' : null)}
-              {bt.status === 'ready' ? 'Charge & Print' : 'Charge'} {ngn(subtotal)}
+              {bt.status === 'ready' ? 'Review & Print' : 'Review sale'} {ngn(subtotal)}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Review sale before charging — cancel or confirm */}
+      {confirmSale && (
+        <div onClick={() => !posting && setConfirmSale(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 400, margin: 0, maxHeight: '88vh', overflowY: 'auto' }}>
+            <div style={{ fontWeight: 800, fontSize: 17, marginBottom: 2 }}>Confirm sale</div>
+            <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 10 }}>Check the details, then confirm or cancel.</div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '4px 0', fontSize: 13.5 }}>
+              <span style={{ color: 'var(--muted)' }}>Customer</span><span style={{ fontWeight: 700, textAlign: 'right' }}>{custName.trim() || '—'}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '4px 0', fontSize: 13.5 }}>
+              <span style={{ color: 'var(--muted)' }}>Payment</span>
+              <span style={{ fontWeight: 700, textAlign: 'right' }}>{payMethod}{payMethod === 'POS' && terminal.trim() ? ` · ${terminal.trim().toUpperCase()}` : ''}{payMethod !== 'CASH' && payMethod !== 'POS' && bank.trim() ? ` · ${bank.trim().toUpperCase()}` : ''}</span>
+            </div>
+
+            <div style={{ marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 4 }}>Items</div>
+              {cartLines.map((c) => (
+                <div key={c.product.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+                  <span>{c.product.name} <span style={{ color: 'var(--muted)' }}>×{parseFloat(c.qty) || 0}</span></span>
+                  <span style={{ fontWeight: 600 }}>{ngn(lineUnit(c) * (parseFloat(c.qty) || 0))}</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 8, fontWeight: 800, fontSize: 16 }}>
+              <span>Total</span><span>{ngn(subtotal)}</span>
+            </div>
+            {payMethod === 'CASH' && (parseFloat(tendered) > 0) && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
+                <span>Tendered {ngn(tenderedAmt)}</span><span>{tenderedAmt >= subtotal ? `Change ${ngn(change)}` : `Short ${ngn(subtotal - tenderedAmt)}`}</span>
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 8, marginTop: 16 }}>
+              <button className="btn btn-ghost" onClick={() => setConfirmSale(null)} disabled={posting}>Cancel</button>
+              <button className="btn" disabled={posting}
+                onClick={() => { const w = confirmSale.withPrint; setConfirmSale(null); charge(w); }}>
+                {posting ? <span className="spin" /> : (confirmSale.withPrint ? '🖨 Confirm & Print' : '✓ Confirm sale')}
+              </button>
+            </div>
           </div>
         </div>
       )}

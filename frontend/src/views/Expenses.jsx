@@ -515,18 +515,23 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       {/* Footer: receipts & notes — kept on the server for dispute records */}
       <div style={{ borderTop: '2px solid var(--line)', marginTop: 12, paddingTop: 12 }}>
         <div style={{ fontSize: 13, fontWeight: 800, marginBottom: 8 }}>🧾 Receipts & notes <span style={{ color: 'var(--muted)', fontWeight: 600 }}>({atts.length})</span></div>
-        {atts.map((a) => (
-          <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
-            <span style={{ fontSize: 18 }}>{fileIcon(a.mime)}</span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              {a.file_name && <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.file_name}</div>}
-              {a.note && <div style={{ fontSize: 12, color: 'var(--muted)' }}>{a.note}</div>}
+        {atts.map((a) => {
+          const sqBtn = { border: 'none', borderRadius: 7, width: 30, height: 30, cursor: 'pointer', fontSize: 13, display: 'grid', placeItems: 'center', flexShrink: 0, lineHeight: 1 };
+          return (
+            <div key={a.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
+              <span style={{ fontSize: 18, lineHeight: '20px', flexShrink: 0 }}>{fileIcon(a.mime)}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {a.file_name && <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.file_name}</div>}
+                {a.note && <div style={{ fontSize: 12.5, color: 'var(--muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{a.note}</div>}
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                {a.has_file && <button title="View" style={{ ...sqBtn, background: '#eff6ff', color: '#1e40af' }} onClick={() => openReceipt(a, false)}>👁</button>}
+                {a.has_file && <button title="Download" style={{ ...sqBtn, background: '#eff6ff', color: '#1e40af' }} onClick={() => openReceipt(a, true)}>⬇</button>}
+                <button title="Remove" style={{ ...sqBtn, background: '#fee2e2', color: 'var(--err)' }} onClick={() => delAttachment(a)}>🗑</button>
+              </div>
             </div>
-            {a.has_file && <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => openReceipt(a, false)}>View</button>}
-            {a.has_file && <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 12 }} onClick={() => openReceipt(a, true)}>⬇</button>}
-            <button className="btn btn-ghost" style={{ padding: '4px 8px', fontSize: 12, color: 'var(--err)' }} onClick={() => delAttachment(a)}>×</button>
-          </div>
-        ))}
+          );
+        })}
         {atts.length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>No receipts yet — attach one below.</div>}
 
         <input id="exp-att-file" type="file" accept="image/*,.pdf,.xls,.xlsx,.doc,.docx,.txt"

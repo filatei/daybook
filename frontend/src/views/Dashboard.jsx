@@ -320,12 +320,7 @@ export default function Dashboard() {
           </button>
         ))}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>Pick a day</span>
-        <input type="date" className="input" style={{ flex: 1, maxWidth: 200 }} value={day} max={today()} onChange={(e) => { setDay(e.target.value); if (e.target.value) setRng({ from: '', to: '' }); }} />
-        {day && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setDay('')}>Clear</button>}
-      </div>
-      {/* Custom start–end range (overrides presets + single day) */}
+      {/* Custom start–end range (overrides presets). From and To may be the same day. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>From</span>
         <input type="date" className="input" style={{ flex: '1 1 130px', maxWidth: 180 }} value={rng.from} max={today()} onChange={(e) => { setRng((p) => ({ ...p, from: e.target.value })); if (e.target.value) setDay(''); }} />

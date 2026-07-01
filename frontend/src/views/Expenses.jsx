@@ -210,7 +210,6 @@ const WF_ACTION = {
   approve:  { label: '✓ Approve', kind: '' },
   decline:  { label: '✗ Decline', kind: 'danger' },
   pay:      { label: '💵 Pay', kind: '' },
-  deliver:  { label: '📦 Deliver', kind: '' },
   reset:    { label: '↺ Reset', kind: 'ghost' },
 };
 
@@ -545,7 +544,8 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 
       <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
         <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose}>Close</button>
-        <button className="btn" style={{ flex: 1 }} onClick={onEdit}>✏️ Edit / pay</button>
+        {/* Editing is only possible in DRAFT — reset the ticket first to change it. */}
+        {wf === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={onEdit}>✏️ Edit</button>}
       </div>
     </div>
   );
@@ -721,7 +721,7 @@ export default function Expenses() {
 
   // Group the (filtered) list by workflow status, in lifecycle order.
   const STATE_ORDER = ['DRAFT', 'VALIDATED', 'REVIEWED', 'APPROVED', 'PAID', 'DELIVERED', 'DECLINED'];
-  const NEXT = { DRAFT: 'validate', VALIDATED: 'review', REVIEWED: 'approve', APPROVED: 'pay', PAID: 'deliver' };
+  const NEXT = { DRAFT: 'validate', VALIDATED: 'review', REVIEWED: 'approve', APPROVED: 'pay' };
   const groups = STATE_ORDER
     .map((st) => ({ state: st, rows: shown.filter((e) => (e.wf_state || 'DRAFT') === st) }))
     .filter((g) => g.rows.length);

@@ -220,6 +220,11 @@ router.patch('/:id', requireAuth, async (req, res) => {
   if (!a) return res.status(404).json({ error: 'not found' });
   if (!atLeast(a.ctx.role, 'GENERAL_MANAGER') && a.expense.recorded_by !== req.user.id)
     return res.status(403).json({ error: 'only the recorder or a manager can edit this expense' });
+  // Editing is only allowed while in DRAFT. After it's validated it must be
+  // returned to draft (Reset) before it can be changed.
+  const curState = a.expense.wf_state || 'DRAFT';
+  if (curState !== 'DRAFT')
+    return res.status(409).json({ error: 'this expense is past draft — reset it to draft before editing' });
 
   const b = req.body || {};
   const oldAmount = parseFloat(a.expense.amount) || 0;
@@ -410,12 +415,11 @@ const FLOW = {
   // everything else → Admin.
   approve:  { from: ['REVIEWED'], to: 'APPROVED', allow: (c, e) => atLeast(c.role, approveRole(e)) },
   decline:  { from: ['REVIEWED'], to: 'DECLINED', allow: (c, e) => atLeast(c.role, approveRole(e)) },
-  // Managers / Accountants / GM / Snr Acct / Admin pay (then attach the receipt).
+  // Once approved, the only forward action is Pay (record payment + receipt).
   pay:      { from: ['APPROVED'], to: 'PAID', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
-  // Mark the cash handed to the receiver.
-  deliver:  { from: ['APPROVED', 'PAID'], to: 'DELIVERED', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
-  // Send a ticket back to draft to fix it.
-  reset:    { from: ['VALIDATED', 'REVIEWED', 'APPROVED', 'PAID', 'DELIVERED', 'DECLINED'], to: 'DRAFT', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
+  // Send a ticket back to draft to correct it — allowed before approval only
+  // (approved/paid tickets cannot be edited or reset).
+  reset:    { from: ['VALIDATED', 'REVIEWED', 'DECLINED'], to: 'DRAFT', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
 };
 
 // Which transitions a given role may run from the ticket's current state.

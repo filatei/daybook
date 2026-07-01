@@ -25,19 +25,20 @@ const toDate = (at) => {
   const d = new Date(ms);
   return Number.isNaN(d.getTime()) ? null : d;
 };
-const saleTime = (at) => { const d = toDate(at); return d ? d.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) : ''; };
+const WAT = 'Africa/Lagos';   // show all sale times in West Africa Time
+const saleTime = (at) => { const d = toDate(at); return d ? d.toLocaleTimeString('en-NG', { timeZone: WAT, hour: '2-digit', minute: '2-digit' }) : ''; };
 // Build receipt date/time strings from a timestamp, falling back to a plain
 // YYYY-MM-DD sale_date, else today — so a receipt never prints "Invalid Date".
 const receiptWhen = (at, saleDate) => {
   const d = toDate(at) || (saleDate ? toDate(`${saleDate}T00:00:00`) : null);
   if (d) return {
-    date_str: d.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
-    time_str: toDate(at) ? d.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) : '',
+    date_str: d.toLocaleDateString('en-NG', { timeZone: WAT, day: '2-digit', month: 'short', year: 'numeric' }),
+    time_str: toDate(at) ? `${d.toLocaleTimeString('en-NG', { timeZone: WAT, hour: '2-digit', minute: '2-digit' })} WAT` : '',
   };
   const now = new Date();
   return {
-    date_str: now.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }),
-    time_str: now.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }),
+    date_str: now.toLocaleDateString('en-NG', { timeZone: WAT, day: '2-digit', month: 'short', year: 'numeric' }),
+    time_str: `${now.toLocaleTimeString('en-NG', { timeZone: WAT, hour: '2-digit', minute: '2-digit' })} WAT`,
   };
 };
 const safeJson = (s, d = []) => { try { return JSON.parse(s || ''); } catch { return d; } };

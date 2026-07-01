@@ -7,15 +7,21 @@ const toDate = (at) => {
   const d = new Date(ms);
   return Number.isNaN(d.getTime()) ? null : d;
 };
+const WAT = 'Africa/Lagos';   // all order times are shown in West Africa Time
 const fmt = (at) => {
   const d = toDate(at);
-  return d ? d.toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+  return d ? d.toLocaleString('en-NG', { timeZone: WAT, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 };
 // Date only — falls back to a plain YYYY-MM-DD sale_date so legacy orders with no
 // usable timestamp still show their day instead of nothing.
 const fmtDate = (at, saleDate) => {
   const d = toDate(at) || (saleDate ? toDate(`${saleDate}T00:00:00`) : null);
-  return d ? d.toLocaleDateString('en-NG', { day: '2-digit', month: 'short', year: 'numeric' }) : (saleDate || '');
+  return d ? d.toLocaleDateString('en-NG', { timeZone: WAT, day: '2-digit', month: 'short', year: 'numeric' }) : (saleDate || '');
+};
+// Time only, in WAT (with the label so it's unambiguous). Empty when unknown.
+const fmtTime = (at) => {
+  const d = toDate(at);
+  return d ? `${d.toLocaleTimeString('en-NG', { timeZone: WAT, hour: '2-digit', minute: '2-digit' })} WAT` : '';
 };
 
 const Backdrop = ({ onClose, children, z = 120 }) => (
@@ -59,7 +65,7 @@ export function OrderDetailModal({ order, orderId, onClose }) {
           <Row k="Terminal" v={o.terminal} />
           <Row k="Bank" v={o.bank} />
           <Row k="Date" v={fmtDate(o.at, o.sale_date)} />
-          <Row k="Time" v={fmt(o.at)} />
+          <Row k="Time" v={fmtTime(o.at)} />
           {Array.isArray(o.items) && o.items.length > 0 && (
             <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 4 }}>Items</div>

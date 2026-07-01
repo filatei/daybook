@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
-import { useStore, useBackHandler } from '../store.jsx';
+import { useStore, useBackHandler, useRole, atLeast } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
 import { useVoiceInput } from '../hooks/useVoiceInput.js';
 import Cash from './Cash.jsx';
@@ -284,7 +284,8 @@ function PayablesView({ onOpenExpense }) {
 
 // View-first detail: read the ticket, attach receipts/notes, then choose to edit.
 function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
-  const { toast, confirm } = useStore();
+  const { toast, confirm, user } = useStore();
+  const role = useRole();
   // Pin every request to THIS expense's workspace so the detail + approval flow
   // works from the combined Group view too (no single active tenant there).
   const ts = (path) => expense.tenant_id
@@ -371,6 +372,19 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 
   const fileIcon = (m) => (m || '').startsWith('image/') ? '🖼️' : (m || '').includes('pdf') ? '📄' : m ? '📎' : '📝';
 
+  // Delete rule: Snr Accountant / GM / Admin (or the recorder) may delete an
+  // UNPAID expense not more than one week old. Backend re-enforces this.
+  const unpaid = paid <= 0 && !['PAID', 'DELIVERED'].includes(wf);
+  const fresh = (Date.now() / 1000 - Number(expense.created_at || 0)) <= 7 * 86400;
+  const canDelete = ((role && atLeast(role, 'SNR_ACCOUNTANT')) || expense.recorded_by === user?.id) && unpaid && fresh;
+  const del = async () => {
+    if (!await confirm({ title: 'Delete this expense?', message: 'This permanently removes the unpaid expense and its receipts.', confirmText: 'Delete', danger: true })) return;
+    setBusy(true);
+    try { await api(ts(`/expenses/${expense.id}`), { method: 'DELETE' }); toast('Expense deleted', 'ok'); onChanged && onChanged(); onClose(); }
+    catch (e) { toast(e.message || 'Could not delete', 'err'); }
+    setBusy(false);
+  };
+
   return (
     <div>
       <div className="grip" />
@@ -381,6 +395,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>{expense.expense_date} · {expense.category}{expense.vendor ? ` · ${expense.vendor}` : ''}{siteName ? ` · ${siteName}` : ''}</div>
         </div>
         <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 20, background: (WF[wf] || WF.DRAFT).bg, color: (WF[wf] || WF.DRAFT).fg }}>{(WF[wf] || WF.DRAFT).label}</span>
+        {canDelete && <button className="btn btn-ghost" style={{ width: 'auto', padding: '4px 8px', color: 'var(--err)' }} disabled={busy} onClick={del} title="Delete this unpaid expense">🗑</button>}
       </div>
 
       {/* Lifecycle actions — server decides which the current user may run */}

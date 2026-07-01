@@ -252,16 +252,32 @@ router.patch('/:id', requireAuth, async (req, res) => {
 router.delete('/:id', requireAuth, async (req, res) => {
   const a = await expenseAccess(req, req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
-  if (!atLeast(a.ctx.role, 'GENERAL_MANAGER') && a.expense.recorded_by !== req.user.id)
-    return res.status(403).json({ error: 'insufficient permission' });
+  const e = a.expense;
+  // Snr Accountant / GM / Admin (or the creator) may delete. Snr Accountant ranks
+  // equal to GM, so atLeast('SNR_ACCOUNTANT') covers Snr Accountant, GM and Admin.
+  const canByRole = atLeast(a.ctx.role, 'SNR_ACCOUNTANT');
+  if (!canByRole && e.recorded_by !== req.user.id)
+    return res.status(403).json({ error: 'only Snr Accountant, GM or Admin (or the recorder) can delete an expense' });
+  // Business rule: only UNPAID expenses that are not more than one week old.
+  if (Number(e.amount_paid || 0) > 0 || ['PAID', 'DELIVERED'].includes(e.wf_state))
+    return res.status(409).json({ error: 'this expense has been paid — it cannot be deleted' });
+  const weekAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+  if (Number(e.created_at || 0) < weekAgo)
+    return res.status(409).json({ error: 'expenses older than one week cannot be deleted' });
 
   // Reverse the amount in the linked daily report
-  if (a.expense.site_id) {
+  if (e.site_id) {
     await qrun(
       `UPDATE daily_reports SET expenses=GREATEST(0,expenses-?) WHERE tenant_id=? AND site_id=? AND report_date=?`,
-      [parseFloat(a.expense.amount) || 0, a.expense.tenant_id, a.expense.site_id, a.expense.expense_date]);
+      [parseFloat(e.amount) || 0, e.tenant_id, e.site_id, e.expense_date]);
   }
-  await qrun('DELETE FROM expenses WHERE id=?', [a.expense.id]);
+  // Remove attachment files + related rows, then the expense.
+  const atts = await qall('SELECT stored_name FROM expense_attachments WHERE expense_id=?', [e.id]).catch(() => []);
+  for (const at of atts) { if (at.stored_name) { try { fs.unlinkSync(path.join(UPLOAD_DIR, at.stored_name)); } catch { /* gone */ } } }
+  await qrun('DELETE FROM expense_attachments WHERE expense_id=?', [e.id]).catch(() => {});
+  await qrun('DELETE FROM expense_payments WHERE expense_id=?', [e.id]).catch(() => {});
+  await qrun('DELETE FROM expense_wf_log WHERE expense_id=?', [e.id]).catch(() => {});
+  await qrun('DELETE FROM expenses WHERE id=?', [e.id]);
   res.json({ ok: true });
 });
 

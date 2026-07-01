@@ -293,11 +293,18 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const [actions, setActions] = useState([]);
   const [, setLog] = useState([]);
   const [acting, setActing] = useState('');
+  // Pay form (opened from the Pay action): amount, source bank account, note, receipt.
+  const [payOpen, setPayOpen] = useState(false);
+  const [payAmt, setPayAmt] = useState('');
+  const [payBank, setPayBank] = useState('');
+  const [payNote, setPayNote] = useState('');
+  const [payFile, setPayFile] = useState(null);
+  const [banks, setBanks] = useState([]);
 
   let items = [];
   try { items = expense?.items_json ? JSON.parse(expense.items_json) : []; } catch { items = []; }
   const billed = +expense?.amount || 0;
-  const paid = +expense?.amount_paid || 0;
+  const [paid, setPaid] = useState(+expense?.amount_paid || 0);
   const balance = Math.max(0, Math.round((billed - paid) * 100) / 100);
   const st = stOf({ balance, amount_paid: paid });
   const siteName = (sites || []).find((s) => s.id === expense?.site_id)?.name;
@@ -313,8 +320,34 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     catch { /* ignore */ }
   }, [expense.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { loadPays(); loadAtts(); loadLog(); }, [loadPays, loadAtts, loadLog]);
+  useEffect(() => { api(ts('/bank-accounts')).then((r) => setBanks(Array.isArray(r) ? r.filter((b) => b.active) : [])).catch(() => setBanks([])); }, [expense.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Record a (partial or full) payment from the Pay form; attach the receipt and,
+  // when it clears the balance, move the ticket to PAID — all in one go.
+  const submitPay = async () => {
+    const amt = Math.round((parseFloat(payAmt) || 0) * 100) / 100;
+    if (!(amt > 0)) return toast('Enter an amount', 'err');
+    if (amt > balance + 0.01) return toast(`Max ₦${balance.toLocaleString()} — that's the balance`, 'err');
+    setBusy(true);
+    try {
+      await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, method: payBank ? 'TRANSFER' : 'CASH', bank: payBank || null, memo: payNote.trim() || null } });
+      if (payFile) { const fd = new FormData(); fd.append('file', payFile); if (payNote.trim()) fd.append('note', payNote.trim()); await api(ts(`/expenses/${expense.id}/attachments`), { method: 'POST', form: fd }).catch(() => {}); }
+      const newPaid = Math.round((paid + amt) * 100) / 100;
+      const newBal = Math.max(0, Math.round((billed - newPaid) * 100) / 100);
+      if (newBal <= 0.01 && wf === 'APPROVED') { try { await api(ts(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action: 'pay' } }); } catch { /* keep going */ } }
+      setPaid(newPaid);
+      setPayOpen(false); setPayAmt(''); setPayBank(''); setPayNote(''); setPayFile(null);
+      const inp = document.getElementById('exp-pay-file'); if (inp) inp.value = '';
+      loadPays(); loadAtts(); loadLog();
+      onChanged && onChanged();
+      toast(newBal <= 0.01 ? 'Paid in full ✓' : `Part payment ${ngn(amt)} recorded — ${ngn(newBal)} left`, 'ok');
+    } catch (e) { toast(e.message || 'Payment failed', 'err'); }
+    setBusy(false);
+  };
 
   const runAction = async (action) => {
+    // Pay is not a bare state flip — open the pay form (amount, bank, receipt).
+    if (action === 'pay') { setPayAmt(String(balance || '')); setPayOpen(true); return; }
     let note2;
     if (action === 'decline' || action === 'reset') {
       note2 = window.prompt(`Reason for ${action} (optional):`) || '';
@@ -407,6 +440,40 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
               {acting === act ? <span className="spin" /> : (WF_ACTION[act]?.label || act)}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* Pay form — partial or full; shows resulting balance, source bank, receipt */}
+      {payOpen && (
+        <div className="card" style={{ marginTop: 10, padding: 14, background: 'var(--bg)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+            <div style={{ fontWeight: 800 }}>Record payment</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)' }}>Owed {ngn(balance)}</div>
+          </div>
+          <label className="fl">Amount</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input className="input" type="number" inputMode="decimal" value={payAmt} onChange={(e) => setPayAmt(e.target.value)} placeholder="0" onFocus={(e) => e.target.select()} />
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '0 12px', whiteSpace: 'nowrap' }} onClick={() => setPayAmt(String(balance))}>Full</button>
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 2px 0' }}>
+            Balance after: <b style={{ color: 'var(--ink)' }}>{ngn(Math.max(0, Math.round((balance - (parseFloat(payAmt) || 0)) * 100) / 100))}</b>
+            {(parseFloat(payAmt) || 0) >= balance - 0.01 && (parseFloat(payAmt) || 0) > 0 ? ' · will mark PAID' : ''}
+          </div>
+          <label className="fl" style={{ marginTop: 8 }}>Paid from (bank account)</label>
+          <select className="input" value={payBank} onChange={(e) => setPayBank(e.target.value)}>
+            <option value="">Cash / unspecified</option>
+            {banks.map((b) => <option key={b.id} value={b.label}>{b.label}{b.bank_name ? ` · ${b.bank_name}` : ''}{b.account_number ? ` · ${b.account_number}` : ''}</option>)}
+          </select>
+          <label className="fl" style={{ marginTop: 8 }}>Note (optional)</label>
+          <input className="input" value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="e.g. transfer ref, teller no." />
+          <label className="fl" style={{ marginTop: 8 }}>Receipt (optional)</label>
+          <input id="exp-pay-file" type="file" className="input"
+            accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.heic,.xls,.xlsx,.doc,.docx,.txt,image/*"
+            onChange={(e) => setPayFile(e.target.files?.[0] || null)} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 8, marginTop: 12 }}>
+            <button className="btn btn-ghost" disabled={busy} onClick={() => { setPayOpen(false); setPayFile(null); }}>Cancel</button>
+            <button className="btn" disabled={busy} onClick={submitPay}>{busy ? <span className="spin" /> : `💵 Pay ${ngn(Math.round((parseFloat(payAmt) || 0) * 100) / 100)}`}</button>
+          </div>
         </div>
       )}
 
@@ -557,6 +624,8 @@ export default function Expenses() {
   const role = useRole();
   const canBulk = role && atLeast(role, 'SNR_ACCOUNTANT');   // Snr Accountant / GM / Admin
   const [selMode, setSelMode] = useState(false);
+  const [openGroups, setOpenGroups] = useState({});   // status → expanded? (FAQ-style)
+  const toggleGroupOpen = (st) => setOpenGroups((p) => ({ ...p, [st]: !p[st] }));
   const [sel, setSel] = useState(() => new Set());
   const [bulking, setBulking] = useState(false);
   const [expenses, setExpenses] = useState([]);
@@ -749,12 +818,16 @@ export default function Expenses() {
           const gTotal = g.rows.reduce((a, r) => a + (+r.amount || 0), 0);
           const nextAct = NEXT[g.state];
           const nSel = selCount(g.rows);
+          const open = selMode || !!openGroups[g.state];   // selection mode forces groups open
           return (
             <div key={g.state} style={{ marginBottom: 12 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 4px 6px' }}>
-                <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: wf.bg, color: wf.fg }}>{wf.label}</span>
-                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{g.rows.length} · {ngn(gTotal)}</span>
-                <span style={{ flex: 1 }} />
+                <button onClick={() => toggleGroupOpen(g.state)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
+                  <span style={{ color: 'var(--muted)', width: 12, display: 'inline-block', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>▸</span>
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: wf.bg, color: wf.fg }}>{wf.label}</span>
+                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>{g.rows.length} · {ngn(gTotal)}</span>
+                </button>
                 {canBulk && selMode && (
                   <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }} onClick={() => toggleGroup(g.rows)}>
                     {g.rows.every((r) => sel.has(r.id)) ? 'Clear' : 'All'}
@@ -767,6 +840,7 @@ export default function Expenses() {
                   </button>
                 )}
               </div>
+              {open && (
               <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
                 {g.rows.map((e) => (
                   <div key={e.id} style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--line)' }}>
@@ -789,6 +863,7 @@ export default function Expenses() {
                   </div>
                 ))}
               </div>
+              )}
             </div>
           );
         })

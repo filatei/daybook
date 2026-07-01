@@ -45,7 +45,11 @@ export async function downloadFile(path, filename) {
   const headers = {};
   if (_token) headers['Authorization'] = 'Bearer ' + _token;
   const res = await fetch('/api' + path, { headers });
-  if (!res.ok) throw new Error('Download failed');
+  if (!res.ok) {
+    let msg = `Download failed (${res.status})`;
+    try { const j = await res.json(); if (j && j.error) msg = j.error; } catch { /* not json */ }
+    throw new Error(msg);
+  }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

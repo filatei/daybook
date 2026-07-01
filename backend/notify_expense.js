@@ -91,22 +91,9 @@ async function notifyExpenseEvent({ tenant_id, expense, targetState, action, act
       require('./push').sendPushToUser(u, { type: 'expense', title, body, link: '/?go=expenses' }).catch(() => {});
     }
 
-    // 2) Email — single message to all who must see it
-    const ph = userIds.map(() => '?').join(',');
-    const users = await qall(`SELECT email FROM users WHERE id IN (${ph})`, userIds);
-    const emails = [...new Set(users.map((u) => u.email).filter(Boolean))];
-    if (emails.length) {
-      await mailer.sendExpenseNotice({
-        to: emails,
-        tenantName: tenant.name || 'Daybook',
-        brand: tenant.brand_color || '#2563eb',
-        expense: { ref, amount: expense.amount, vendor: expense.vendor, category: expense.category, description: expense.description, site: site && site.name, date: expense.expense_date },
-        stateLabel: label,
-        actionNeeded: need,
-        actorName,
-        eventText: evt,
-      }).catch((e) => console.error('[notifyExpense] email failed:', e.message));
-    }
+    // Expense workflow events are IN-APP ONLY (notifications inbox + push) — no
+    // emails, per request. The email path (sendExpenseNotice) is intentionally
+    // not called here.
   } catch (e) {
     console.error('[notifyExpense] failed:', e.message);
   }

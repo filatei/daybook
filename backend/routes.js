@@ -3058,6 +3058,7 @@ async function buildGroupPrefill(user, date) {
 router.get('/group/sales.xlsx', requireAuth, async (req, res) => {
   const tenants = await userGroupTenants(req.user);
   if (tenants.length < 2) return res.status(403).json({ error: 'group export needs two or more workspaces' });
+  try {
   const { from, to } = req.query;
   const dateW = `${from ? ' AND sale_date>=?' : ''}${to ? ' AND sale_date<=?' : ''}`;
   const dArgs = (tid) => { const a = [tid]; if (from) a.push(from); if (to) a.push(to); return a; };
@@ -3088,12 +3089,14 @@ router.get('/group/sales.xlsx', requireAuth, async (req, res) => {
     Detail: [['Date', 'Receipt', 'Site', 'Workspace', 'Customer', 'Items', 'Total', 'Method', 'Status'], ...detailRows],
   };
   sendWorkbook(res, sheets, `group_sales_${from || 'all'}_${to || 'all'}.xlsx`);
+  } catch (e) { console.error('[group/sales.xlsx]', e.message); if (!res.headersSent) res.status(500).json({ error: e.message }); }
 });
 
 // Combined per-customer daily + monthly + all-time across the group tenants.
 router.get('/group/customers.xlsx', requireAuth, async (req, res) => {
   const tenants = await userGroupTenants(req.user);
   if (tenants.length < 2) return res.status(403).json({ error: 'group export needs two or more workspaces' });
+  try {
   const { from, to } = req.query;
   const dateW = `${from ? ' AND sale_date>=?' : ''}${to ? ' AND sale_date<=?' : ''}`;
   const dArgs = (tid) => { const a = [tid]; if (from) a.push(from); if (to) a.push(to); return a; };
@@ -3111,6 +3114,7 @@ router.get('/group/customers.xlsx', requireAuth, async (req, res) => {
     'All-time': [['Customer', 'Workspace', 'Sales', 'Orders'], ...overall.sort((a, b) => b[2] - a[2])],
   };
   sendWorkbook(res, sheets, `group_customers_${from || 'all'}_${to || 'all'}.xlsx`);
+  } catch (e) { console.error('[group/customers.xlsx]', e.message); if (!res.headersSent) res.status(500).json({ error: e.message }); }
 });
 
 router.get('/group/report/prefill', requireAuth, async (req, res) => {

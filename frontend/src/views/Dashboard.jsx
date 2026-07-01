@@ -185,6 +185,7 @@ export default function Dashboard() {
   const groupKey = (groupTenants || []).map((g) => g.id).join(',');
   const [rangeIdx, setRangeIdx] = useState(0);
   const [day, setDay] = useState('');      // a specific picked day (overrides the range)
+  const [rng, setRng] = useState({ from: '', to: '' });   // custom start–end range (overrides preset + day)
   const [data, setData] = useState(null);
   const [pos, setPos] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -225,8 +226,10 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const from = day || daysAgo(RANGES[rangeIdx].days);   // a picked day overrides the range
-      const to = day || today();
+      // Precedence: custom start–end range > single picked day > preset range.
+      const custom = rng.from || rng.to;
+      const from = custom ? (rng.from || rng.to) : (day || daysAgo(RANGES[rangeIdx].days));
+      const to = custom ? (rng.to || rng.from) : (day || today());
       const cb = Date.now();   // cache-bust so switching workspace always refetches fresh
       if (isGroup) {
         // Combined dashboard across all group workspaces. There's no single tenant
@@ -245,7 +248,7 @@ export default function Dashboard() {
     } catch { /* tenant not selected */ }
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, rangeIdx, day, isGroup, groupKey]);
+  }, [tenant, rangeIdx, day, rng, isGroup, groupKey]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -261,20 +264,20 @@ export default function Dashboard() {
   const byCustomer = usePos ? (pos.byCustomer || []) : [];
   const byHour = usePos ? (pos.byHour || []) : [];
   const drillable = usePos;   // drills work in Group too (each modal fetches per-tenant + merges)
+  // Effective start/end for everything on the page (custom range > day > preset).
+  const custom = rng.from || rng.to;
+  const effFrom = custom ? (rng.from || rng.to) : (day || daysAgo(RANGES[rangeIdx].days));
+  const effTo = custom ? (rng.to || rng.from) : (day || today());
   // A single calendar day is selected (Today or a picked day) → show hourly; a
   // multi-day range → show the daily trend.
-  const isSingleDay = !!day || RANGES[rangeIdx].days === 0;
+  const isSingleDay = !!day || (custom ? effFrom === effTo : RANGES[rangeIdx].days === 0);
 
   // FAQ-style foldable breakdowns: Site open by default, Product/Customer hidden.
   const [openSec, setOpenSec] = useState({ site: true, product: false, customer: false });
   const toggleSec = (k) => setOpenSec((p) => ({ ...p, [k]: !p[k] }));
 
   // Build the orders-drill query for the current date range (+ extra filters).
-  const rangeQS = () => {
-    const from = day || daysAgo(RANGES[rangeIdx].days);
-    const to = day || today();
-    return `from=${from}&to=${to}`;
-  };
+  const rangeQS = () => `from=${effFrom}&to=${effTo}`;
   // Order drill-downs need a single tenant to query — disabled in the group view.
   const openOrders = (title, extra = '') => { setDrill({ title, query: rangeQS() + (extra ? `&${extra}` : '') }); };
 
@@ -312,18 +315,26 @@ export default function Dashboard() {
 
       <div className="seg" style={{ marginBottom: 10 }}>
         {RANGES.map((r, i) => (
-          <button key={r.label} className={`seg-b${(!day && rangeIdx === i) ? ' on' : ''}`} onClick={() => { setDay(''); setRangeIdx(i); }}>
+          <button key={r.label} className={`seg-b${(!day && !custom && rangeIdx === i) ? ' on' : ''}`} onClick={() => { setDay(''); setRng({ from: '', to: '' }); setRangeIdx(i); }}>
             {r.label}
           </button>
         ))}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>Pick a day</span>
-        <input type="date" className="input" style={{ flex: 1, maxWidth: 200 }} value={day} max={today()} onChange={(e) => setDay(e.target.value)} />
+        <input type="date" className="input" style={{ flex: 1, maxWidth: 200 }} value={day} max={today()} onChange={(e) => { setDay(e.target.value); if (e.target.value) setRng({ from: '', to: '' }); }} />
         {day && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setDay('')}>Clear</button>}
       </div>
+      {/* Custom start–end range (overrides presets + single day) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>From</span>
+        <input type="date" className="input" style={{ flex: '1 1 130px', maxWidth: 180 }} value={rng.from} max={today()} onChange={(e) => { setRng((p) => ({ ...p, from: e.target.value })); if (e.target.value) setDay(''); }} />
+        <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>To</span>
+        <input type="date" className="input" style={{ flex: '1 1 130px', maxWidth: 180 }} value={rng.to} max={today()} onChange={(e) => { setRng((p) => ({ ...p, to: e.target.value })); if (e.target.value) setDay(''); }} />
+        {custom && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setRng({ from: '', to: '' })}>Clear</button>}
+      </div>
 
-      <GroupTotals from={day || daysAgo(RANGES[rangeIdx].days)} to={day || today()} rangeLabel={day || RANGES[rangeIdx].label} />
+      <GroupTotals from={effFrom} to={effTo} rangeLabel={custom ? `${effFrom} → ${effTo}` : (day || RANGES[rangeIdx].label)} />
 
       {loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} style={{ height: 72 }} />)}</>
@@ -336,14 +347,12 @@ export default function Dashboard() {
           {/* Excel exports — combined across workspaces in Group, single-tenant otherwise. */}
           <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
             <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => {
-              const ef = day || daysAgo(RANGES[rangeIdx].days), et = day || today();
-              const p = new URLSearchParams(); p.set('from', ef); p.set('to', et);
-              downloadFile(isGroup ? `/group/sales.xlsx?${p}` : scoped(`/pos/sales.xlsx?${p}`), `sales_${ef}_${et}.xlsx`).catch(() => toast?.('Export failed', 'err'));
+              const p = new URLSearchParams(); p.set('from', effFrom); p.set('to', effTo);
+              downloadFile(isGroup ? `/group/sales.xlsx?${p}` : scoped(`/pos/sales.xlsx?${p}`), `sales_${effFrom}_${effTo}.xlsx`).catch(() => toast?.('Export failed', 'err'));
             }}>📊 Sales (Excel)</button>
             <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => {
-              const ef = day || daysAgo(RANGES[rangeIdx].days), et = day || today();
-              const p = new URLSearchParams(); p.set('from', ef); p.set('to', et);
-              downloadFile(isGroup ? `/group/customers.xlsx?${p}` : scoped(`/customers/report.xlsx?${p}`), `customers_${ef}_${et}.xlsx`).catch(() => toast?.('Export failed', 'err'));
+              const p = new URLSearchParams(); p.set('from', effFrom); p.set('to', effTo);
+              downloadFile(isGroup ? `/group/customers.xlsx?${p}` : scoped(`/customers/report.xlsx?${p}`), `customers_${effFrom}_${effTo}.xlsx`).catch(() => toast?.('Export failed', 'err'));
             }}>👥 Customers (Excel)</button>
           </div>
 

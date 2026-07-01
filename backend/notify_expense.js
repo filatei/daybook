@@ -16,7 +16,6 @@
 
 const { v4: uuid } = require('uuid');
 const { qall, qrun } = require('./db');
-const mailer = require('./mailer');
 
 const ngn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 
@@ -32,16 +31,6 @@ const ACTION_NEEDED = {
   PAID: 'Deliver the funds to the receiver',
   DELIVERED: '',
   DECLINED: '',
-};
-const EVENT_TEXT = {
-  create: 'created this expense',
-  validate: 'validated this expense',
-  review: 'reviewed this expense',
-  approve: 'approved this expense',
-  decline: 'declined this expense',
-  pay: 'marked this expense paid',
-  deliver: 'marked the funds delivered',
-  reset: 'reset this expense to draft',
 };
 
 // Resolve the recipient user-ids for a target state. `mem` = membership rows.
@@ -74,12 +63,9 @@ async function notifyExpenseEvent({ tenant_id, expense, targetState, action, act
     const userIds = [...ids];
     if (!userIds.length) return;
 
-    const tenant = await qall('SELECT name, brand_color FROM tenants WHERE id=?', [tenant_id]).then((r) => r[0] || {});
-    const site = expense.site_id ? await qall('SELECT name FROM sites WHERE id=?', [expense.site_id]).then((r) => r[0]) : null;
     const ref = '#' + (expense.ext_id || String(expense.id).slice(0, 6));
     const label = STATE_LABEL[state] || state;
     const need = ACTION_NEEDED[state] || '';
-    const evt = `${actorName || 'Someone'} ${EVENT_TEXT[action] || 'updated this expense'}.`;
     const amt = ngn(expense.amount);
 
     // 1) In-app notifications

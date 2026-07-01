@@ -2586,7 +2586,7 @@ router.get('/pos/sales.xlsx', requireAuth, async (req, res) => {
   const bySite = await qall(`SELECT s.name site, COALESCE(SUM(p.total),0) sales, COUNT(*) orders
     FROM pos_sales p JOIN sites s ON s.id=p.site_id ${W.replace(/\b(tenant_id|site_id|sale_date)\b/g, 'p.$1')} AND p.payment_method<>'INCENTIVE'
     GROUP BY s.id, s.name ORDER BY sales DESC`, args);
-  const byDay = await qall(`SELECT sale_date day, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY sale_date ORDER BY sale_date`, args);
+  const byDay = await qall(`SELECT sale_date AS "day", COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY sale_date ORDER BY sale_date`, args);
   const byMethod = await qall(`SELECT COALESCE(payment_method,'—') method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method ORDER BY sales DESC`, args);
   const byCustomer = await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, args);
   const detail = await qall(`SELECT p.sale_date, p.receipt_no, s.name site, p.customer_name, p.items_json, p.total, p.payment_method, p.status
@@ -2632,8 +2632,8 @@ router.get('/customers/report.xlsx', requireAuth, async (req, res) => {
 
   const daily = await qall(`SELECT ${cust} customer, sale_date, COALESCE(SUM(total),0) sales, COUNT(*) orders
     FROM pos_sales ${Wn} GROUP BY 1, sale_date ORDER BY customer, sale_date`, args);
-  const monthly = await qall(`SELECT ${cust} customer, SUBSTR(sale_date,1,7) month, COALESCE(SUM(total),0) sales, COUNT(*) orders
-    FROM pos_sales ${Wn} GROUP BY 1, SUBSTR(sale_date,1,7) ORDER BY customer, month`, args);
+  const monthly = await qall(`SELECT ${cust} customer, SUBSTR(sale_date,1,7) AS "month", COALESCE(SUM(total),0) sales, COUNT(*) orders
+    FROM pos_sales ${Wn} GROUP BY 1, SUBSTR(sale_date,1,7) ORDER BY customer, SUBSTR(sale_date,1,7)`, args);
   const overall = await qall(`SELECT ${cust} customer, COALESCE(SUM(total),0) sales, COUNT(*) orders
     FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, args);
 
@@ -3069,7 +3069,7 @@ router.get('/group/sales.xlsx', requireAuth, async (req, res) => {
     const W = `WHERE tenant_id=?${dateW}`; const Wn = W + " AND payment_method<>'INCENTIVE'"; const a = dArgs(t.id);
     const tot = await qone(`SELECT COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN total ELSE 0 END),0) sales, SUM(CASE WHEN payment_method<>'INCENTIVE' THEN 1 ELSE 0 END) orders, COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0) cash, COALESCE(SUM(CASE WHEN payment_method NOT IN ('CASH','INCENTIVE') THEN total ELSE 0 END),0) transfer, COALESCE(SUM(CASE WHEN payment_method='INCENTIVE' THEN total ELSE 0 END),0) incentive FROM pos_sales ${W}`, a);
     tSales += Number(tot.sales); tOrders += parseInt(tot.orders, 10); tCash += Number(tot.cash); tTransfer += Number(tot.transfer); tIncentive += Number(tot.incentive);
-    (await qall(`SELECT sale_date day, COALESCE(SUM(total),0) sales FROM pos_sales ${Wn} GROUP BY sale_date`, a)).forEach((r) => { dayMap[r.day] = (dayMap[r.day] || 0) + Number(r.sales); });
+    (await qall(`SELECT sale_date AS "day", COALESCE(SUM(total),0) sales FROM pos_sales ${Wn} GROUP BY sale_date`, a)).forEach((r) => { dayMap[r.day] = (dayMap[r.day] || 0) + Number(r.sales); });
     (await qall(`SELECT s.name site, COALESCE(SUM(p.total),0) sales, COUNT(*) orders FROM pos_sales p JOIN sites s ON s.id=p.site_id WHERE p.tenant_id=?${dateW.replace(/sale_date/g, 'p.sale_date')} AND p.payment_method<>'INCENTIVE' GROUP BY s.id,s.name ORDER BY sales DESC`, a)).forEach((r) => siteRows.push([r.site, t.name, Number(r.sales), Number(r.orders)]));
     (await qall(`SELECT COALESCE(payment_method,'—') method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method`, a)).forEach((r) => { (methodMap[r.method] = methodMap[r.method] || { sales: 0, orders: 0 }); methodMap[r.method].sales += Number(r.sales); methodMap[r.method].orders += Number(r.orders); });
     (await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, a)).forEach((r) => custRows.push([r.customer, t.name, Number(r.sales), Number(r.orders)]));
@@ -3105,7 +3105,7 @@ router.get('/group/customers.xlsx', requireAuth, async (req, res) => {
   for (const t of tenants) {
     const Wn = `WHERE tenant_id=?${dateW} AND payment_method<>'INCENTIVE'`; const a = dArgs(t.id);
     (await qall(`SELECT ${cust} customer, sale_date, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1, sale_date ORDER BY customer, sale_date`, a)).forEach((r) => daily.push([r.customer, t.name, r.sale_date, Number(r.sales), Number(r.orders)]));
-    (await qall(`SELECT ${cust} customer, SUBSTR(sale_date,1,7) month, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1, SUBSTR(sale_date,1,7) ORDER BY customer, month`, a)).forEach((r) => monthly.push([r.customer, t.name, r.month, Number(r.sales), Number(r.orders)]));
+    (await qall(`SELECT ${cust} customer, SUBSTR(sale_date,1,7) AS "month", COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1, SUBSTR(sale_date,1,7) ORDER BY customer, SUBSTR(sale_date,1,7)`, a)).forEach((r) => monthly.push([r.customer, t.name, r.month, Number(r.sales), Number(r.orders)]));
     (await qall(`SELECT ${cust} customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, a)).forEach((r) => overall.push([r.customer, t.name, Number(r.sales), Number(r.orders)]));
   }
   const sheets = {

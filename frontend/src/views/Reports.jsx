@@ -148,36 +148,78 @@ function KV({ title, obj, rows }) {
   );
 }
 
-// Day-operations detail (bags, rolls, crates, water, NEPA hours, generators, RO,
-// materials…) — the numbers the site keyed in. Shown in the archive detail so a
-// reviewer sees the full report, not just a "captured" note.
-function DayOpsView({ ops }) {
-  if (!ops || typeof ops !== 'object') return null;
-  const txt = (v) => v != null && String(v).trim() !== '';
-  const gens = Array.isArray(ops.generators) ? ops.generators.filter((g) => g && g.name) : [];
-  const ros = Array.isArray(ops.ro) ? ops.ro.filter((r) => r && (r.unit || r.pure !== '' || r.waste !== '')) : [];
-
+// FAQ-style collapsible section. Header toggles; count shows how many items are
+// inside so a reviewer can scan without expanding.
+function Collapsible({ icon, title, subtitle, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-      <div style={{ fontWeight: 700, marginBottom: 2 }}>🛠 Day operations</div>
+    <div className="card" style={{ marginTop: 8, padding: 0, overflow: 'hidden' }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '12px 14px', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}
+      >
+        <span style={{ fontSize: 18 }}>{icon}</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ fontWeight: 700 }}>{title}</span>
+          {subtitle ? <span style={{ display: 'block', fontSize: 11.5, color: 'var(--muted)' }}>{subtitle}</span> : null}
+        </span>
+        <span style={{ color: 'var(--muted)', transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }}>▸</span>
+      </button>
+      {open && <div style={{ padding: '0 14px 12px' }}>{children}</div>}
+    </div>
+  );
+}
+
+// Crate/bottle production (50cl, 60cl, 75cl, dispenser) — a Product line.
+function CratesView({ ops }) {
+  const cr = ops.crates || {}; const n = (v) => Number(v) || 0;
+  const rows = [['c50', '50cl'], ['c60', '60cl'], ['c75', '75cl'], ['disp', 'Dispenser (19L)']].map(([k, label]) => {
+    const op = n(cr[`${k}_opening`]), pd = n(cr[`${k}_produced`]), sd = n(cr[`${k}_sold`]);
+    if (!op && !pd && !sd) return null;
+    return (
+      <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+        <span>{label}</span>
+        <span style={{ color: 'var(--muted)' }}>Open {op.toLocaleString()} · Prod {pd.toLocaleString()} · Sold {sd.toLocaleString()} · <b style={{ color: 'var(--ink)' }}>Close {(op + pd - sd).toLocaleString()}</b></span>
+      </div>
+    );
+  }).filter(Boolean);
+  return rows.length ? <div style={{ marginTop: 8 }}><div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Crate / bottle production</div>{rows}</div> : null;
+}
+
+// Whether any of a set of ops keys hold data — used to hide empty sections.
+const anyOps = (...objs) => objs.some((o) => opsHas(o));
+
+// PRODUCTS group of day-ops: pure-water production + crate/bottle production.
+function ProductsOps({ ops }) {
+  return (
+    <>
       <KV title="Pure water production (bags)" obj={ops.production} rows={[['Opening', 'opening'], ['Produced', 'produced'], ['Sales', 'sales'], ['Bonus', 'bonus'], ['Incentive', 'incentive'], ['Staff water', 'staff_water']]} />
+      <CratesView ops={ops} />
+    </>
+  );
+}
+
+// CONSUMABLES group: packing bags, rolls, bottle caps, preforms, closures.
+function ConsumablesOps({ ops }) {
+  return (
+    <>
       <KV title="Packing bags" obj={ops.packing} rows={[['Opening', 'opening'], ['Received', 'received'], ['Used for production', 'used_production'], ['Sales bags', 'sales'], ['Re-bagging', 'rebagging'], ['Damage replacement', 'damage_replacement'], ['Available', 'available']]} />
       <KV title="Bag adjustments" obj={ops.bags} rows={[['Leakage', 'leakage'], ['Staff water', 'staff_water'], ['Extra / bonus', 'extra'], ['Re-bagging', 'rebagging'], ['Damage', 'damage']]} />
       <KV title="Rolls (number / kg)" obj={ops.rolls} rows={[['Opening (no.)', 'opening_count'], ['Opening (kg)', 'opening_kg'], ['Received (no.)', 'received_count'], ['Received (kg)', 'received_kg'], ['Used (no.)', 'used_count'], ['Used (kg)', 'used_kg'], ['Available (no.)', 'available_count'], ['Available (kg)', 'available_kg']]} />
-      {(() => {
-        const cr = ops.crates || {}; const n = (v) => Number(v) || 0;
-        const rows = [['c50', '50cl'], ['c60', '60cl'], ['c75', '75cl'], ['disp', 'Dispenser']].map(([k, label]) => {
-          const op = n(cr[`${k}_opening`]), pd = n(cr[`${k}_produced`]), sd = n(cr[`${k}_sold`]);
-          if (!op && !pd && !sd) return null;
-          return (
-            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
-              <span>{label}</span>
-              <span style={{ color: 'var(--muted)' }}>Open {op.toLocaleString()} · Prod {pd.toLocaleString()} · Sold {sd.toLocaleString()} · <b style={{ color: 'var(--ink)' }}>Close {(op + pd - sd).toLocaleString()}</b></span>
-            </div>
-          );
-        }).filter(Boolean);
-        return rows.length ? <div style={{ marginTop: 8 }}><div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>Crate production (bottles)</div>{rows}</div> : null;
-      })()}
+      <KV title="Bottle caps" obj={ops.caps} rows={[['Opening', 'opening'], ['Received', 'received'], ['Used', 'used'], ['Available', 'available']]} />
+      <KV title="Preforms" obj={ops.preforms} rows={[['Opening', 'opening'], ['Received', 'received'], ['Used', 'used'], ['Available', 'available']]} />
+    </>
+  );
+}
+
+// OPERATIONS group: water analysis, power, generators, RO readings, materials, docs.
+function OperationsOps({ ops }) {
+  const txt = (v) => v != null && String(v).trim() !== '';
+  const gens = Array.isArray(ops.generators) ? ops.generators.filter((g) => g && g.name) : [];
+  const ros = Array.isArray(ops.ro) ? ops.ro.filter((r) => r && (r.unit || r.pure !== '' || r.waste !== '')) : [];
+  return (
+    <>
       <KV title="Water analysis" obj={ops.water} rows={[['PH', 'ph'], ['TDS', 'tds']]} />
       <KV title="Public power (NEPA)" obj={ops.power} rows={[['NEPA hours today', 'nepa_hours']]} />
       {gens.length > 0 && (
@@ -215,7 +257,7 @@ function DayOpsView({ ops }) {
           <div style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>{ops.expired_docs}</div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -295,121 +337,154 @@ function GeneratedReportBody({ gen, ov = null }) {
   const ovRollsKg = ov && ov.rolls_available_kg !== '' ? Number(ov.rolls_available_kg) : null;
   const s = gen?.summary;
   if (!gen || !s) return null;
+  const ops = gen.scope !== 'ALL' ? (gen.summary?.ops || null) : null;
+  const hasProdCard = s.totalLoaded > 0 || s.totalBagged > 0 || s.bagReport
+    || (gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0)
+    || (ops && anyOps(ops.production, ops.crates));
+  const hasConsumables = ops && anyOps(ops.packing, ops.bags, ops.rolls, ops.caps, ops.preforms);
+  const hasOperations = ops && (anyOps(ops.water, ops.power)
+    || (Array.isArray(ops.generators) && ops.generators.some((g) => g && g.name))
+    || (Array.isArray(ops.ro) && ops.ro.some((r) => r && (r.unit || r.pure !== '' || r.waste !== '')))
+    || (ops.materials && String(ops.materials).trim()) || (ops.expired_docs && String(ops.expired_docs).trim()));
+
   return (
     <>
       <div style={{ fontWeight: 700, marginBottom: 6 }}>{gen.site_name} · {gen.report_date}</div>
-      <div className="stat-grid" style={{ marginBottom: 8 }}>
-        <Stat k="Total Sales" v={ngn(s.totalSales)} />
-        <Stat k="Orders" v={(s.orders || 0).toLocaleString()} />
-        <Stat k="Cash" v={ngn(s.cash)} />
-        <Stat k="POS / Card" v={ngn(s.pos)} />
-        <Stat k="Transfer" v={ngn(s.transfer)} />
-        {s.incentive > 0 && <Stat k="🎁 Incentive (bonus)" v={ngn(s.incentive)} accent />}
-      </div>
 
-      {(s.totalLoaded > 0 || s.totalBagged > 0) && (
-        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — loaded {s.totalLoaded.toLocaleString()} · bagged {s.totalBagged.toLocaleString()}</div>
-          {s.loaders.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>Loaders</div>}
-          {s.loaders.map((l, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
-              <span>{l.name}</span><span style={{ fontWeight: 600 }}>{l.loaded.toLocaleString()} loaded</span>
-            </div>
-          ))}
-          {s.baggers.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Baggers</div>}
-          {s.baggers.map((b, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
-              <span>{b.name}</span><span style={{ fontWeight: 600 }}>{b.bagged.toLocaleString()} bagged</span>
-            </div>
-          ))}
+      {/* ── FINANCES ─────────────────────────────────────────── */}
+      <Collapsible icon="💰" title="Finances" subtitle="Sales, payments, incentives & expenses" defaultOpen>
+        <div className="stat-grid" style={{ marginBottom: 8 }}>
+          <Stat k="Total Sales" v={ngn(s.totalSales)} />
+          <Stat k="Orders" v={(s.orders || 0).toLocaleString()} />
+          <Stat k="Cash" v={ngn(s.cash)} />
+          <Stat k="POS / Card" v={ngn(s.pos)} />
+          <Stat k="Transfer" v={ngn(s.transfer)} />
+          {s.incentive > 0 && <Stat k="🎁 Incentive (bonus)" v={ngn(s.incentive)} accent />}
         </div>
-      )}
 
-      {s.bagReport && <BagReportCard bagReport={s.bagReport} siteId={gen.site_id} />}
-
-      {(s.diesel > 0 || s.expenses > 0) && (
-        <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--muted)', margin: '8px 2px' }}>
-          <span>Diesel: <strong style={{ color: 'var(--ink)' }}>{ngn(s.diesel)}</strong></span>
-          <span>Other expenses: <strong style={{ color: 'var(--ink)' }}>{ngn(s.expenses)}</strong></span>
-        </div>
-      )}
-
-      {gen.scope === 'ALL' && (gen.bySite || []).some((r) => r.totalSales > 0 || r.incentive > 0) && (
-        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-          <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales distribution</div>
-          {(gen.bySite || []).filter((r) => r.totalSales > 0 || r.incentive > 0).sort((a, b) => b.totalSales - a.totalSales).map((r) => (
-            <div key={r.site_id || r.site_name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderTop: '1px solid var(--line)' }}>
-              <span>{r.site_name}</span>
-              <span style={{ fontWeight: 600 }}>{ngn(r.totalSales)}{r.incentive > 0 ? ` · 🎁${ngn(r.incentive)}` : ''}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {gen.summary?.salesByProduct && gen.summary.salesByProduct.length > 0 && (
-        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-          <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales by product</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
-            <span>Product</span><span style={{ textAlign: 'right' }}>Qty</span><span style={{ textAlign: 'right' }}>Amount</span>
+        {(s.diesel > 0 || s.expenses > 0) && (
+          <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--muted)', margin: '4px 2px 8px' }}>
+            <span>Diesel: <strong style={{ color: 'var(--ink)' }}>{ngn(s.diesel)}</strong></span>
+            <span>Other expenses: <strong style={{ color: 'var(--ink)' }}>{ngn(s.expenses)}</strong></span>
           </div>
-          {gen.summary.salesByProduct.map((p) => (
-            <div key={p.name} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, padding: '2px 0' }}>
-              <span>{p.name}</span>
-              <span style={{ textAlign: 'right' }}>{(p.qty || 0).toLocaleString()}</span>
-              <span style={{ textAlign: 'right' }}>{ngn(p.amount)}</span>
-            </div>
-          ))}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
-            <span>Total</span>
-            <span style={{ textAlign: 'right' }}>{gen.summary.salesByProduct.reduce((a, p) => a + (p.qty || 0), 0).toLocaleString()}</span>
-            <span style={{ textAlign: 'right' }}>{ngn(gen.summary.salesByProduct.reduce((a, p) => a + (p.amount || 0), 0))}</span>
+        )}
+
+        {gen.scope === 'ALL' && (gen.bySite || []).some((r) => r.totalSales > 0 || r.incentive > 0) && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales distribution</div>
+            {(gen.bySite || []).filter((r) => r.totalSales > 0 || r.incentive > 0).sort((a, b) => b.totalSales - a.totalSales).map((r) => (
+              <div key={r.site_id || r.site_name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderTop: '1px solid var(--line)' }}>
+                <span>{r.site_name}</span>
+                <span style={{ fontWeight: 600 }}>{ngn(r.totalSales)}{r.incentive > 0 ? ` · 🎁${ngn(r.incentive)}` : ''}</span>
+              </div>
+            ))}
           </div>
-        </div>
+        )}
+
+        {gen.summary?.salesByProduct && gen.summary.salesByProduct.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>Sales by product</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
+              <span>Product</span><span style={{ textAlign: 'right' }}>Qty</span><span style={{ textAlign: 'right' }}>Amount</span>
+            </div>
+            {gen.summary.salesByProduct.map((p) => (
+              <div key={p.name} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+                <span>{p.name}</span>
+                <span style={{ textAlign: 'right' }}>{(p.qty || 0).toLocaleString()}</span>
+                <span style={{ textAlign: 'right' }}>{ngn(p.amount)}</span>
+              </div>
+            ))}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
+              <span>Total</span>
+              <span style={{ textAlign: 'right' }}>{gen.summary.salesByProduct.reduce((a, p) => a + (p.qty || 0), 0).toLocaleString()}</span>
+              <span style={{ textAlign: 'right' }}>{ngn(gen.summary.salesByProduct.reduce((a, p) => a + (p.amount || 0), 0))}</span>
+            </div>
+          </div>
+        )}
+
+        {gen.summary?.salesByProductIncentive && gen.summary.salesByProductIncentive.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontWeight: 700 }}>Incentive / free items</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>Given out — not part of the sales total</div>
+            {gen.summary.salesByProductIncentive.map((p) => (
+              <div key={p.name} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+                <span>{p.name}</span>
+                <span style={{ textAlign: 'right' }}>{(p.qty || 0).toLocaleString()}</span>
+                <span style={{ textAlign: 'right' }}>{ngn(p.amount)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Collapsible>
+
+      {/* ── PRODUCTS ─────────────────────────────────────────── */}
+      {hasProdCard && (
+        <Collapsible icon="📦" title="Products" subtitle="Pure water, 50cl / 60cl / 75cl, dispenser (19L)">
+          {(s.totalLoaded > 0 || s.totalBagged > 0) && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>Production — loaded {s.totalLoaded.toLocaleString()} · bagged {s.totalBagged.toLocaleString()}</div>
+              {s.loaders.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>Loaders</div>}
+              {s.loaders.map((l, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+                  <span>{l.name}</span><span style={{ fontWeight: 600 }}>{l.loaded.toLocaleString()} loaded</span>
+                </div>
+              ))}
+              {s.baggers.length > 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>Baggers</div>}
+              {s.baggers.map((b, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
+                  <span>{b.name}</span><span style={{ fontWeight: 600 }}>{b.bagged.toLocaleString()} bagged</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {s.bagReport && <BagReportCard bagReport={s.bagReport} siteId={gen.site_id} />}
+
+          {ops && <ProductsOps ops={ops} />}
+
+          {gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontWeight: 700, marginBottom: 4 }}>Bags — all sites <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(sold excl. bonus)</span></div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
+                <span>Site</span><span style={{ textAlign: 'right' }}>Sold</span><span style={{ textAlign: 'right' }}>Avail</span>
+              </div>
+              {gen.summary.bagBySite.map((r) => (
+                <div key={r.site_id} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, padding: '2px 0' }}>
+                  <span>{r.site_name}</span><span style={{ textAlign: 'right' }}>{(r.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(r.available || 0).toLocaleString()}</span>
+                </div>
+              ))}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
+                <span>Total</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.available || 0).toLocaleString()}</span>
+              </div>
+            </div>
+          )}
+        </Collapsible>
       )}
 
-      {gen.summary?.salesByProductIncentive && gen.summary.salesByProductIncentive.length > 0 && (
-        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-          <div style={{ fontWeight: 700 }}>Incentive / free items</div>
-          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>Given out — not part of the sales total</div>
-          {gen.summary.salesByProductIncentive.map((p) => (
-            <div key={p.name} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 110px', gap: 4, fontSize: 13, padding: '2px 0' }}>
-              <span>{p.name}</span>
-              <span style={{ textAlign: 'right' }}>{(p.qty || 0).toLocaleString()}</span>
-              <span style={{ textAlign: 'right' }}>{ngn(p.amount)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {gen.scope === 'ALL' && gen.summary?.bagBySite && gen.summary.bagBySite.length > 0 && (
-        <div className="card" style={{ marginTop: 8, padding: '10px 14px' }}>
-          <div style={{ fontWeight: 700, marginBottom: 4 }}>Bags — all sites <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--muted)' }}>(sold excl. bonus)</span></div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 11, color: 'var(--muted)', fontWeight: 700, borderBottom: '1px solid var(--line)', paddingBottom: 3 }}>
-            <span>Site</span><span style={{ textAlign: 'right' }}>Sold</span><span style={{ textAlign: 'right' }}>Avail</span>
-          </div>
-          {gen.summary.bagBySite.map((r) => (
-            <div key={r.site_id} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, padding: '2px 0' }}>
-              <span>{r.site_name}</span><span style={{ textAlign: 'right' }}>{(r.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(r.available || 0).toLocaleString()}</span>
-            </div>
-          ))}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px', gap: 4, fontSize: 13, fontWeight: 800, borderTop: '1px solid var(--line)', paddingTop: 3 }}>
-            <span>Total</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.sold || 0).toLocaleString()}</span><span style={{ textAlign: 'right' }}>{(gen.summary.bagTotals?.available || 0).toLocaleString()}</span>
-          </div>
-          {gen.summary.stockTotals && (
-            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8, borderTop: '1px solid var(--line)', paddingTop: 6 }}>
+      {/* ── CONSUMABLES ──────────────────────────────────────── */}
+      {(hasConsumables || (gen.scope === 'ALL' && gen.summary?.stockTotals)) && (
+        <Collapsible icon="🧰" title="Consumables" subtitle="Packing bags, rolls, caps, preforms">
+          {ops && <ConsumablesOps ops={ops} />}
+          {gen.scope === 'ALL' && gen.summary?.stockTotals && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>
               Packing bags: used {(gen.summary.stockTotals.packing_used || 0).toLocaleString()} · avail {((ovPacking != null ? ovPacking : gen.summary.stockTotals.packing_available) || 0).toLocaleString()} · Rolls: used {(gen.summary.stockTotals.rolls_used_count || 0).toLocaleString()} ({(gen.summary.stockTotals.rolls_used_kg || 0).toLocaleString()}kg) · avail {(gen.summary.stockTotals.rolls_available_count || 0).toLocaleString()} ({((ovRollsKg != null ? ovRollsKg : gen.summary.stockTotals.rolls_available_kg) || 0).toLocaleString()}kg)
             </div>
           )}
-        </div>
+        </Collapsible>
       )}
 
-      {gen.scope !== 'ALL' && (gen.summary?.ops
-        ? <DayOpsView ops={gen.summary.ops} />
-        : (
-          <div style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 2px' }}>
-            No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.
-          </div>
-        ))}
+      {/* ── OPERATIONS ───────────────────────────────────────── */}
+      {hasOperations && (
+        <Collapsible icon="🛠" title="Operations" subtitle="Water analysis, power, generators, RO">
+          <OperationsOps ops={ops} />
+        </Collapsible>
+      )}
+
+      {gen.scope !== 'ALL' && !ops && (
+        <div style={{ fontSize: 12, color: 'var(--muted)', margin: '6px 2px' }}>
+          No day operations captured yet — use 🛠 Day ops to add bags/rolls/generators/RO.
+        </div>
+      )}
     </>
   );
 }

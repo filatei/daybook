@@ -553,6 +553,150 @@ function BankAccountsTab() {
   );
 }
 
+// Finance-only (Snr Accountant+). Double-entry general ledger: trial balance,
+// per-account drill, manual journals, and idempotent sync from the subledgers.
+function LedgerTab() {
+  const { openModal, closeModal, toast, tenant } = useStore();
+  const [tb, setTb] = useState(null);
+  const [asOf, setAsOf] = useState('');
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try { setTb(await api(scoped(`/gl/trial-balance${asOf ? `?as_of=${asOf}` : ''}`))); } catch (e) { toast(e.message, 'err'); setTb({ accounts: [], totals: { debit: 0, credit: 0 } }); }
+  }, [tenant, asOf]);
+  useEffect(() => { load(); }, [load]);
+
+  const sync = async () => {
+    setBusy(true);
+    try { const r = await api(scoped('/gl/sync'), { method: 'POST', body: {} }); const p = r.posted || {}; toast(`Synced: ${Object.values(p).reduce((a, n) => a + n, 0)} new journals`, 'ok'); load(); }
+    catch (e) { toast(e.message || 'Sync failed', 'err'); }
+    setBusy(false);
+  };
+  const drill = (a) => openModal(<AccountLedger acct={a} onClose={closeModal} />);
+  const newJournal = () => openModal(<JournalForm accounts={tb?.accounts || []} onSaved={load} onClose={closeModal} />, { guard: true });
+
+  const SECTIONS = [['ASSET', 'Assets'], ['LIABILITY', 'Liabilities'], ['EQUITY', 'Equity'], ['INCOME', 'Income'], ['EXPENSE', 'Expenses']];
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 12px' }}>
+        Double-entry general ledger. <b>Sync</b> posts balanced journals from your sales, expenses,
+        cash deposits and payroll (idempotent — safe to re-run). Tap an account to drill into its lines.
+        Snr Accountant, GM &amp; Admin only.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+        <label style={{ fontSize: 12, color: 'var(--muted)' }}>As of</label>
+        <input type="date" value={asOf} onChange={(e) => setAsOf(e.target.value)} style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--line)' }} />
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={sync} disabled={busy}>{busy ? 'Syncing…' : '🔄 Sync from records'}</button>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={newJournal}>✎ Manual journal</button>
+      </div>
+      {tb === null ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</> : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {SECTIONS.map(([type, label]) => {
+            const rows = tb.accounts.filter((a) => a.type === type && (a.debit || a.credit));
+            if (!rows.length) return null;
+            return (
+              <div key={type}>
+                <div style={{ padding: '8px 16px', background: 'var(--bg-soft, #f8fafc)', fontWeight: 700, fontSize: 12, textTransform: 'uppercase', color: 'var(--muted)' }}>{label}</div>
+                {rows.map((a) => (
+                  <button key={a.code} onClick={() => drill(a)} style={{ display: 'flex', width: '100%', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                    <span style={{ fontSize: 11, color: 'var(--muted)', width: 42 }}>{a.code}</span>
+                    <span style={{ flex: 1, minWidth: 0 }}>{a.name}</span>
+                    <span style={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{ngn(a.balance)}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', fontWeight: 800, background: 'var(--bg-soft, #f8fafc)' }}>
+            <span>Trial balance</span>
+            <span style={{ fontVariantNumeric: 'tabular-nums' }}>Dr {ngn(tb.totals.debit)} · Cr {ngn(tb.totals.credit)}{tb.totals.debit === tb.totals.credit ? ' ✓' : ' ⚠︎'}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AccountLedger({ acct, onClose }) {
+  const { toast, tenant } = useStore();
+  const [lines, setLines] = useState(null);
+  useEffect(() => {
+    api(scoped(`/gl/account/${acct.code}`)).then((r) => setLines(r.lines || [])).catch((e) => { toast(e.message, 'err'); setLines([]); });
+  }, [acct, tenant]);
+  return (
+    <div>
+      <div className="grip" />
+      <h3>{acct.code} · {acct.name}</h3>
+      <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 10 }}>Balance {ngn(acct.balance)}</div>
+      {lines === null ? <div className="skel" /> : lines.length === 0 ? <div className="empty"><p>No entries</p></div> : (
+        <div style={{ maxHeight: '50vh', overflowY: 'auto' }}>
+          {lines.map((l, i) => (
+            <div key={i} style={{ display: 'flex', gap: 8, padding: '8px 0', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+              <span style={{ color: 'var(--muted)', width: 78 }}>{l.jdate}</span>
+              <span style={{ flex: 1, minWidth: 0 }}>{l.memo}{l.source_type && l.source_type !== 'manual' ? ` · ${l.source_type}` : ''}</span>
+              <span style={{ width: 90, textAlign: 'right', color: '#166534', fontVariantNumeric: 'tabular-nums' }}>{l.debit ? ngn(l.debit) : ''}</span>
+              <span style={{ width: 90, textAlign: 'right', color: '#991b1b', fontVariantNumeric: 'tabular-nums' }}>{l.credit ? ngn(l.credit) : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="cap-bar"><button className="btn btn-ghost" onClick={onClose}>Close</button></div>
+    </div>
+  );
+}
+
+function JournalForm({ accounts, onSaved, onClose }) {
+  const { toast } = useStore();
+  const today = new Date().toISOString().slice(0, 10);
+  const [jdate, setJdate] = useState(today);
+  const [memo, setMemo] = useState('');
+  const [rows, setRows] = useState([{ account_code: '', debit: '', credit: '' }, { account_code: '', debit: '', credit: '' }]);
+  const [saving, setSaving] = useState(false);
+  const opts = accounts.length ? accounts : [];
+  const setRow = (i, k, v) => setRows((p) => p.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const dr = rows.reduce((a, r) => a + (Number(r.debit) || 0), 0);
+  const cr = rows.reduce((a, r) => a + (Number(r.credit) || 0), 0);
+  const balanced = dr === cr && dr > 0;
+
+  const save = async () => {
+    if (!balanced) return toast('Debits must equal credits (and be non-zero)', 'err');
+    const lines = rows.filter((r) => r.account_code && ((Number(r.debit) || 0) > 0 || (Number(r.credit) || 0) > 0))
+      .map((r) => ({ account_code: r.account_code, debit: Number(r.debit) || 0, credit: Number(r.credit) || 0 }));
+    if (lines.length < 2) return toast('Add at least two account lines', 'err');
+    setSaving(true);
+    try { await api(scoped('/gl/journals'), { method: 'POST', body: { jdate, memo, lines } }); toast('Journal posted ✓', 'ok'); onSaved(); onClose(); }
+    catch (e) { toast(e.message || 'Post failed', 'err'); }
+    setSaving(false);
+  };
+  return (
+    <div>
+      <div className="grip" />
+      <h3>Manual journal</h3>
+      <div className="grid2">
+        <div><label className="fl">Date</label><input type="date" className="input" value={jdate} onChange={(e) => setJdate(e.target.value)} /></div>
+        <div><label className="fl">Memo</label><input className="input" value={memo} onChange={(e) => setMemo(e.target.value)} placeholder="e.g. Depreciation for June" /></div>
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+          <select className="input" style={{ flex: 2 }} value={r.account_code} onChange={(e) => setRow(i, 'account_code', e.target.value)}>
+            <option value="">Account…</option>
+            {opts.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
+          </select>
+          <input className="input" style={{ flex: 1 }} inputMode="decimal" placeholder="Dr" value={r.debit} onChange={(e) => setRow(i, 'debit', e.target.value)} />
+          <input className="input" style={{ flex: 1 }} inputMode="decimal" placeholder="Cr" value={r.credit} onChange={(e) => setRow(i, 'credit', e.target.value)} />
+        </div>
+      ))}
+      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px', marginTop: 8 }} onClick={() => setRows((p) => [...p, { account_code: '', debit: '', credit: '' }])}>+ Line</button>
+      <div style={{ marginTop: 8, fontSize: 13, fontWeight: 700, color: balanced ? '#166534' : 'var(--muted)' }}>
+        Dr {ngn(dr)} · Cr {ngn(cr)} {balanced ? '✓ balanced' : '— must balance'}
+      </div>
+      <div className="cap-bar">
+        <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+        <button className="btn" onClick={save} disabled={saving || !balanced}>{saving ? <span className="spin" /> : 'Post'}</button>
+      </div>
+    </div>
+  );
+}
+
 // Finance-only (Snr Accountant+). Turns the year's sales/expenses/payroll/assets
 // into a management-accounts workbook fileable with NRS (FIRS) or given to an auditor.
 function AccountsTab() {
@@ -681,10 +825,11 @@ export default function Admin() {
         {isSnr && <button className={`seg-b${tab === 'reportmail' ? ' on' : ''}`} onClick={() => setTab('reportmail')}>📧 Report emails</button>}
         {isSnr && <button className={`seg-b${tab === 'banks' ? ' on' : ''}`} onClick={() => setTab('banks')}>🏦 Bank accounts</button>}
         {isSnr && <button className={`seg-b${tab === 'accounts' ? ' on' : ''}`} onClick={() => setTab('accounts')}>📒 Accounts</button>}
+        {isSnr && <button className={`seg-b${tab === 'ledger' ? ' on' : ''}`} onClick={() => setTab('ledger')}>📖 Ledger</button>}
         {isAdmin && <button className={`seg-b${tab === 'settings' ? ' on' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>}
       </div>
 
-      {tab === 'accounts' ? <AccountsTab /> : tab === 'banks' ? <BankAccountsTab /> : tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
+      {tab === 'ledger' ? <LedgerTab /> : tab === 'accounts' ? <AccountsTab /> : tab === 'banks' ? <BankAccountsTab /> : tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

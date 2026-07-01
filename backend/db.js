@@ -579,6 +579,49 @@ async function migrate() {
     ALTER TABLE compliance_docs ADD COLUMN IF NOT EXISTS direction TEXT DEFAULT 'INBOUND';
   `);
 
+  // ── GENERAL LEDGER (double-entry) ─────────────────────────────────────────
+  // gl_accounts = chart of accounts (seeded per tenant by gl.js). gl_journals =
+  // balanced entries; gl_lines = the debit/credit legs. Journals derived from a
+  // subledger record carry (source_type, source_id) so posting is idempotent —
+  // gl.js re-syncs safely without double-posting.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gl_accounts (
+      tenant_id  TEXT NOT NULL,
+      code       TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      type       TEXT NOT NULL,            -- ASSET | LIABILITY | EQUITY | INCOME | EXPENSE
+      normal     TEXT NOT NULL,            -- D | C  (normal balance side)
+      sort       INTEGER DEFAULT 0,
+      PRIMARY KEY (tenant_id, code)
+    );
+    CREATE TABLE IF NOT EXISTS gl_journals (
+      id          TEXT PRIMARY KEY,
+      tenant_id   TEXT NOT NULL,
+      jdate       TEXT NOT NULL,           -- YYYY-MM-DD
+      memo        TEXT,
+      source_type TEXT,                    -- sale|expense|exp_pay|cash_dep|payrun|payrun_pay|manual
+      source_id   TEXT,
+      posted_by   TEXT,
+      voided      INTEGER DEFAULT 0,
+      created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_gl_src
+      ON gl_journals(tenant_id, source_type, source_id)
+      WHERE source_type IS NOT NULL AND source_type <> 'manual';
+    CREATE INDEX IF NOT EXISTS idx_gl_j_date ON gl_journals(tenant_id, jdate);
+    CREATE TABLE IF NOT EXISTS gl_lines (
+      id           TEXT PRIMARY KEY,
+      journal_id   TEXT NOT NULL REFERENCES gl_journals(id) ON DELETE CASCADE,
+      tenant_id    TEXT NOT NULL,
+      account_code TEXT NOT NULL,
+      debit        DOUBLE PRECISION DEFAULT 0,
+      credit       DOUBLE PRECISION DEFAULT 0,
+      memo         TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_gl_lines_j ON gl_lines(journal_id);
+    CREATE INDEX IF NOT EXISTS idx_gl_lines_acct ON gl_lines(tenant_id, account_code);
+  `);
+
   // Cutover quarantine — fido orders rejected during migration (no usable
   // timestamp or no Fido order id) are recorded here instead of imported, so
   // they're auditable and can be cleaned in Fido rather than carried into Postgres.

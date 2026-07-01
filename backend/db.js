@@ -801,6 +801,15 @@ async function migrate() {
       created_at  BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
     );
     CREATE INDEX IF NOT EXISTS idx_exp_wf ON expense_wf_log(expense_id);
+    -- Backfill legacy Fido expenses (ext_id set) that were imported without a
+    -- workflow state so they don't sit in DRAFT (a draft can't be paid). Carry a
+    -- status from the payment position; idempotent (only touches DRAFT/NULL rows).
+    UPDATE expenses SET wf_state = CASE
+        WHEN amount > 0 AND COALESCE(amount_paid,0) >= amount - 0.01 THEN 'PAID'
+        WHEN COALESCE(amount_paid,0) > 0.01 THEN 'APPROVED'
+        ELSE 'REVIEWED'
+      END
+     WHERE ext_id IS NOT NULL AND (wf_state IS NULL OR wf_state = 'DRAFT');
     CREATE TABLE IF NOT EXISTS expense_payments (
       id         TEXT PRIMARY KEY,
       tenant_id  TEXT NOT NULL,

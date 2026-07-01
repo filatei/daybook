@@ -281,18 +281,23 @@ async function etlExpenses(mongoDB, { nameMap, oidMap, norm }) {
     const payHistory = Array.isArray(e.payHistory) ? e.payHistory : [];
     const paid = Math.round(payHistory.reduce((a, p) => a + num(p.paidAmount), 0) * 100) / 100;
     const status = paid <= 0.01 ? 'UNPAID' : (paid >= amount - 0.01 ? 'PAID' : 'PART');
+    // Legacy Fido tickets are already actioned — they must not land in DRAFT (a
+    // draft can't be paid). Carry a workflow state from the payment position:
+    // fully paid → PAID, part-paid → APPROVED (can still be paid down), else REVIEWED.
+    const wf_state = (amount > 0 && paid >= amount - 0.01) ? 'PAID' : (paid > 0.01 ? 'APPROVED' : 'REVIEWED');
     try {
       const row = await qone(
-        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,items_json,amount,amount_paid,status,kind,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO expenses (id,tenant_id,site_id,ext_id,expense_date,category,description,vendor,items_json,amount,amount_paid,status,kind,wf_state,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (tenant_id,ext_id) WHERE ext_id IS NOT NULL DO UPDATE SET
            vendor=COALESCE(EXCLUDED.vendor, expenses.vendor),
            items_json=COALESCE(EXCLUDED.items_json, expenses.items_json),
-           category=EXCLUDED.category, amount_paid=EXCLUDED.amount_paid, status=EXCLUDED.status
+           category=EXCLUDED.category, amount_paid=EXCLUDED.amount_paid, status=EXCLUDED.status,
+           wf_state=COALESCE(NULLIF(expenses.wf_state,'DRAFT'), EXCLUDED.wf_state)
          RETURNING id`,
         [uuid(), site.tenant_id, site.id, ext_id, expDate, category,
           clean(e.description || e.remarks || e.note || (items[0] && items[0].name)), vendorName,
-          items.length ? JSON.stringify(items) : null, amount, paid, status, kind,
+          items.length ? JSON.stringify(items) : null, amount, paid, status, kind, wf_state,
           Math.floor((e.createdAt instanceof Date ? e.createdAt : new Date()).getTime() / 1000)]);
       stats.inserted++;
       // Migrate each payment in the ticket's history (idempotent on ext_id).

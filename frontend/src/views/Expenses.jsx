@@ -7,7 +7,7 @@ import Cash from './Cash.jsx';
 
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
 
-function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
+function ExpenseForm({ expense, sites, onSave, onClose }) {
   const { toast, tenant, setDirty } = useStore();
   const [saving, setSaving] = useState(false);
   // Editing from the combined Group view → pin to this ticket's workspace.
@@ -23,7 +23,10 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
     catch { return []; }
   }, [tenant]); // eslint-disable-line react-hooks/exhaustive-deps
   const [f, setF] = useState({
-    category: expense?.category || categories[0] || 'OTHER',
+    // Category is no longer chosen by staff (they often pick the wrong one).
+    // Existing tickets keep their category on edit; new ones are left blank and
+    // the backend defaults to OTHER — future AI will categorise from the items.
+    category: expense?.category || '',
     description: expense?.description || '',
     expense_date: expense?.expense_date || today(),
     site_id: expense?.site_id || sites[0]?.id || '',
@@ -96,19 +99,9 @@ function ExpenseForm({ expense, sites, categories = [], onSave, onClose }) {
         <button type="button" className={`seg-b${f.kind === 'NON_IMPREST' ? ' on' : ''}`} onClick={() => set('kind', 'NON_IMPREST')}>Non-imprest</button>
         <button type="button" className={`seg-b${f.kind === 'IMPREST' ? ' on' : ''}`} onClick={() => set('kind', 'IMPREST')}>Imprest</button>
       </div>
-      <div className="grid2">
-        <div>
-          <label className="fl">Date</label>
-          <input type="date" className="input" value={f.expense_date} max={today()}
-            onChange={(e) => set('expense_date', e.target.value)} />
-        </div>
-        <div>
-          <label className="fl">Category</label>
-          <input className="input" list="exp-cats" value={f.category} placeholder="Pick or type"
-            onChange={(e) => set('category', e.target.value)} />
-          <datalist id="exp-cats">{categories.map((c) => <option key={c} value={c} />)}</datalist>
-        </div>
-      </div>
+      <label className="fl">Date</label>
+      <input type="date" className="input" style={{ marginBottom: 4 }} value={f.expense_date} max={today()}
+        onChange={(e) => set('expense_date', e.target.value)} />
       <label className="fl">Items</label>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 56px 88px 70px 26px', gap: 6, fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.4px', padding: '0 2px 4px' }}>
         <span>Item</span><span style={{ textAlign: 'center' }}>Qty</span><span style={{ textAlign: 'right' }}>Rate</span><span style={{ textAlign: 'right' }}>Amount</span><span />

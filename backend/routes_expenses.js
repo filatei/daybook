@@ -66,13 +66,22 @@ router.get('/', requireAuth, async (req, res) => {
   const c = await contextFor(req.user, tid);
   if (!c) return res.status(403).json({ error: 'forbidden' });
 
-  const { site, from, to, category, vendor, unpaid, kind } = req.query;
+  const { site, from, to, category, vendor, unpaid, kind, q } = req.query;
   const where = ['e.tenant_id=?'], args = [tid];
 
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   else if (site) { where.push('e.site_id=?'); args.push(site); }
-  if (from) { where.push('e.expense_date>=?'); args.push(from); }
-  if (to)   { where.push('e.expense_date<=?'); args.push(to); }
+  // Free-text search (id / vendor / site / description) searches ALL history —
+  // date filters are ignored when q is present so an old ticket can be found.
+  const qq = (q || '').trim();
+  if (qq) {
+    const like = `%${qq}%`;
+    where.push('(e.ext_id ILIKE ? OR e.vendor ILIKE ? OR s.name ILIKE ? OR e.description ILIKE ? OR e.category ILIKE ? OR e.id ILIKE ?)');
+    args.push(like, like, like, like, like, like);
+  } else {
+    if (from) { where.push('e.expense_date>=?'); args.push(from); }
+    if (to)   { where.push('e.expense_date<=?'); args.push(to); }
+  }
   if (category) { where.push('e.category=?'); args.push(category.toUpperCase()); }
   if (vendor) { where.push('lower(e.vendor)=lower(?)'); args.push(vendor); }
   if (unpaid === '1') { where.push('e.amount > COALESCE(e.amount_paid,0)'); }

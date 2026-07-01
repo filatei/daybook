@@ -545,7 +545,10 @@ export default function Expenses() {
   const [loading, setLoading] = useState(true);
   // Default the date range to today so admins land on "today across all sites".
   const [filter, setFilter] = useState({ cat: '', from: today(), to: today(), kind: '' });
+  const [search, setSearch] = useState('');   // free-text: id / vendor / site
+  const [qDebounced, setQDebounced] = useState('');   // debounced → server search (all history)
   const [tab, setTab] = useState('list');   // list | cash | payables
+  useEffect(() => { const t = setTimeout(() => setQDebounced(search.trim()), 300); return () => clearTimeout(t); }, [search]);
   const [imprest, setImprest] = useState(null);   // per-site imprest summary
 
   // Stable key so the per-tenant group fetch effect doesn't loop on array identity.
@@ -560,6 +563,7 @@ export default function Expenses() {
     setLoading(true);
     const qs = () => {
       const p = new URLSearchParams();
+      if (qDebounced) { p.set('q', qDebounced); return p; }   // search overrides date/category filters (all history)
       if (filter.cat) p.set('category', filter.cat);
       if (filter.from) p.set('from', filter.from);
       if (filter.to) p.set('to', filter.to);
@@ -582,7 +586,7 @@ export default function Expenses() {
       }
     } catch { setExpenses([]); }
     setLoading(false);
-  }, [tenant, filter, isGroup, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tenant, filter, isGroup, groupKey, qDebounced]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
@@ -612,7 +616,15 @@ export default function Expenses() {
     openModal(<ExpenseDetail expense={exp} sites={sites} onEdit={() => openForm(exp)} onChanged={load} onClose={closeModal} />);
   };
 
-  const total = expenses.reduce((s, e) => s + (+e.amount || 0), 0);
+  // Free-text filter: expense ID (ext_id or short uuid), vendor, site (+ description/category).
+  const shown = (() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return expenses;
+    return expenses.filter((e) => [
+      e.ext_id, String(e.id || '').slice(0, 8), e.vendor, e.site_name, e.description, e.category, e.tenant_name,
+    ].some((v) => (v || '').toString().toLowerCase().includes(q)));
+  })();
+  const total = shown.reduce((s, e) => s + (+e.amount || 0), 0);
 
   return (
     <div>
@@ -643,6 +655,10 @@ export default function Expenses() {
           onChange={(e) => setFilter((p) => ({ ...p, to: e.target.value }))} />
       </div>
 
+      {/* Free-text search — id / vendor / site (works across tenants in Group) */}
+      <input className="input" style={{ marginBottom: 12 }} value={search} onChange={(e) => setSearch(e.target.value)}
+        placeholder="🔍 Search by expense ID, vendor or site…" />
+
       {/* AI: type or speak an expense in plain English */}
       {!isGroup && (
         <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 12 }}
@@ -667,27 +683,27 @@ export default function Expenses() {
         </div>
       )}
 
-      {!loading && expenses.length > 0 && (
+      {!loading && shown.length > 0 && (
         <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px' }}>
-          <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{expenses.length} expenses</span>
+          <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{shown.length} expense{shown.length === 1 ? '' : 's'}{search.trim() ? ' matched' : ''}</span>
           <span style={{ fontWeight: 800, fontSize: 18 }}>{ngn(total)}</span>
         </div>
       )}
 
       {loading ? (
         <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
-      ) : expenses.length === 0 ? (
-        <div className="empty"><div className="ic">💸</div><p>No expenses found</p></div>
+      ) : shown.length === 0 ? (
+        <div className="empty"><div className="ic">💸</div><p>{search.trim() ? `No expenses match “${search.trim()}”` : 'No expenses found'}</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {expenses.map((e) => (
+          {shown.map((e) => (
             <button key={e.id} onClick={() => openDetail(e)}
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ fontSize: 22 }}>{catIcon(e.category)}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700 }}>{e.description || e.category} <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: (WF[e.wf_state] || WF.DRAFT).bg, color: (WF[e.wf_state] || WF.DRAFT).fg }}>{(WF[e.wf_state] || WF.DRAFT).label}</span>{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{isGroup && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
+                  #{e.ext_id || String(e.id).slice(0, 6)} · {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{isGroup && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
                 </div>
               </div>
               <div style={{ fontWeight: 800 }}>{ngn(e.amount)}</div>

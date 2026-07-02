@@ -530,11 +530,13 @@ export default function Sell() {
             >
               <div className="pn">{p.name}</div>
               <div className="pp">{ngn(p.price)}</div>
-              {p.track_stock && (
+              {/* track_stock is an int (0/1); use a real boolean so `0` never
+                  renders as a stray "0" text node under the tile. */}
+              {p.track_stock ? (
                 <div className={`ps${p.stock_qty === 0 ? ' out' : ''}`}>
                   {p.stock_qty === 0 ? 'Out of stock' : `${p.stock_qty} left`}
                 </div>
-              )}
+              ) : null}
             </button>
           ))}
         </div>

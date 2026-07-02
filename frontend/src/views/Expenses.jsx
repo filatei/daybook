@@ -276,7 +276,7 @@ function PayablesView({ onOpenExpense }) {
 
 // View-first detail: read the ticket, attach receipts/notes, then choose to edit.
 function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
-  const { toast, confirm, user } = useStore();
+  const { toast, confirm, user, tenants } = useStore();
   const role = useRole();
   // Pin every request to THIS expense's workspace so the detail + approval flow
   // works from the combined Group view too (no single active tenant there).
@@ -319,7 +319,19 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     catch { /* ignore */ }
   }, [expense.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { loadPays(); loadAtts(); loadLog(); }, [loadPays, loadAtts, loadLog]);
-  useEffect(() => { api(ts('/bank-accounts')).then((r) => setBanks(Array.isArray(r) ? r.filter((b) => b.active) : [])).catch(() => setBanks([])); }, [expense.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // List bank accounts from EVERY workspace the user has (Fido + Fiafia), so any
+  // company's account can be picked as the payment source; tag multi-workspace rows.
+  useEffect(() => {
+    const list = Array.isArray(tenants) ? tenants : [];
+    const multi = list.length > 1;
+    const tag = (rows, tname) => (Array.isArray(rows) ? rows.filter((b) => b.active) : []).map((b) => ({ ...b, _tenant: multi ? tname : null }));
+    if (list.length) {
+      Promise.all(list.map((t) => api(`/bank-accounts?tenant=${t.id}`).then((r) => tag(r, t.name)).catch(() => [])))
+        .then((parts) => setBanks(parts.flat()));
+    } else {
+      api(ts('/bank-accounts')).then((r) => setBanks(tag(r, null))).catch(() => setBanks([]));
+    }
+  }, [expense.id, tenants]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Record a (partial or full) payment from the Pay form; attach the receipt and,
   // when it clears the balance, move the ticket to PAID — all in one go.
@@ -461,7 +473,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
           <label className="fl" style={{ marginTop: 8 }}>Paid from (bank account)</label>
           <select className="input" value={payBank} onChange={(e) => setPayBank(e.target.value)}>
             <option value="">Cash / unspecified</option>
-            {banks.map((b) => <option key={b.id} value={b.label}>{b.label}{b.bank_name ? ` · ${b.bank_name}` : ''}{b.account_number ? ` · ${b.account_number}` : ''}</option>)}
+            {banks.map((b) => <option key={b.id} value={b._tenant ? `${b.label} (${b._tenant})` : b.label}>{b.label}{b.bank_name ? ` · ${b.bank_name}` : ''}{b.account_number ? ` · ${b.account_number}` : ''}{b._tenant ? ` · ${b._tenant}` : ''}</option>)}
           </select>
           <label className="fl" style={{ marginTop: 8 }}>Note (optional)</label>
           <input className="input" value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="e.g. transfer ref, teller no." />

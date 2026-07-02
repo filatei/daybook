@@ -286,8 +286,12 @@ export default function Sell() {
   const hasCustomer = !!custName.trim();   // customer is compulsory on a sale
   const canCharge   = cartLines.length > 0 && hasCustomer && !posting && (payMethod !== 'CASH' || tenderedAmt >= subtotal);
 
+  // "INCENTIVE" is a payment/bonus type, not a sellable product — hide the tile
+  // so cashiers don't ring it up as a sale (give bonus goods via the Incentive
+  // payment method instead).
   const filtered = products.filter((p) =>
-    !search || p.name.toLowerCase().includes(search.toLowerCase())
+    (p.name || '').trim().toUpperCase() !== 'INCENTIVE'
+    && (!search || p.name.toLowerCase().includes(search.toLowerCase()))
   );
 
   // Cart actions

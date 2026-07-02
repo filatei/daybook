@@ -429,7 +429,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
         <div className="av" style={{ fontSize: 24 }}>{catIcon(expense.category)}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <h3 style={{ margin: 0 }}>{expense.description || expense.category} {expense.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3' }}>IMPREST</span>}</h3>
-          <div style={{ fontSize: 12, color: 'var(--muted)' }}>{expense.expense_date} · {expense.category}{expense.vendor ? ` · ${expense.vendor}` : ''}{siteName ? ` · ${siteName}` : ''}</div>
+          <div style={{ fontSize: 12, color: 'var(--muted)' }}>{expense.expense_date}{expense.vendor ? ` · ${expense.vendor}` : ''}{siteName ? ` · ${siteName}` : ''}</div>
         </div>
         <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 20, background: (WF[wf] || WF.DRAFT).bg, color: (WF[wf] || WF.DRAFT).fg }}>{(WF[wf] || WF.DRAFT).label}</span>
         {canDelete && <button className="btn btn-ghost" style={{ width: 'auto', padding: '4px 8px', color: 'var(--err)' }} disabled={busy} onClick={del} title="Delete this unpaid expense">🗑</button>}
@@ -732,10 +732,12 @@ export default function Expenses() {
   const total = shown.reduce((s, e) => s + (+e.amount || 0), 0);
 
   // Group the (filtered) list by workflow status, in lifecycle order.
-  const STATE_ORDER = ['DRAFT', 'VALIDATED', 'REVIEWED', 'APPROVED', 'PAID', 'DELIVERED', 'DECLINED'];
+  const STATE_ORDER = ['DRAFT', 'VALIDATED', 'REVIEWED', 'APPROVED', 'PAID', 'DECLINED'];
   const NEXT = { DRAFT: 'validate', VALIDATED: 'review', REVIEWED: 'approve', APPROVED: 'pay' };
+  // Legacy DELIVERED tickets are effectively paid — show them under PAID.
+  const groupState = (e) => { const s = e.wf_state || 'DRAFT'; return s === 'DELIVERED' ? 'PAID' : s; };
   const groups = STATE_ORDER
-    .map((st) => ({ state: st, rows: shown.filter((e) => (e.wf_state || 'DRAFT') === st) }))
+    .map((st) => ({ state: st, rows: shown.filter((e) => groupState(e) === st) }))
     .filter((g) => g.rows.length);
 
   const toggleSel = (id) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });

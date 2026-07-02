@@ -71,7 +71,7 @@ function DieselForm({ sites, defaultSite, onSave, onClose }) {
 }
 
 export default function Diesel() {
-  const { openModal, closeModal, tenant, sites, go, toast } = useStore();
+  const { openModal, closeModal, tenant, sites, go, toast, confirm } = useStore();
   const role = useRole();
   const canEdit = role && atLeast(role, 'SECRETARY');
   const [rows, setRows] = useState([]);
@@ -92,6 +92,7 @@ export default function Diesel() {
   useEffect(() => { load(); }, [load]);
 
   const del = async (id) => {
+    if (!await confirm({ title: 'Delete this diesel entry?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true })) return;
     try { await api(scoped(`/diesel/${id}`), { method: 'DELETE' }); toast('Deleted', 'ok'); load(); }
     catch (e) { toast(e.message, 'err'); }
   };

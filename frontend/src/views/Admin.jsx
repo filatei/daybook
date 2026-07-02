@@ -764,6 +764,7 @@ export default function Admin() {
   }, [tenant]);
 
   const revokeInvite = async (id) => {
+    if (!await confirm({ title: 'Remove pending member?', message: 'The invitation is cancelled. You can re-invite them later.', confirmText: 'Remove', danger: true })) return;
     try { await api(scoped(`/invites/${id}`), { method: 'DELETE' }); toast('Pending member removed', 'ok'); loadMembers(); }
     catch (e) { toast(e.message, 'err'); }
   };

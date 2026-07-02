@@ -44,7 +44,7 @@ function MorningReportStatus({ date }) {
 // attachments whenever the report is emailed (the email routes pull documents by
 // report_id). Shown in the report editor and the read-only archive detail.
 function ReportAttachments({ reportId, siteId, canEdit = true }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const [docs, setDocs] = useState([]);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
@@ -85,6 +85,7 @@ function ReportAttachments({ reportId, siteId, canEdit = true }) {
     } catch (e) { toast(e.message || 'Could not download', 'err'); }
   };
   const remove = async (d) => {
+    if (!await confirm({ title: 'Delete this document?', message: `${d.file_name || 'This file'} will be permanently removed.`, confirmText: 'Delete', danger: true })) return;
     try { await api(scoped(`/documents/${d.id}`), { method: 'DELETE' }); load(); }
     catch (e) { toast(e.message || 'Could not remove', 'err'); }
   };
@@ -1190,7 +1191,7 @@ function mergePosRanges(parts, tenantsById) {
 }
 
 export default function Reports() {
-  const { openModal, closeModal, sites, tenant, tenants, toast, isGroup, groupTenants } = useStore();
+  const { openModal, closeModal, sites, tenant, tenants, toast, confirm, isGroup, groupTenants } = useStore();
   const role = useRole();
   const isSM = role && !atLeast(role, 'SNR_ACCOUNTANT');   // site-bound = below Snr Accountant
   const isGM = atLeast(role, 'GENERAL_MANAGER');
@@ -1314,6 +1315,7 @@ export default function Reports() {
 
   const confirmDelete = async () => {
     if (!viewOrder) return;
+    if (!await confirm({ title: `Delete order #${viewOrder.receipt_no || ''}?`, message: 'This permanently removes the sale. This cannot be undone.', confirmText: 'Delete', danger: true })) return;
     setBusy(true);
     try {
       await api(scoped(`/pos/sales/${viewOrder.id}`), { method: 'DELETE' });

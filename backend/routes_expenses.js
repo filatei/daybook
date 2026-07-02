@@ -405,7 +405,11 @@ const isCreator = (e, uid) => e.recorded_by === uid;
 // by Snr Accountant & GM (atLeast SNR_ACCOUNTANT covers Snr Acct=GM=7, Admin=8+),
 // then paid to close. Every other (non-imprest) expense still needs ADMIN approval.
 const isImprest = (e) => String(e.kind || 'NON_IMPREST').toUpperCase() === 'IMPREST';
-const approveRole = (e) => (isImprest(e) ? 'SNR_ACCOUNTANT' : 'ADMIN');
+// Fuel/lubricant tickets (diesel, engine oil, petrol…) are routine operational
+// spend — Snr Accountant & GM may approve them like imprest, without waiting on Admin.
+const FUEL_RE = /diesel|engine\s*oil|\bfuel\b|petrol|lubric/i;
+const isFuel = (e) => FUEL_RE.test([e.category, e.description, e.items_json].filter(Boolean).join(' '));
+const approveRole = (e) => (isImprest(e) || isFuel(e)) ? 'SNR_ACCOUNTANT' : 'ADMIN';
 const FLOW = {
   // Creator OR a secretary validates a draft (confirms what was entered).
   validate: { from: ['DRAFT'], to: 'VALIDATED', allow: (c, e, uid) => isCreator(e, uid) || atLeast(c.role, 'SECRETARY') },

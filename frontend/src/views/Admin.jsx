@@ -154,7 +154,7 @@ function EditMemberForm({ member, sites = [], onSave, onRemove, onClose }) {
 // (the report's creator is always added automatically), plus the all-sites
 // roll-up address. No hardcoding — these drive report delivery.
 function ReportEmailsTab() {
-  const { toast, tenant } = useStore();
+  const { toast, tenant, confirm } = useStore();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -173,6 +173,7 @@ function ReportEmailsTab() {
   const startEdit = () => { setSnapshot(JSON.parse(JSON.stringify(data))); setEditing(true); };
   const cancel = () => { if (snapshot) setData(snapshot); setEditing(false); };
   const save = async () => {
+    if (!await confirm({ title: 'Save report email settings?', message: 'Daily reports will be sent to the addresses you set.', confirmText: 'Save' })) return;
     setSaving(true);
     try {
       const sitesMap = Object.fromEntries(data.sites.map((s) => [s.id, (s.report_email || '').trim()]));
@@ -311,7 +312,7 @@ function PurgeErrantCard() {
 }
 
 function SettingsTab() {
-  const { toast, tenant } = useStore();
+  const { toast, tenant, confirm } = useStore();
   const [thr, setThr] = useState(0.55);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -325,12 +326,14 @@ function SettingsTab() {
     ]).finally(() => setLoading(false));
   }, [tenant]);
   const saveBagged = async () => {
+    if (!await confirm({ title: 'Save finished-goods product?', message: 'The daily bagged count will add to this product’s stock.', confirmText: 'Save' })) return;
     setSavingBagged(true);
     try { await api(scoped('/settings'), { method: 'PATCH', body: { bagged_product_id: bagged || null } }); toast('Saved ✓', 'ok'); }
     catch (e) { toast(e.message, 'err'); }
     setSavingBagged(false);
   };
   const save = async () => {
+    if (!await confirm({ title: 'Save face-match strictness?', message: `Threshold ${thr.toFixed(2)} — affects clock-in matching.`, confirmText: 'Save' })) return;
     setSaving(true);
     try { const r = await api(scoped('/settings'), { method: 'PATCH', body: { face_match_threshold: thr } }); setThr(r.face_match_threshold); toast('Saved ✓', 'ok'); }
     catch (e) { toast(e.message, 'err'); }

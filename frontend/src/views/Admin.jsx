@@ -3,12 +3,13 @@ import { api, scoped, ngn, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast, ROLE_LABELS } from '../store.jsx';
 
 function SiteForm({ site, onSave, onClose }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({ code: site?.code || '', name: site?.name || '', address: site?.address || '', is_hq: site?.is_hq || false });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const save = async () => {
     if (!f.code || !f.name) return toast('Code and name required', 'err');
+    if (!await confirm({ title: site?.id ? 'Save changes to this site?' : 'Create this site?', message: `${f.code.trim()} · ${f.name.trim()}`, confirmText: 'Save' })) return;
     setSaving(true);
     try {
       if (site?.id) await api(scoped(`/sites/${site.id}`), { method: 'PATCH', body: f });
@@ -39,7 +40,7 @@ function SiteForm({ site, onSave, onClose }) {
 }
 
 function MemberForm({ sites = [], onInvite, onClose, actorRole = 'ADMIN', lockSiteId = null }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   // Admins can grant any role; everyone else only roles BELOW their own.
   const can = (r) => atLeast(actorRole, 'ADMIN') || !atLeast(r, actorRole);
   const [email, setEmail] = useState('');
@@ -51,6 +52,7 @@ function MemberForm({ sites = [], onInvite, onClose, actorRole = 'ADMIN', lockSi
   const invite = async () => {
     if (!email) return toast('Email required', 'err');
     if (needsSite && !(lockSiteId || siteId)) return toast('Pick a site for this Manager', 'err');
+    if (!await confirm({ title: 'Invite this member?', message: `${email.trim()} · ${ROLE_LABELS[role] || role}`, confirmText: 'Invite' })) return;
     setSaving(true);
     try { await onInvite(email, role, SITE_ROLES.includes(role) ? (lockSiteId || siteId) : null); onClose(); }
     catch (e) { toast(e.message, 'err'); }
@@ -91,7 +93,7 @@ function MemberForm({ sites = [], onInvite, onClose, actorRole = 'ADMIN', lockSi
       )}
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" onClick={invite} disabled={saving}>{saving ? <span className="spin" /> : null} Add Member</button>
+        <button className="btn" onClick={invite} disabled={saving || !email.trim()}>{saving ? <span className="spin" /> : null} Add Member</button>
       </div>
     </div>
   );
@@ -106,13 +108,14 @@ const ROLE_OPTIONS = [
 ];
 const SITE_ROLES = ['SITE_MANAGER', 'SECRETARY', 'GATEMAN', 'SUPERVISOR'];
 function EditMemberForm({ member, sites = [], onSave, onRemove, onClose }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const [role, setRole] = useState(member.role);
   const [siteId, setSiteId] = useState(member.site_id || '');
   const [saving, setSaving] = useState(false);
   const needsSite = role === 'SITE_MANAGER' || role === 'SECRETARY';
   const save = async () => {
     if (needsSite && !siteId) return toast('Pick a site for this role', 'err');
+    if (!await confirm({ title: 'Save member changes?', message: `${member.name || member.email} → ${ROLE_LABELS[role] || role}`, confirmText: 'Save' })) return;
     setSaving(true);
     try { await onSave(member.id, { role, site_id: SITE_ROLES.includes(role) ? (siteId || null) : null }); onClose(); }
     catch (e) { toast(e.message, 'err'); }
@@ -395,7 +398,7 @@ function SettingsTab() {
 
 // ── Product form ────────────────────────────────────────────────────────────
 export function ProductForm({ product, onSave, onClose }) {
-  const { toast, setDirty } = useStore();
+  const { toast, setDirty, confirm } = useStore();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({
     name:        product?.name        || '',
@@ -411,6 +414,7 @@ export function ProductForm({ product, onSave, onClose }) {
 
   const save = async () => {
     if (!f.name || f.price === '') return toast('Name and price required', 'err');
+    if (!await confirm({ title: product?.id ? 'Save changes to this product?' : 'Add this product?', message: `${f.name.trim()} · ${ngn(Number(f.price) || 0)}`, confirmText: 'Save' })) return;
     setSaving(true);
     try {
       if (product?.id) {
@@ -466,7 +470,7 @@ export function ProductForm({ product, onSave, onClose }) {
       )}
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" onClick={save} disabled={saving}>{saving ? <span className="spin" /> : null} Save</button>
+        <button className="btn" onClick={save} disabled={saving || !f.name.trim() || f.price === ''}>{saving ? <span className="spin" /> : null} Save</button>
       </div>
     </div>
   );
@@ -475,7 +479,7 @@ export function ProductForm({ product, onSave, onClose }) {
 // ── Admin ────────────────────────────────────────────────────────────────────
 // ── Company bank accounts (curated payee list for cash deposits) ──────────────
 function BankAccountForm({ acct, onSave, onClose }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const editing = !!(acct && acct.id);
   const [f, setF] = useState({
     label: acct?.label || '', bank_name: acct?.bank_name || '',
@@ -485,6 +489,7 @@ function BankAccountForm({ acct, onSave, onClose }) {
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
   const save = async () => {
     if (!f.label.trim()) return toast('Enter a label (what shows in the picker)', 'err');
+    if (!await confirm({ title: editing ? 'Save changes to this account?' : 'Add this bank account?', message: [f.label.trim(), f.bank_name, f.account_number].filter(Boolean).join(' · '), confirmText: 'Save' })) return;
     setSaving(true);
     try {
       if (editing) await api(scoped(`/bank-accounts/${acct.id}`), { method: 'PATCH', body: f });
@@ -507,7 +512,7 @@ function BankAccountForm({ acct, onSave, onClose }) {
       <input className="input" value={f.account_name} onChange={set('account_name')} placeholder="e.g. Fido Fluids Ltd" />
       <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
         <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={saving}>Cancel</button>
-        <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving}>{saving ? <span className="spin" /> : (editing ? 'Save' : 'Add account')}</button>
+        <button className="btn" style={{ flex: 1 }} onClick={save} disabled={saving || !f.label.trim()}>{saving ? <span className="spin" /> : (editing ? 'Save' : 'Add account')}</button>
       </div>
     </div>
   );
@@ -645,7 +650,7 @@ function AccountLedger({ acct, onClose }) {
 }
 
 function JournalForm({ accounts, onSaved, onClose }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const today = new Date().toISOString().slice(0, 10);
   const [jdate, setJdate] = useState(today);
   const [memo, setMemo] = useState('');
@@ -662,6 +667,7 @@ function JournalForm({ accounts, onSaved, onClose }) {
     const lines = rows.filter((r) => r.account_code && ((Number(r.debit) || 0) > 0 || (Number(r.credit) || 0) > 0))
       .map((r) => ({ account_code: r.account_code, debit: Number(r.debit) || 0, credit: Number(r.credit) || 0 }));
     if (lines.length < 2) return toast('Add at least two account lines', 'err');
+    if (!await confirm({ title: 'Post this journal?', message: `${lines.length} lines · ${ngn(dr)}`, confirmText: 'Post' })) return;
     setSaving(true);
     try { await api(scoped('/gl/journals'), { method: 'POST', body: { jdate, memo, lines } }); toast('Journal posted ✓', 'ok'); onSaved(); onClose(); }
     catch (e) { toast(e.message || 'Post failed', 'err'); }

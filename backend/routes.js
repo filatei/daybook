@@ -615,7 +615,8 @@ router.get('/reports', requireAuth, async (req, res) => {
 
 router.get('/reports/:id', requireAuth, async (req, res, next) => {
   // These are real sub-routes registered later — don't treat them as an :id.
-  if (req.params.id === 'generate' || req.params.id === 'ops') return next();
+  // (A report id is a UUID; any non-UUID word is a named sub-route below.)
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i.test(req.params.id)) return next();
   const r = await qone('SELECT * FROM daily_reports WHERE id=?', [req.params.id]);
   if (!r) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, r.tenant_id);

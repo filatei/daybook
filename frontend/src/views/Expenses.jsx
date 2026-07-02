@@ -8,7 +8,7 @@ import Cash from './Cash.jsx';
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
 
 function ExpenseForm({ expense, sites, onSave, onClose }) {
-  const { toast, tenant, setDirty } = useStore();
+  const { toast, tenant, setDirty, confirm } = useStore();
   const [saving, setSaving] = useState(false);
   // Editing from the combined Group view → pin to this ticket's workspace.
   const ts = (path) => expense?.tenant_id
@@ -49,11 +49,14 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
   const delRow = (i) => setRows((p) => (p.length > 1 ? p.filter((_, j) => j !== i) : p));
   const lineAmt = (r) => (parseFloat(r.qty) || 0) * (parseFloat(r.price) || 0);
   const total = rows.reduce((s, r) => s + lineAmt(r), 0);
+  // Valid to save only with a date and ≥1 line that has a name + amount.
+  const canSave = !!f.expense_date && rows.some((r) => r.name.trim() && lineAmt(r) > 0);
 
   const save = async () => {
     const items = rows.filter((r) => r.name.trim() && lineAmt(r) > 0).map((r) => ({ name: r.name.trim(), qty: +r.qty || 0, price: +r.price || 0 }));
     if (!items.length) return toast('Add at least one item with a name, quantity and rate', 'err');
     if (!f.expense_date) return toast('Date required', 'err');
+    if (!await confirm({ title: expense?.id ? 'Save changes to this expense?' : 'Create this expense?', message: `${ngn(total)} · ${items.length} item${items.length > 1 ? 's' : ''}${f.vendor ? ` · ${f.vendor}` : ''}`, confirmText: 'Save' })) return;
     setSaving(true);
     try {
       const body = { ...f, items, amount: total };
@@ -169,7 +172,7 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
               <input className="input" style={{ marginTop: 6 }} value={payForm.memo} onChange={(e) => setPayForm((p) => ({ ...p, memo: e.target.value }))} placeholder="memo (optional)" />
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setPayForm(null)} disabled={paying}>Cancel</button>
-                <button className="btn" style={{ flex: 1 }} onClick={recordPayment} disabled={paying}>{paying ? <span className="spin" /> : 'Record payment'}</button>
+                <button className="btn" style={{ flex: 1 }} onClick={recordPayment} disabled={paying || !((+payForm.amount || 0) > 0)}>{paying ? <span className="spin" /> : 'Record payment'}</button>
               </div>
             </div>
           ) : (
@@ -181,7 +184,7 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
 
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" onClick={save} disabled={saving}>
+        <button className="btn" onClick={save} disabled={saving || !canSave}>
           {saving ? <span className="spin" /> : null} Save
         </button>
       </div>
@@ -376,7 +379,8 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   };
 
   const addAttachment = async () => {
-    if (!file && !note.trim()) { toast('Attach a receipt or write a note', 'err'); return; }
+    // A note is required on every entry (so receipts are always explained).
+    if (!note.trim()) { toast('Write a note describing this receipt', 'err'); return; }
     setBusy(true);
     try {
       const fd = new FormData();
@@ -483,7 +487,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
             onChange={(e) => setPayFile(e.target.files?.[0] || null)} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 8, marginTop: 12 }}>
             <button className="btn btn-ghost" disabled={busy} onClick={() => { setPayOpen(false); setPayFile(null); }}>Cancel</button>
-            <button className="btn" disabled={busy} onClick={submitPay}>{busy ? <span className="spin" /> : `💵 Pay ${ngn(Math.round((parseFloat(payAmt) || 0) * 100) / 100)}`}</button>
+            <button className="btn" disabled={busy || !((parseFloat(payAmt) || 0) > 0) || (parseFloat(payAmt) || 0) > balance + 0.01} onClick={submitPay}>{busy ? <span className="spin" /> : `💵 Pay ${ngn(Math.round((parseFloat(payAmt) || 0) * 100) / 100)}`}</button>
           </div>
         </div>
       )}
@@ -547,9 +551,9 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 
         <input id="exp-att-file" type="file" accept="image/*,.pdf,.xls,.xlsx,.doc,.docx,.txt"
           onChange={(e) => setFile(e.target.files[0] || null)} style={{ fontSize: 12, marginTop: 8, width: '100%' }} />
-        <textarea className="input" rows={2} placeholder="Note (e.g. paid Flexplast in cash, ref…)"
+        <textarea className="input" rows={2} placeholder="Note (required — e.g. paid Flexplast in cash, ref…)"
           value={note} onChange={(e) => setNote(e.target.value)} style={{ marginTop: 6, resize: 'vertical' }} />
-        <button className="btn" style={{ width: '100%', marginTop: 6 }} onClick={addAttachment} disabled={busy}>
+        <button className="btn" style={{ width: '100%', marginTop: 6 }} onClick={addAttachment} disabled={busy || !note.trim()}>
           {busy ? <span className="spin" /> : '＋ Attach receipt / note'}
         </button>
       </div>

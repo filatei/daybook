@@ -63,6 +63,9 @@ module.exports = [
       'react/jsx-uses-react': 'error',
       'react/jsx-key': 'warn',
       'react/jsx-no-undef': 'error',
+      // `{count && <JSX/>}` renders a literal 0 when count is 0 (the POS tile "0"
+      // bug). Require a real boolean before JSX — `x ? <JSX/> : null` or `!!x && …`.
+      'react/jsx-no-leaked-render': ['warn', { validStrategies: ['ternary', 'coerce'] }],
       'react/no-unknown-property': 'warn',
       'no-unused-vars': ['error', { args: 'none', ignoreRestSiblings: true, caughtErrors: 'none', varsIgnorePattern: '^(React|_)' }],
       'no-empty': ['warn', { allowEmptyCatch: true }],

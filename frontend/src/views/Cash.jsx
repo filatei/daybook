@@ -13,7 +13,7 @@ const when = (s) => new Date((s || 0) * 1000).toLocaleString('en-NG', { day: '2-
 
 // ── Add / record a cash entry ───────────────────────────────────────────────
 function CashForm({ sites, accounts, onSave, onClose }) {
-  const { toast, tenant } = useStore();
+  const { toast, tenant, confirm } = useStore();
   const [f, setF] = useState({ amount: '', depositor: '', site_id: sites[0]?.id || '', payee_account: '', memo: '' });
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -21,6 +21,7 @@ function CashForm({ sites, accounts, onSave, onClose }) {
 
   const submit = async () => {
     if (!(parseFloat(f.amount) > 0)) return toast('Enter an amount', 'err');
+    if (!await confirm({ title: 'Record this cash deposit?', message: `${ngn(parseFloat(f.amount) || 0)}${f.payee_account ? ` → ${f.payee_account}` : ''}`, confirmText: 'Record' })) return;
     setBusy(true);
     try {
       const fd = new FormData();
@@ -73,7 +74,7 @@ function CashForm({ sites, accounts, onSave, onClose }) {
       <input type="file" accept="image/*,.pdf" capture="environment" onChange={(e) => setFile(e.target.files[0] || null)} style={{ fontSize: 13, width: '100%' }} />
       <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
         <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={busy}>Cancel</button>
-        <button className="btn" style={{ flex: 1 }} onClick={submit} disabled={busy}>{busy ? <span className="spin" /> : 'Submit'}</button>
+        <button className="btn" style={{ flex: 1 }} onClick={submit} disabled={busy || !((parseFloat(f.amount) || 0) > 0) || !f.payee_account.trim()}>{busy ? <span className="spin" /> : 'Submit'}</button>
       </div>
     </div>
   );
@@ -177,7 +178,7 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
     setBusy(false);
   };
   const addReceipt = async () => {
-    if (!file && !note.trim()) return toast('Attach a receipt or note', 'err');
+    if (!note.trim()) return toast('Write a note describing this receipt', 'err');
     setBusy(true);
     try {
       const fd = new FormData();
@@ -255,7 +256,8 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
         ))}
         {(d.receipts || []).length === 0 && <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>No receipts yet.</div>}
         <input id="cash-att" type="file" accept="image/*,.pdf" capture="environment" onChange={(e) => setFile(e.target.files[0] || null)} style={{ fontSize: 12, marginTop: 8, width: '100%' }} />
-        <button className="btn" style={{ width: '100%', marginTop: 6 }} disabled={busy} onClick={addReceipt}>{busy ? <span className="spin" /> : '＋ Add receipt'}</button>
+        <textarea className="input" rows={2} placeholder="Note (required — e.g. GTB transfer, ref…)" value={note} onChange={(e) => setNote(e.target.value)} style={{ marginTop: 6, resize: 'vertical' }} />
+        <button className="btn" style={{ width: '100%', marginTop: 6 }} disabled={busy || !note.trim()} onClick={addReceipt}>{busy ? <span className="spin" /> : '＋ Add receipt'}</button>
       </div>
 
       <button className="btn btn-ghost" style={{ width: '100%', marginTop: 12 }} onClick={onClose}>Close</button>

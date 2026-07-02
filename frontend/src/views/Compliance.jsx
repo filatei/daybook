@@ -14,7 +14,7 @@ const STATUS = {
 const statusText = (d) => d.status === 'EXPIRED' ? 'Expired' : d.status === 'EXPIRING' ? `Expires in ${d.days_to_expiry} day${d.days_to_expiry === 1 ? '' : 's'}` : d.status === 'VALID' ? `Valid · expires ${d.expiry_date}` : 'No expiry date';
 
 function ComplianceForm({ doc, sites, siteBound, onSaved, onClose }) {
-  const { toast } = useStore();
+  const { toast, confirm } = useStore();
   const [f, setF] = useState({
     doc_type: doc?.doc_type || 'LICENSE', direction: doc?.direction || 'INBOUND', title: doc?.title || '', issuer: doc?.issuer || '',
     reference_no: doc?.reference_no || '', issue_date: doc?.issue_date || '', expiry_date: doc?.expiry_date || '',
@@ -26,6 +26,7 @@ function ComplianceForm({ doc, sites, siteBound, onSaved, onClose }) {
 
   const save = async () => {
     if (!f.title.trim()) return toast('Title is required', 'err');
+    if (!await confirm({ title: doc?.id ? 'Save changes to this document?' : 'Add this document?', message: f.title.trim(), confirmText: 'Save' })) return;
     setSaving(true);
     try {
       if (doc?.id) {
@@ -100,7 +101,7 @@ function ComplianceForm({ doc, sites, siteBound, onSaved, onClose }) {
       )}
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
-        <button className="btn" onClick={save} disabled={saving}>{saving ? <span className="spin" /> : 'Save'}</button>
+        <button className="btn" onClick={save} disabled={saving || !f.title.trim()}>{saving ? <span className="spin" /> : 'Save'}</button>
       </div>
     </div>
   );

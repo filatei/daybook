@@ -1508,69 +1508,69 @@ export default function Reports() {
         </div>
       )}
 
-      {/* In-app orders — search, reprint, delete */}
-      {!loading && orders.length > 0 && (
-        <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 14 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
-            <strong style={{ fontSize: 14 }}>In-app orders</strong>
-            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{shownOrders.length}/{orders.length}</span>
-          </div>
-          <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--line)' }}>
-            <input className="input" placeholder="Search receipt #, customer or cashier…"
-              value={orderQ} onChange={(e) => setOrderQ(e.target.value)} />
-          </div>
-          {shownOrders.length === 0 ? (
-            <div style={{ padding: '14px 16px', fontSize: 13, color: 'var(--muted)' }}>No matching orders</div>
-          ) : shownOrders.map((o) => (
-            <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
-              <button onClick={() => openOrder(o)} title="View receipt"
-                style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
-                <div style={{ fontWeight: 700 }}>#{String(o.receipt_no).padStart(4, '0')} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer_name || 'Walk-in'}</span></div>
-                <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  {o.sale_date} · {o.site_name || '—'} · {o.payment_method}{o.sold_by_name ? ` · ${o.sold_by_name}` : ''}
-                </div>
-              </button>
-              <div style={{ fontWeight: 800, whiteSpace: 'nowrap', marginRight: 4 }}>{ngn(o.total)}</div>
-              <button title="Print receipt" onClick={() => openOrder(o)}
-                style={{ border: 'none', background: '#e0f2fe', color: '#0369a1', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🖨</button>
-              {isGM && (
-                <button title="Delete order" onClick={() => openOrder(o, true)}
-                  style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🗑</button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
+      {/* Daily report archive — foldable (open by default). */}
       {loading ? (
         <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : archive.length === 0 ? (
         <div className="empty"><div className="ic">🧾</div><p>{pos && pos.totals.orders > 0 ? 'No daily reports yet — POS sales shown above' : 'No reports found'}</p></div>
       ) : (
-        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
-            <strong style={{ fontSize: 14 }}>📑 Daily report archive</strong>
-            <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-              {(!filters.from && !filters.to) ? 'all dates'
-                : (filters.from && filters.from === filters.to) ? (filters.from === today() ? 'today' : filters.from)
-                : `${filters.from || '…'} → ${filters.to || '…'}`} · {archive.length}
-            </span>
-          </div>
-          {archive.map((r) => (
-            <button key={`${r.kind || 'AUTO'}-${r.id}`} onClick={() => r.kind === 'MANUAL' ? openManualDetail(r) : openDetail(r)}
-              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>
-                  {r.kind === 'MANUAL' ? '📝 Manual report' : r.site_name}{' '}
-                  <span className={`badge ${STATUS_LABEL[r.status] || 'draft'}`}>{r.status}</span>
-                  {r.kind === 'MANUAL' && <span className="badge" style={{ marginLeft: 4, background: '#eef2ff', color: '#4338ca' }}>manual</span>}
+        <Collapsible
+          icon="📑"
+          title="Daily report archive"
+          subtitle={`${(!filters.from && !filters.to) ? 'all dates'
+            : (filters.from && filters.from === filters.to) ? (filters.from === today() ? 'today' : filters.from)
+            : `${filters.from || '…'} → ${filters.to || '…'}`} · ${archive.length}`}
+          defaultOpen
+        >
+          <div style={{ margin: '0 -14px' }}>
+            {archive.map((r) => (
+              <button key={`${r.kind || 'AUTO'}-${r.id}`} onClick={() => r.kind === 'MANUAL' ? openManualDetail(r) : openDetail(r)}
+                style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700 }}>
+                    {r.kind === 'MANUAL' ? '📝 Manual report' : r.site_name}{' '}
+                    <span className={`badge ${STATUS_LABEL[r.status] || 'draft'}`}>{r.status}</span>
+                    {r.kind === 'MANUAL' && <span className="badge" style={{ marginLeft: 4, background: '#eef2ff', color: '#4338ca' }}>manual</span>}
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.report_date} · {r.tenant_name}</div>
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.report_date} · {r.tenant_name}</div>
+                <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(r.total_sales)}</div>
+              </button>
+            ))}
+          </div>
+        </Collapsible>
+      )}
+
+      {/* In-app orders — foldable, collapsed by default, below the archive. */}
+      {!loading && orders.length > 0 && (
+        <Collapsible icon="🧾" title="In-app orders" subtitle={`${orders.length} order${orders.length === 1 ? '' : 's'}`}>
+          <div style={{ padding: '4px 0 8px' }}>
+            <input className="input" placeholder="Search receipt #, customer or cashier…"
+              value={orderQ} onChange={(e) => setOrderQ(e.target.value)} />
+          </div>
+          <div style={{ margin: '0 -14px' }}>
+            {shownOrders.length === 0 ? (
+              <div style={{ padding: '10px 16px', fontSize: 13, color: 'var(--muted)' }}>No matching orders</div>
+            ) : shownOrders.map((o) => (
+              <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+                <button onClick={() => openOrder(o)} title="View receipt"
+                  style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
+                  <div style={{ fontWeight: 700 }}>#{String(o.receipt_no).padStart(4, '0')} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer_name || 'Walk-in'}</span></div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                    {o.sale_date} · {o.site_name || '—'} · {o.payment_method}{o.sold_by_name ? ` · ${o.sold_by_name}` : ''}
+                  </div>
+                </button>
+                <div style={{ fontWeight: 800, whiteSpace: 'nowrap', marginRight: 4 }}>{ngn(o.total)}</div>
+                <button title="Print receipt" onClick={() => openOrder(o)}
+                  style={{ border: 'none', background: '#e0f2fe', color: '#0369a1', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🖨</button>
+                {isGM && (
+                  <button title="Delete order" onClick={() => openOrder(o, true)}
+                    style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🗑</button>
+                )}
               </div>
-              <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(r.total_sales)}</div>
-            </button>
-          ))}
-        </div>
+            ))}
+          </div>
+        </Collapsible>
       )}
 
       <button className="fab" onClick={() => openForm()}>+</button>

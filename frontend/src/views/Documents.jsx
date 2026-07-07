@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped } from '../api.js';
 import { useStore } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const CAT_ICONS = { policy: '📋', invoice: '🧾', contract: '📜', report: '📊', other: '📁' };
 const CATS = Object.keys(CAT_ICONS);
@@ -71,10 +72,7 @@ export default function Documents() {
         </select>
         {sites.length > 1 && <>
           <label className="fl">Site (optional)</label>
-          <select className="input" value={meta.site_id} onChange={(e) => setMeta((p) => ({ ...p, site_id: e.target.value }))}>
-            <option value="">Company-wide</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect value={meta.site_id} onChange={(val) => setMeta((p) => ({ ...p, site_id: val }))} options={[{ value: '', label: 'Company-wide' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="Company-wide" />
         </>}
         <label className="fl">Notes</label>
         <input className="input" value={meta.notes} onChange={(e) => setMeta((p) => ({ ...p, notes: e.target.value }))} />
@@ -99,11 +97,7 @@ export default function Documents() {
           {CATS.map((c) => <option key={c}>{c}</option>)}
         </select>
         {sites.length > 1 && (
-          <select className="input" value={filter.site}
-            onChange={(e) => setFilter((p) => ({ ...p, site: e.target.value }))}>
-            <option value="">All sites</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect value={filter.site} onChange={(val) => setFilter((p) => ({ ...p, site: val }))} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
       </div>
 

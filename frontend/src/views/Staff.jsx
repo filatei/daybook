@@ -6,6 +6,7 @@ import { brandFor, printBadges } from '../badge.js';
 import BarcodeScanner from '../components/BarcodeScanner.jsx';
 import SwipeRow from '../components/SwipeRow.jsx';
 import PhotoCapture from '../components/PhotoCapture.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 // ── Badge clock-in/out — scan a staff badge to toggle attendance ──────────────
 function BadgeClock() {
@@ -106,9 +107,7 @@ function StaffForm({ sites, siteBound, defaultSite, staff, onSaved, onClose }) {
         {!siteBound && sites.length > 0 && (
           <>
             <label className="fl">Site</label>
-            <select className="input" value={f.site_id} onChange={set('site_id')} style={{ marginBottom: 10 }}>
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            <SearchSelect value={f.site_id} onChange={(val) => setF((p) => ({ ...p, site_id: val }))} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select…" style={{ marginBottom: 10 }} />
           </>
         )}
 
@@ -589,11 +588,7 @@ export default function Staff() {
       </div>
 
       {sites.length > 1 && (
-        <select className="input" style={{ marginBottom: 12 }} value={siteFilter}
-          onChange={(e) => setSiteFilter(e.target.value)}>
-          <option value="">All sites</option>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        <SearchSelect style={{ marginBottom: 12 }} value={siteFilter} onChange={(val) => setSiteFilter(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
       )}
 
       {mode === 'badge' ? <BadgeClock /> : mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} sites={sites} siteBound={siteBound} /> : (

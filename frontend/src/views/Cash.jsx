@@ -3,6 +3,7 @@ import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
 import { useVoiceInput } from '../hooks/useVoiceInput.js';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const ST = {
   NOT_SEEN:  { bg: '#fee2e2', fg: '#991b1b', label: 'NOT SEEN' },
@@ -52,10 +53,7 @@ function CashForm({ sites, accounts, onSave, onClose }) {
       <div className="grid2">
         <div>
           <label className="fl">Site</label>
-          <select className="input" value={f.site_id} onChange={(e) => set('site_id', e.target.value)}>
-            <option value="">Select site</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect value={f.site_id} onChange={(val) => set('site_id', val)} options={[{ value: '', label: 'Select site' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="Select site" />
         </div>
         <div>
           <label className="fl">Payee account (bank)</label>

@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const fmtNum = (n) => Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 2 });
 
@@ -115,9 +116,7 @@ function MoveForm({ item, sites, siteBound, onSaved, onClose }) {
       )}
       {!siteBound && sites.length > 1 && (
         <><label className="fl">Site / store</label>
-          <select className="input" value={f.site_id} onChange={(e) => set('site_id', e.target.value)}>
-            <option value="">— none —</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select></>
+          <SearchSelect value={f.site_id} onChange={(val) => set('site_id', val)} options={[{ value: '', label: '— none —' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="— none —" /></>
       )}
       <div className="grid2" style={{ marginTop: 6 }}>
         <div><label className="fl">Date</label><input className="input" type="date" max={today()} value={f.date} onChange={(e) => set('date', e.target.value)} /></div>
@@ -185,15 +184,13 @@ function ProductionForm({ sites, siteBound, onSaved, onClose }) {
   return (
     <Modal onClose={onClose} title="Record production">
       <label className="fl">Product (e.g. 50cl / 75cl bottle)</label>
-      <select className="input" value={f.product_id} onChange={set('product_id')} style={{ marginBottom: 10 }}>
-        {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-      </select>
+      <SearchSelect value={f.product_id} onChange={(val) => setF((p) => ({ ...p, product_id: val }))} options={products.map((p) => ({ value: p.id, label: p.name }))} placeholder="Select…" style={{ marginBottom: 10 }} />
       <div className="grid2">
         <div><label className="fl">Quantity produced</label><input className="input" type="number" inputMode="decimal" value={f.qty} onChange={set('qty')} placeholder="0" /></div>
         <div><label className="fl">Date</label><input className="input" type="date" max={today()} value={f.date} onChange={set('date')} /></div>
       </div>
       {!siteBound && sites.length > 1 && (
-        <><label className="fl">Site</label><select className="input" value={f.site_id} onChange={set('site_id')}>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></>
+        <><label className="fl">Site</label><SearchSelect value={f.site_id} onChange={(val) => setF((p) => ({ ...p, site_id: val }))} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select…" /></>
       )}
       <label className="fl">Note</label>
       <input className="input" value={f.note} onChange={set('note')} placeholder="optional" />

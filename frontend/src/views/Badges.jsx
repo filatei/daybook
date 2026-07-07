@@ -8,6 +8,7 @@ import { api, scoped } from '../api.js';
 import { useStore, useRole, atLeast, useActiveTenant } from '../store.jsx';
 import QRCode from '../components/QRCode.jsx';
 import { brandFor, printBadges } from '../badge.js';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 export default function Badges() {
   const { tenant, sites } = useStore();
@@ -42,10 +43,7 @@ export default function Badges() {
       </p>
 
       {!siteBound && sites.length > 1 && (
-        <select className="input" style={{ marginBottom: 12 }} value={siteFilter} onChange={(e) => setSiteFilter(e.target.value)}>
-          <option value="">All sites</option>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        <SearchSelect style={{ marginBottom: 12 }} value={siteFilter} onChange={(val) => setSiteFilter(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
       )}
 
       {staff === null ? (

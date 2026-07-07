@@ -3,6 +3,7 @@ import { api, scoped, ngn, today, getToken, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import ReceiptPreview from '../components/ReceiptPreview.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 import OpsForm from './OpsForm.jsx';
 
 const STATUS_LABEL = { DRAFT: 'draft', SUBMITTED: 'submitted', EMAILED: 'emailed' };
@@ -608,9 +609,7 @@ function ReportForm({ report, sites, onSave, onClose }) {
         {(isGM || sites.length > 1) && (
           <div>
             <label className="fl">Site</label>
-            <select className="input" value={f.site_id} onChange={(e) => setField('site_id', e.target.value)}>
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            <SearchSelect value={f.site_id} onChange={(val) => setField('site_id', val)} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select…" />
           </div>
         )}
       </div>
@@ -750,10 +749,7 @@ function GenerateReportModal({ sites, siteBound, onSaved, onClose }) {
           {!siteBound && sites.length > 0 && (
             <div style={{ flex: 1 }}>
               <label className="fl">Site</label>
-              <select className="input" value={siteId} onChange={(e) => { setSiteId(e.target.value); setGen(null); }}>
-                <option value="ALL">🌍 All sites</option>
-                {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
-              </select>
+              <SearchSelect value={siteId} onChange={(val) => { setSiteId(val); setGen(null); }} options={[{ value: 'ALL', label: '🌍 All sites' }, ...sites.map((x) => ({ value: x.id, label: x.name }))]} placeholder="🌍 All sites" />
             </div>
           )}
         </div>
@@ -1386,11 +1382,7 @@ export default function Reports() {
         <input type="date" className="input" style={{ flex: '1 1 120px' }}
           value={filters.to} onChange={(e) => setFilters((p) => ({ ...p, to: e.target.value }))} />
         {!isSM && sites.length > 1 && (
-          <select className="input" style={{ flex: '1 1 140px' }}
-            value={filters.site} onChange={(e) => setFilters((p) => ({ ...p, site: e.target.value }))}>
-            <option value="">All sites</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect style={{ flex: '1 1 140px' }} value={filters.site} onChange={(val) => setFilters((p) => ({ ...p, site: val }))} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
         <div style={{ display: 'flex', gap: 6 }}>
           <button className={`btn btn-ghost btn-sm${filters.from === today() && filters.to === today() ? ' on' : ''}`} style={{ width: 'auto', padding: '0 12px' }}

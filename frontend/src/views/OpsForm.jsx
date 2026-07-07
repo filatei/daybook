@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, today } from '../api.js';
 import { useStore, useBackHandler } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const EMPTY = () => ({
   // Pure-water (bagged) production ledger: closing = opening + produced − (sales + bonus + incentive + staff water).
@@ -142,10 +143,7 @@ export default function OpsForm({ sites, siteBound, defaultDate, defaultSite, on
                 {!siteBound && (
                   <div style={{ flex: 1 }}>
                     <label className="fl">Site</label>
-                    <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-                      <option value="">Select…</option>
-                      {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                    </select>
+                    <SearchSelect value={siteId} onChange={(val) => setSiteId(val)} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select…" />
                   </div>
                 )}
               </div>

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const TYPES = ['LICENSE', 'CERTIFICATE', 'PERMIT', 'TAX_FILING', 'NSITF', 'ITF', 'PENSION', 'PAYE', 'NAFDAC', 'SON', 'ENVIRONMENTAL', 'WASTE', 'COUNCIL', 'LETTER', 'OTHER'];
 const TYPE_ICON = { LICENSE: '📜', CERTIFICATE: '🎖️', PERMIT: '🪪', TAX_FILING: '🧾', NSITF: '🛡️', ITF: '🎓', PENSION: '👵', PAYE: '💼', NAFDAC: '💊', SON: '✅', ENVIRONMENTAL: '🌱', WASTE: '♻️', COUNCIL: '🏛️', LETTER: '✉️', OTHER: '📁' };
@@ -63,10 +64,7 @@ function ComplianceForm({ doc, sites, siteBound, onSaved, onClose }) {
         {!siteBound && sites.length > 0 && (
           <div>
             <label className="fl">Applies to</label>
-            <select className="input" value={f.site_id} onChange={(e) => set('site_id', e.target.value)}>
-              <option value="">🌍 Whole company</option>
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            <SearchSelect value={f.site_id} onChange={(val) => set('site_id', val)} options={[{ value: '', label: '🌍 Whole company' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="🌍 Whole company" />
           </div>
         )}
       </div>

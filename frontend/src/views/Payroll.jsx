@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today, getToken, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 // "Kpansia B80 · Okutukutu B40" — the per-site split behind a worker's bag total.
@@ -186,9 +187,7 @@ function RunTab({ sites, onSaved }) {
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={from} onChange={(e) => setFrom(e.target.value)} />
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={to} max={today()} onChange={(e) => setTo(e.target.value)} />
         {!combined && sites.length > 1 && (
-          <select className="input" style={{ flex: '1 1 120px' }} value={site} onChange={(e) => setSite(e.target.value)}>
-            <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect style={{ flex: '1 1 120px' }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
         <button className="btn" style={{ width: 'auto', padding: '8px 16px' }} onClick={run} disabled={busy}>{busy ? <span className="spin" /> : null} Compute</button>
       </div>
@@ -546,9 +545,7 @@ function SetupTab({ sites }) {
         </div>
       </div>
       {sites.length > 1 && (
-        <select className="input" style={{ marginBottom: 12 }} value={site} onChange={(e) => setSite(e.target.value)}>
-          <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        <SearchSelect style={{ marginBottom: 12 }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
       )}
       <input className="input" style={{ marginBottom: 12 }} placeholder="Search staff by name…" value={q} onChange={(e) => setQ(e.target.value)} />
       {rows.map((r, i) => ({ r, i }))

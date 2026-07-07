@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const KIND_LABEL = { TRANSFER: 'Transfer', POS: 'POS/Card', CARD: 'Card', CASH_DEPOSIT: 'Cash deposit' };
 const KIND_BADGE = { TRANSFER: '#0ea5e9', POS: '#7c3aed', CARD: '#7c3aed', CASH_DEPOSIT: '#16a34a' };
@@ -36,7 +37,7 @@ function DepositForm({ sites, isGM, onSave, onClose }) {
       </div>
       {isGM && sites.length > 1 && (
         <><label className="fl">Site</label>
-        <select className="input" value={f.site_id} onChange={(e) => set('site_id', e.target.value)}>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></>
+        <SearchSelect value={f.site_id} onChange={(val) => set('site_id', val)} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select…" /></>
       )}
       <label className="fl">Depositor</label><input className="input" value={f.account_name} onChange={(e) => set('account_name', e.target.value)} placeholder="Who banked it" />
       <label className="fl">Bank / account</label><input className="input" value={f.bank} onChange={(e) => set('bank', e.target.value)} placeholder="e.g. GTB fidochem" />
@@ -111,9 +112,7 @@ export default function Reconcile() {
           <option value="">Any status</option><option value="PENDING">Pending</option><option value="CONFIRMED">Confirmed</option><option value="FLAGGED">Flagged</option>
         </select>
         {!isSM && sites.length > 1 && (
-          <select className="input" style={{ flex: '1 1 130px' }} value={filters.site} onChange={(e) => setFilters((p) => ({ ...p, site: e.target.value }))}>
-            <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect style={{ flex: '1 1 130px' }} value={filters.site} onChange={(val) => setFilters((p) => ({ ...p, site: val }))} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
       </div>
 

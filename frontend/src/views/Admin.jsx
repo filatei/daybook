@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast, ROLE_LABELS } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 function SiteForm({ site, onSave, onClose }) {
   const { toast, confirm } = useStore();
@@ -85,10 +86,7 @@ function MemberForm({ sites = [], onInvite, onClose, actorRole = 'ADMIN', lockSi
       ) : SITE_ROLES.includes(role) && sites.length > 0 && (
         <>
           <label className="fl">Site{needsSite ? ' *' : ' (optional)'}</label>
-          <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            <option value="">— none —</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect value={siteId} onChange={(val) => setSiteId(val)} options={[{ value: '', label: '— none —' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="— none —" />
         </>
       )}
       <div className="cap-bar">
@@ -133,10 +131,7 @@ function EditMemberForm({ member, sites = [], onSave, onRemove, onClose }) {
       {SITE_ROLES.includes(role) && sites.length > 0 && (
         <>
           <label className="fl">Site{needsSite ? ' *' : ' (optional)'}</label>
-          <select className="input" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            <option value="">— none —</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect value={siteId} onChange={(val) => setSiteId(val)} options={[{ value: '', label: '— none —' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="— none —" />
         </>
       )}
       {!SITE_ROLES.includes(role) && <p style={{ fontSize: 12, color: 'var(--muted)' }}>This role is cross-site (no single site).</p>}
@@ -380,10 +375,7 @@ function SettingsTab() {
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="section-title" style={{ marginTop: 0 }}>🏭 Finished goods</div>
       <p className="sub">Pick the product that the daily <b>bagged</b> count produces. Bagging adds to that product's per-site stock; sales draw it down (Inventory → Finished goods).</p>
-      <select className="input" value={bagged} onChange={(e) => setBagged(e.target.value)}>
-        <option value="">— not set —</option>
-        {products.filter((p) => p.status !== 'INACTIVE').map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-      </select>
+      <SearchSelect value={bagged} onChange={(val) => setBagged(val)} options={[{ value: '', label: '— not set —' }, ...products.filter((p) => p.status !== 'INACTIVE').map((p) => ({ value: p.id, label: p.name }))]} placeholder="— not set —" />
       <button className="btn" style={{ marginTop: 12 }} onClick={saveBagged} disabled={savingBagged}>{savingBagged ? <span className="spin" /> : null} Save</button>
     </div>
     <div className="card">
@@ -686,10 +678,7 @@ function JournalForm({ accounts, onSaved, onClose }) {
       </div>
       {rows.map((r, i) => (
         <div key={i} style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-          <select className="input" style={{ flex: 2 }} value={r.account_code} onChange={(e) => setRow(i, 'account_code', e.target.value)}>
-            <option value="">Account…</option>
-            {opts.map((a) => <option key={a.code} value={a.code}>{a.code} {a.name}</option>)}
-          </select>
+          <SearchSelect style={{ flex: 2 }} value={r.account_code} onChange={(val) => setRow(i, 'account_code', val)} options={[{ value: '', label: 'Account…' }, ...opts.map((a) => ({ value: a.code, label: `${a.code} ${a.name}` }))]} placeholder="Account…" />
           <input className="input" style={{ flex: 1 }} inputMode="decimal" placeholder="Dr" value={r.debit} onChange={(e) => setRow(i, 'debit', e.target.value)} />
           <input className="input" style={{ flex: 1 }} inputMode="decimal" placeholder="Cr" value={r.credit} onChange={(e) => setRow(i, 'credit', e.target.value)} />
         </div>

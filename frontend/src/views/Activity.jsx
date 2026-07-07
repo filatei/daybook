@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, getToken, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const when = (s) => new Date((s || 0) * 1000).toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 
@@ -148,10 +149,7 @@ export default function Activity() {
       ) : tab === 'team' ? (
         <>
           <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-            <select className="input" style={{ flex: '1 1 140px' }} value={filters.user_id} onChange={(e) => setFilters((f) => ({ ...f, user_id: e.target.value }))}>
-              <option value="">Everyone</option>
-              {members.map((m) => <option key={m.user_id || m.id} value={m.user_id || m.id}>{m.name || m.email}</option>)}
-            </select>
+            <SearchSelect style={{ flex: '1 1 140px' }} value={filters.user_id} onChange={(val) => setFilters((f) => ({ ...f, user_id: val }))} options={[{ value: '', label: 'Everyone' }, ...members.map((m) => ({ value: m.user_id || m.id, label: m.name || m.email }))]} placeholder="Everyone" />
             <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filters.from} max={filters.to || undefined} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} />
             <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} />
             <button className="btn btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={exportCsv} disabled={team.length === 0}>⬇ CSV</button>

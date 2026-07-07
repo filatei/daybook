@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 const RANGES = [
   { label: 'Today', days: 0 }, { label: 'This week', days: 7 },
@@ -65,9 +66,7 @@ export default function Profit() {
       </div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
         {crossSite && sites.length > 1 && (
-          <select className="input" style={{ flex: '1 1 140px' }} value={site} onChange={(e) => setSite(e.target.value)}>
-            <option value="">All sites</option>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchSelect style={{ flex: '1 1 140px' }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
         <div className="seg" style={{ flex: '1 1 200px' }}>
           <button className={`seg-b${basis === 'accrual' ? ' on' : ''}`} onClick={() => setBasis('accrual')} title="Costs when incurred (ticket date)">Accrual</button>

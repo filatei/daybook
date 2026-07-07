@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0ea5e9" />
+<title>Daybook — Site Test Plan</title>
+<style>
+  :root{ --bg:#f4f6fb; --card:#fff; --ink:#0f172a; --muted:#64748b; --line:#e6e9f0;
+         --blue:#0ea5e9; --blue2:#2563eb; --ok:#16a34a; --okbg:#dcfce7; --err:#dc2626; --errbg:#fee2e2; }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body{ margin:0; font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); color:var(--ink);
+        padding:0 0 128px; line-height:1.45; }
+  header{ background:linear-gradient(135deg,var(--blue),var(--blue2)); color:#fff; padding:18px 16px 14px;
+          position:sticky; top:0; z-index:20; box-shadow:0 2px 10px rgba(2,6,23,.18); }
+  header h1{ margin:0 0 2px; font-size:20px; }
+  header .sub{ font-size:12.5px; opacity:.9; }
+  .wrap{ max-width:780px; margin:0 auto; padding:14px; }
+  .meta{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
+  .meta input,.meta select{ width:100%; padding:10px; border-radius:9px; border:1px solid rgba(255,255,255,.5);
+        background:rgba(255,255,255,.14); color:#fff; font-size:16px; }
+  .idcell{ background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.22); border-radius:9px; padding:7px 10px; display:flex; flex-direction:column; gap:1px; min-width:0; }
+  .idk{ font-size:10px; letter-spacing:.5px; text-transform:uppercase; color:rgba(255,255,255,.6); }
+  .idv{ font-size:15px; font-weight:700; color:rgba(255,255,255,.92); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .idcell input{ border:none; background:none; color:#fff; font-size:15px; font-weight:700; padding:0; width:100%; }
+  #authgate{ position:fixed; inset:0; z-index:100; background:var(--bg); display:none; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px; }
+  #authgate .card{ background:#fff; border-radius:16px; padding:28px 22px; max-width:360px; box-shadow:0 8px 30px rgba(2,6,23,.14); }
+  #authgate h2{ margin:0 0 8px; }
+  #authgate p{ color:var(--muted); font-size:14px; }
+  #authgate a.btn2{ display:inline-block; margin-top:16px; background:var(--blue2); color:#fff; text-decoration:none; font-weight:800; padding:12px 26px; border-radius:10px; }
+  .meta input::placeholder{ color:rgba(255,255,255,.8); }
+  .meta select option{ color:#0f172a; }
+  .progwrap{ margin-top:12px; }
+  .progbar{ height:10px; background:rgba(255,255,255,.25); border-radius:20px; overflow:hidden; }
+  .progfill{ height:100%; width:0; background:#fff; border-radius:20px; transition:width .3s; }
+  .progtxt{ font-size:12.5px; margin-top:5px; display:flex; justify-content:space-between; }
+  section{ background:var(--card); border-radius:14px; margin:12px 0; padding:6px 0; box-shadow:0 1px 3px rgba(2,6,23,.06); overflow:hidden; }
+  .sec-h{ display:flex; align-items:center; gap:10px; padding:12px 16px; cursor:pointer; user-select:none; }
+  .sec-h h2{ margin:0; font-size:16px; flex:1; }
+  .sec-h .cnt{ font-size:12px; color:var(--muted); font-weight:700; }
+  .sec-h .chev{ transition:transform .2s; color:var(--muted); }
+  section.collapsed .sec-h .chev{ transform:rotate(-90deg); }
+  section.collapsed .sec-body{ display:none; }
+  .test{ padding:12px 16px; border-top:1px solid var(--line); }
+  .test .id{ font-weight:800; color:var(--blue2); font-size:13px; }
+  .test .steps{ margin:3px 0; font-size:14px; }
+  .test .exp{ font-size:13px; color:var(--muted); }
+  .test .exp b{ color:var(--ink); }
+  .btns{ display:flex; gap:8px; margin-top:8px; }
+  .tg{ flex:1; padding:9px; border-radius:9px; border:1.5px solid var(--line); background:#fff; font-weight:700;
+       font-size:14px; cursor:pointer; color:var(--muted); }
+  .tg.pass.on{ background:var(--okbg); border-color:var(--ok); color:var(--ok); }
+  .tg.fail.on{ background:var(--errbg); border-color:var(--err); color:var(--err); }
+  .tg.na.on{ background:#eef2f7; border-color:#94a3b8; color:#475569; }
+  .note{ width:100%; margin-top:8px; padding:9px 10px; border:1px solid var(--line); border-radius:9px; font-size:16px;
+         font-family:inherit; resize:vertical; display:none; }
+  .test.flagged .note{ display:block; }
+  table.cc{ width:100%; border-collapse:collapse; font-size:13px; }
+  table.cc th,table.cc td{ border:1px solid var(--line); padding:6px 8px; text-align:left; }
+  table.cc input{ width:100%; border:none; font-size:16px; padding:4px 2px; font-family:inherit; }
+  .signoff textarea, .signoff input[type=text]{ width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:9px; font-size:16px; font-family:inherit; margin-top:6px; }
+  .ready{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .ready label{ flex:1; min-width:130px; border:1px solid var(--line); border-radius:9px; padding:8px; font-size:13px; display:flex; gap:6px; align-items:center; cursor:pointer; }
+  #bottom{ position:fixed; left:0; right:0; bottom:0; z-index:30; background:#fff; border-top:1px solid var(--line);
+           box-shadow:0 -2px 10px rgba(2,6,23,.08); padding-bottom:env(safe-area-inset-bottom,0px); }
+  .bar{ display:flex; gap:8px; padding:10px 12px 6px; }
+  .bar button{ flex:1; padding:12px; border-radius:10px; border:none; font-weight:800; font-size:14px; cursor:pointer; }
+  .foot{ text-align:center; font-size:11px; color:var(--muted); padding:0 12px 9px; line-height:1.6; }
+  .foot a{ color:var(--blue2); text-decoration:none; cursor:pointer; }
+  .b-mail{ background:var(--blue2); color:#fff; }
+  .b-copy{ background:#eef2f7; color:#0f172a; }
+  .b-reset{ background:#fff; color:var(--err); border:1px solid var(--errbg) !important; max-width:104px; }
+  .b-save{ background:var(--ok); color:#fff; max-width:120px; }
+  .b-save:disabled{ background:#e2e8f0; color:#94a3b8; cursor:default; }
+  .hint{ font-size:12px; color:var(--muted); padding:0 16px 10px; }
+  .toast{ position:fixed; bottom:74px; left:50%; transform:translateX(-50%); background:#0f172a; color:#fff;
+          padding:9px 16px; border-radius:20px; font-size:13px; opacity:0; transition:opacity .2s; z-index:40; pointer-events:none; }
+  .toast.show{ opacity:1; }
+  @media (max-width:480px){
+    header{ position:static; padding:14px 12px 12px; }   /* free up vertical space on phones */
+    header h1{ font-size:18px; }
+    .wrap{ padding:12px 10px; }
+    .meta{ grid-template-columns:1fr; }
+    .sec-h h2{ font-size:15px; }
+    .test .steps{ font-size:15px; }
+    .bar button{ font-size:13px; padding:11px 8px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap" style="padding:0">
+    <h1>Daybook — Site Test Plan</h1>
+    <div class="sub">Test every Fido feature on live data, in parallel with Fido, for one full day.</div>
+    <div class="meta">
+      <div class="idcell"><span class="idk">Name</span><span class="idv" id="i-name">—</span></div>
+      <div class="idcell"><span class="idk">Site</span><span class="idv" id="i-site">—</span></div>
+      <div class="idcell"><span class="idk">Role</span><span class="idv" id="i-role">—</span></div>
+      <div class="idcell"><span class="idk">Date</span><input id="m-date" type="date" /></div>
+    </div>
+    <div class="progwrap">
+      <div class="progbar"><div class="progfill" id="progfill"></div></div>
+      <div class="progtxt"><span id="prog-done">0 / 0 done</span><span id="prog-fail" style="font-weight:700"></span></div>
+    </div>
+  </div>
+</header>
+
+<div id="authgate">
+  <div class="card">
+    <div style="font-size:40px">🔒</div>
+    <h2>Sign in to Daybook</h2>
+    <p>The test plan is part of Daybook. Sign in first — your name, site and role are filled in automatically.</p>
+    <a class="btn2" href="/">Open Daybook to sign in</a>
+  </div>
+</div>
+
+<div class="wrap" id="app"></div>
+
+<div class="toast" id="toast"></div>
+<div id="bottom">
+  <div class="bar">
+    <button class="b-save" id="b-save" disabled>✓ Saved</button>
+    <button class="b-copy" id="b-mail">✉️ Email</button>
+    <button class="b-copy" id="b-view">📋 Results</button>
+    <button class="b-reset" id="b-discard">🗑 Discard</button>
+  </div>
+  <div class="foot">
+    Saves automatically · © <span id="yr"></span> Torama Technologies ·
+    <a href="mailto:support@torama.money">Contact us</a> ·
+    <a href="/privacy.html" target="_blank" rel="noopener">Privacy</a> ·
+    <a href="/terms.html" target="_blank" rel="noopener">Terms</a>
+  </div>
+</div>
+
+<div id="results" style="position:fixed;inset:0;background:var(--bg);z-index:50;display:none;flex-direction:column">
+  <div style="background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;padding:14px 16px;display:flex;align-items:center;gap:10px">
+    <strong style="flex:1;font-size:17px">Submitted results</strong>
+    <button id="r-refresh" style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-weight:700;cursor:pointer">↻</button>
+    <button id="r-close" style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-weight:700;cursor:pointer">✕</button>
+  </div>
+  <div id="r-body" style="flex:1;overflow:auto;padding:12px;max-width:780px;margin:0 auto;width:100%"></div>
+</div>
+
+<script>
+const REPORT_TO = "filatei@torama.money";
+const SITES = ["Swali","Okutukutu","Kpansia HQ","Kpansia East","Obunna","Yenegwe","Akenfa (Fiafia)","Mbiama (Fiafia)","Other"];
+const ROLES = ["Site Manager","Secretary","Supervisor","Gateman / Gate","Accountant","Snr Accountant / GM","Admin"];
+
+// Test data — [section title, [ [id, steps(HTML), expected(HTML)], ... ] ]
+const DATA = [
+["0. Setup & sign-in",[
+ ["0.1","Open daybook.torama.money on your phone and <b>Install / Add to Home Screen</b>.","App installs and opens full-screen."],
+ ["0.2","Sign in with your invited <b>Google account</b>.","Lands on Dashboard; top shows your <b>company</b> and <b>site</b>."],
+ ["0.3","Confirm your role/site is correct.","Managers see only their own site's data."],
+ ["0.4","Press the phone <b>Back</b> button from several screens.","App <b>never closes</b> — steps back one screen, then Dashboard, and stays open."],
+]],
+["1. Dashboard",[
+ ["1.1","Check the KPI cards (today / week / month).","Numbers match what you expect for today."],
+ ["1.2","Tap <b>Transfer / POS</b>.","Splits by terminal & bank; drill into the orders behind one."],
+ ["1.3","Tap <b>Present Today</b>.","Shows staff currently clocked in."],
+]],
+["2. Sell (POS)",[
+ ["2.1","Add a product, type the <b>quantity</b>.","Quantity accepts typed numbers; total updates."],
+ ["2.2","Change the <b>unit price (rate)</b> on a line.","Rate is editable; total recalculates."],
+ ["2.3","Enter a <b>customer name</b> — type a brand-new one.","New customer created on the fly; existing names suggest."],
+ ["2.4","Pay by <b>Cash</b> and complete.","Records as cash; receipt appears."],
+ ["2.5","Pay by <b>Transfer</b>, pick the <b>bank</b>.","Bank captured, shows on receipt + order."],
+ ["2.6","Pay by <b>POS</b>, pick the <b>terminal</b> (Moniepoint vs GTB).","Correct terminal captured."],
+ ["2.7","<b>Print</b> the receipt to the Bluetooth printer.","Prints with barcode/QR."],
+ ["2.8","Create an <b>Incentive</b> order (bonus, no cash).","Does NOT add to cash/sales; shows as incentive."],
+ ["2.9","Open <b>Sales ticker</b>, tap <b>Reprint</b> on a sale.","Receipt reprints correctly."],
+]],
+["3. Gate & loading",[
+ ["3.1","Supervisor: <b>Gate</b> → scan a sale QR/barcode or enter receipt no.","Order found; status <b>PENDING</b>."],
+ ["3.2","Mark the order <b>Loaded</b>.","Status → <b>LOADED</b>, recorded to supervisor."],
+ ["3.3","Gateman: scan & <b>Release/Exit</b>.","Status → <b>EXITED</b>; leaves the gate list."],
+ ["3.4","Try to exit an order that wasn't loaded.","Blocked / warns appropriately."],
+]],
+["4. Staff",[
+ ["4.1","<b>Add staff</b> — type regular/bagger/loader (+ position for regular).","Saved to your site with right type/position."],
+ ["4.2","<b>Capture passport photo</b>.","Photo saved, shows on profile."],
+ ["4.3","<b>Enrol face</b> for clock-in.","Enrols quickly; turn-head step passes."],
+ ["4.4","<b>Delete</b> an enrolled face, then re-enrol.","Removed and can be re-added."],
+ ["4.5","Use <b>staff search</b> (typeahead).","Filters as you type."],
+ ["4.6","<b>View/print a badge</b> (Snr Acct/GM/Admin).","Badge has QR, full-colour Fido/Fiafia logo, staff photo (avatar if none)."],
+ ["4.7","<b>Scan a badge</b> to clock in, later out.","Clock-in/out recorded; shows in Present Today."],
+]],
+["5. Expenses",[
+ ["5.1","Create an expense with <b>line items</b>; type a new vendor + new item.","Vendor & item created on the fly; total = Σ lines."],
+ ["5.2","Set one <b>Imprest</b>, one <b>Non-imprest</b>.","Type saves; Imprest chip shows."],
+ ["5.3","Tap a ticket.","Opens a <b>read-only view</b> first (not edit)."],
+ ["5.4","Footer: <b>attach 2+ payment receipts + a note</b>.","Receipts saved; View/download works."],
+ ["5.5","Creator/manager: <b>Validate</b>.","DRAFT → <b>REVIEWED</b>; only allowed buttons show."],
+ ["5.6","Admin: <b>Approve</b> (or <b>Decline</b> w/ reason).","Reviewed → <b>Approved</b> / <b>Declined</b>."],
+ ["5.7","Manager/Accountant: <b>Pay</b>, then <b>Deliver</b>.","Approved → <b>Paid</b> → <b>Delivered</b>."],
+ ["5.8","Record a <b>part-payment</b>.","amount_paid & balance update; UNPAID/PART/PAID correct."],
+ ["5.9","Filter → <b>Imprest</b>.","Shows per-site imprest total to transfer to Snr Accountant."],
+ ["5.10","<b>Payables</b> → pick a vendor (e.g. Flexplast).","Shows what you owe; drills to unpaid tickets."],
+ ["5.11","Check next actioner's <b>Alerts</b> (bell) + email after an action.","They get an in-app alert + email of what's needed."],
+]],
+["6. Cash at hand (EOD)",[
+ ["6.1","Expenses → <b>Cash</b> → ＋. Amount, depositor, site, payee bank, snap transfer receipt. Submit.","Saved as <b>NOT SEEN</b>; receipt attached."],
+ ["6.2","Add a 2nd receipt to an entry.","Multiple receipts on one entry."],
+ ["6.3","Snr/GM/Admin: <b>Mark seen</b>, then <b>Validate</b>.","NOT SEEN → SEEN → VALIDATED."],
+ ["6.4","Admin/Snr/GM: check the <b>reconciliation strip</b>.","Cash collected vs Recorded vs Variance (green when balanced)."],
+]],
+["7. Inventory",[
+ ["7.1","Items → type-ahead an item; create if new.","Created/selected; names stay unique."],
+ ["7.2","<b>Receive</b> stock (e.g. packing bags); optionally 'create payable'.","On-hand up; payable created if ticked."],
+ ["7.3","<b>Issue / Adjust</b> stock.","On-hand decreases / corrects."],
+ ["7.4","Check <b>Low stock</b>.","Items at/under reorder level listed."],
+ ["7.5","<b>Finished goods</b>: log production (bagged + bottle).","Per-site stock = produced − sold; bagged auto-counts."],
+]],
+["8. Reports & daily report",[
+ ["8.1","Open <b>Reports</b>.","Dates default to <b>today</b>; POS card shows 'today'."],
+ ["8.2","Tap <b>All time</b>, then <b>Today</b>.","Totals switch lifetime ↔ today."],
+ ["8.3","<b>🛠 Day ops</b>: enter leakage, packing bags, rolls(kg), crates, PH/TDS, generators, RO, materials, expired docs. Save.","Saves per site/day; reopening shows your numbers."],
+ ["8.4","<b>✨ Generate daily report</b> → your site.","Auto-fills sales/incentive/diesel/balance + production day-report; '✓ Day operations captured'."],
+ ["8.5","Add incidents → <b>Submit</b> (or Email).","Saved/submitted; email arrives to you + dailyreports inbox with all sections."],
+ ["8.6","(GM/Snr/Admin) Generate <b>🌍 All sites</b>.","Global roll-up + sales distribution by site; Email works."],
+ ["8.7","Compare emailed report vs your usual Fido report.","Figures match (note differences)."],
+]],
+["9. Profit / valuation (Accountant+)",[
+ ["9.1","More → <b>Profit / P&L</b>.","Revenue − expenses; per site."],
+ ["9.2","Toggle <b>Cash ↔ Accrual</b>.","Numbers change basis correctly."],
+ ["9.3","Check <b>stock valuation</b>.","On-hand × cost totals look right."],
+]],
+["10. Messages, alerts & admin",[
+ ["10.1","Post a <b>Site message</b>.","Only you + Admin see it; you can delete your copy."],
+ ["10.2","Activity → <b>🔔 Alerts</b>.","Your notifications listed; unread count; tapping opens item."],
+ ["10.3","(Admin) Members → invite; <b>Resend invite</b>.","Button spins; 'email sent ✓' only when truly sent; invite arrives."],
+ ["10.4","(Admin) <b>Edit a member's</b> site/role.","Change saves and takes effect."],
+ ["10.5","(Snr Acct) Switch between <b>Fido & Fiafia</b> / all sites.","Can see & manage both companies."],
+]],
+["11. Full-day scenario (end-to-end)",[
+ ["11.1","Ring up <b>every sale</b> today on Daybook (cash/transfer/POS/incentive), printing receipts.","All sales captured correctly."],
+ ["11.2","<b>Load & release</b> orders at the gate as trucks/keke leave.","Gate flow works all day."],
+ ["11.3","Record <b>expenses</b> as they happen; run validate→approve→pay.","Lifecycle works on real tickets."],
+ ["11.4","Enter <b>cash at hand</b> + receipts; capture <b>Day ops</b>; <b>generate & submit</b> the report.","EOD close completes."],
+ ["11.5","<b>Cross-check</b> Daybook totals vs Fido for the day (table below).","All key figures match."],
+]],
+];
+
+document.getElementById('yr').textContent = new Date().getFullYear();
+const KEY="daybook-testplan-v1";
+let S = JSON.parse(localStorage.getItem(KEY) || "{}");
+S.meta = S.meta || {}; S.res = S.res || {}; S.cc = S.cc || {}; S.so = S.so || {};
+S.id = S.id || ((crypto.randomUUID && crypto.randomUUID()) || ('tp-'+Date.now()+'-'+Math.random().toString(36).slice(2,8)));
+const allIds = DATA.flatMap(s => s[1].map(t => t[0]));
+const toast = (m) => { const t=document.getElementById('toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1600); };
+
+// ── Auto-save: persist locally + sync to the server (debounced) ───────────────
+let dirty=false, syncing=false, syncT=null, lastSent='';
+function updateSaveBtn(){
+  const b=document.getElementById('b-save'); if(!b) return;
+  if(syncing){ b.textContent='Saving…'; b.disabled=true; }
+  else if(dirty){ b.textContent='Save now'; b.disabled=false; }
+  else { b.textContent='✓ Saved'; b.disabled=true; }
+}
+async function doSync(){
+  if(syncing || !authed) return;   // never save anonymously — only after sign-in
+  const c=counts();
+  const payload={ id:S.id, site:S.meta.site||'', tester:S.meta.tester||'', role:S.meta.role||'', date:S.meta.date||'',
+    passed:c.passed, failed:c.failed, na:c.na, total:c.total, readiness:S.so.ready||'', summary:summary(), data:JSON.stringify(S) };
+  const body=JSON.stringify(payload);
+  if(body===lastSent){ dirty=false; updateSaveBtn(); return; }
+  syncing=true; updateSaveBtn();
+  try{
+    const r=await fetch('/api/testplan',{method:'POST',headers:{'Content-Type':'application/json',...AUTHH()},body});
+    if(!r.ok) throw new Error();
+    lastSent=body; dirty=false;
+  }catch{ dirty=true; /* stay dirty, will retry on next change or manual Save */ }
+  syncing=false; updateSaveBtn();
+}
+function scheduleSync(){ dirty=true; updateSaveBtn(); clearTimeout(syncT); syncT=setTimeout(doSync, 900); }
+// save() persists locally immediately, then queues a server sync.
+const save = () => { localStorage.setItem(KEY, JSON.stringify(S)); scheduleSync(); };
+
+// Date is editable; Name / Site / Role come from the signed-in Daybook session.
+const md=document.getElementById('m-date');
+md.value=S.meta.date||new Date().toISOString().slice(0,10);
+S.meta.date=md.value;
+md.addEventListener('input',()=>{ S.meta.date=md.value; save(); });
+
+const ROLE_LABELS={GATEMAN:'Gateman / Security',GATE:'Gate',SUPERVISOR:'Supervisor',SECRETARY:'Secretary',SITE_MANAGER:'Manager',ACCOUNTANT:'Accountant',SNR_ACCOUNTANT:'Snr Accountant',GENERAL_MANAGER:'General Manager',ADMIN:'Admin',SUPERADMIN:'Superadmin'};
+let authed=false, isAdmin=false, myUserId=null;
+const _tok=localStorage.getItem('daybook_token'), _ten=localStorage.getItem('daybook_tenant');
+const AUTHH=()=>(_tok?{Authorization:'Bearer '+_tok}:{});
+async function initAuth(){
+  if(!_tok){ document.getElementById('authgate').style.display='flex'; return; }
+  let me; try{ const r=await fetch('/api/auth/me',{headers:{Authorization:'Bearer '+_tok}}); if(!r.ok) throw 0; me=await r.json(); }
+  catch{ document.getElementById('authgate').style.display='flex'; return; }
+  const m=(me.tenants||[]).find(t=>String(t.id)===String(_ten))||(me.tenants||[])[0];
+  let siteName=(m&&m.site_id)?'your site':'All sites';
+  if(m&&m.site_id){ try{ const sites=await (await fetch('/api/sites?tenant='+encodeURIComponent(m.id),{headers:{Authorization:'Bearer '+_tok}})).json(); const s=(sites||[]).find(x=>x.id===m.site_id); if(s) siteName=s.name; }catch{} }
+  S.meta.tester=(me.user&&(me.user.name||me.user.email))||'User';
+  S.meta.email=(me.user&&me.user.email)||'';
+  S.meta.site=siteName;
+  S.meta.role=ROLE_LABELS[m&&m.role]||(m&&m.role)||'';
+  myUserId=(me.user&&me.user.id)||null;
+  isAdmin=!!(me.user&&me.user.is_superadmin)||(me.tenants||[]).some((t)=>t.role==='ADMIN');
+  document.getElementById('i-name').textContent=S.meta.tester;
+  document.getElementById('i-site').textContent=S.meta.site;
+  document.getElementById('i-role').textContent=S.meta.role||'—';
+  authed=true; localStorage.setItem(KEY,JSON.stringify(S));
+  scheduleSync();   // persist identity + any progress now that we know who this is
+}
+initAuth();
+
+function prog(){
+  const done = allIds.filter(id => S.res[id] && S.res[id].st).length;
+  const fail = allIds.filter(id => S.res[id] && S.res[id].st==='fail').length;
+  document.getElementById('progfill').style.width = (done/allIds.length*100)+'%';
+  document.getElementById('prog-done').textContent = `${done} / ${allIds.length} done`;
+  document.getElementById('prog-fail').textContent = fail ? `❌ ${fail} failed` : '';
+}
+
+const app=document.getElementById('app');
+DATA.forEach((sec,si)=>{
+  const tests=sec[1];
+  const el=document.createElement('section');
+  el.innerHTML = `<div class="sec-h"><h2>${sec[0]}</h2><span class="cnt" id="cnt-${si}"></span><span class="chev">▾</span></div><div class="sec-body"></div>`;
+  const body=el.querySelector('.sec-body');
+  el.querySelector('.sec-h').addEventListener('click',()=>el.classList.toggle('collapsed'));
+  tests.forEach(t=>{
+    const [id,steps,exp]=t;
+    const cur=S.res[id]||{st:'',note:''};
+    const row=document.createElement('div');
+    row.className='test'+(cur.st==='fail'?' flagged':'');
+    row.innerHTML=`<div class="id">${id}</div>
+      <div class="steps">${steps}</div>
+      <div class="exp"><b>Expected:</b> ${exp}</div>
+      <div class="btns">
+        <button class="tg pass${cur.st==='pass'?' on':''}" data-s="pass">✓ Pass</button>
+        <button class="tg fail${cur.st==='fail'?' on':''}" data-s="fail">✗ Fail</button>
+        <button class="tg na${cur.st==='na'?' on':''}" data-s="na">N/A</button>
+      </div>
+      <textarea class="note" placeholder="What went wrong? (notes / what you saw)">${(cur.note||'').replace(/</g,'&lt;')}</textarea>`;
+    const setBtns=(st)=>row.querySelectorAll('.tg').forEach(b=>b.classList.toggle('on',b.dataset.s===st));
+    row.querySelectorAll('.tg').forEach(b=>b.addEventListener('click',()=>{
+      const c=S.res[id]||{st:'',note:''};
+      c.st = c.st===b.dataset.s ? '' : b.dataset.s;
+      S.res[id]=c; save(); setBtns(c.st);
+      row.classList.toggle('flagged', c.st==='fail');
+      cnt(si); prog();
+    }));
+    row.querySelector('.note').addEventListener('input',e=>{const c=S.res[id]||{st:'',note:''}; c.note=e.target.value; S.res[id]=c; save();});
+    body.appendChild(row);
+  });
+  app.appendChild(el);
+  function cnt(){ const ids=tests.map(x=>x[0]); const d=ids.filter(i=>S.res[i]&&S.res[i].st).length; document.getElementById('cnt-'+si).textContent=`${d}/${ids.length}`; }
+  el._cnt=cnt; cnt();
+});
+
+// Cross-check table (section 11)
+const ccRows=["Total sales","Cash","Transfer (by bank)","POS (by terminal)","Incentive","Sales by site","Production / bagging","Expenses total"];
+const ccSec=document.createElement('section');
+ccSec.innerHTML=`<div class="sec-h"><h2>Cross-check: Fido vs Daybook</h2><span class="chev">▾</span></div>
+  <div class="sec-body"><div class="hint">Enter the same day's figures from each system.</div>
+  <div style="padding:0 12px 12px"><table class="cc"><thead><tr><th>Figure</th><th>Fido</th><th>Daybook</th></tr></thead><tbody id="cc-body"></tbody></table></div></div>`;
+ccSec.querySelector('.sec-h').addEventListener('click',()=>ccSec.classList.toggle('collapsed'));
+app.appendChild(ccSec);
+const ccBody=ccSec.querySelector('#cc-body');
+ccRows.forEach((r,i)=>{
+  const tr=document.createElement('tr');
+  const c=S.cc[i]||{};
+  tr.innerHTML=`<td>${r}</td><td><input data-cc="${i}-f" placeholder="—" value="${(c.f||'').replace(/"/g,'&quot;')}"></td><td><input data-cc="${i}-d" placeholder="—" value="${(c.d||'').replace(/"/g,'&quot;')}"></td>`;
+  ccBody.appendChild(tr);
+});
+ccBody.querySelectorAll('input').forEach(inp=>inp.addEventListener('input',()=>{const [i,k]=inp.dataset.cc.split('-'); S.cc[i]=S.cc[i]||{}; S.cc[i][k]=inp.value; save();}));
+
+// Sign-off
+const soSec=document.createElement('section');
+soSec.className='signoff';
+soSec.innerHTML=`<div class="sec-h"><h2>Sign-off</h2><span class="chev">▾</span></div>
+ <div class="sec-body" style="padding:0 16px 16px">
+   <div style="font-size:13px;color:var(--muted)">Top problems found</div>
+   <textarea id="so-problems" rows="3" placeholder="1.\n2.\n3.">${(S.so.problems||'').replace(/</g,'&lt;')}</textarea>
+   <div class="ready">
+     <label><input type="radio" name="ready" value="ready"> Ready to switch</label>
+     <label><input type="radio" name="ready" value="small"> Mostly works, small fixes</label>
+     <label><input type="radio" name="ready" value="no"> Not ready</label>
+   </div>
+ </div>`;
+soSec.querySelector('.sec-h').addEventListener('click',e=>{ if(e.target.closest('label,textarea,input'))return; soSec.classList.toggle('collapsed');});
+app.appendChild(soSec);
+const soP=soSec.querySelector('#so-problems'); soP.addEventListener('input',()=>{S.so.problems=soP.value; save();});
+soSec.querySelectorAll('input[name=ready]').forEach(r=>{ if(S.so.ready===r.value)r.checked=true; r.addEventListener('change',()=>{S.so.ready=r.value; save();});});
+
+prog();
+updateSaveBtn();
+// Push any progress already on this device up to the server on load.
+if(S.meta.tester || Object.keys(S.res).length || Object.keys(S.cc).length) scheduleSync();
+// Best-effort flush if they close the tab mid-edit.
+window.addEventListener('beforeunload',()=>{
+  if(authed && dirty && navigator.sendBeacon){
+    const c=counts();
+    const payload={ id:S.id, site:S.meta.site||'', tester:S.meta.tester||'', role:S.meta.role||'', date:S.meta.date||'',
+      passed:c.passed, failed:c.failed, na:c.na, total:c.total, readiness:S.so.ready||'', summary:summary(), data:JSON.stringify(S) };
+    navigator.sendBeacon('/api/testplan', new Blob([JSON.stringify(payload)], {type:'application/json'}));
+  }
+});
+
+// Build a text summary of results
+function summary(){
+  const m=S.meta;
+  let out=`DAYBOOK TEST RESULTS\nTester: ${m.tester||'?'}\nSite: ${m.site||'?'}\nRole: ${m.role||'?'}\nDate: ${m.date||'?'}\n`;
+  const done=allIds.filter(i=>S.res[i]&&S.res[i].st).length;
+  const fail=allIds.filter(i=>S.res[i]&&S.res[i].st==='fail');
+  const na=allIds.filter(i=>S.res[i]&&S.res[i].st==='na');
+  out+=`Progress: ${done}/${allIds.length} tested · ${fail.length} FAILED · ${na.length} N/A\n`;
+  out+=`Readiness: ${({ready:'Ready to switch',small:'Mostly works, small fixes',no:'Not ready'})[S.so.ready]||'—'}\n`;
+  if(fail.length){ out+=`\n--- FAILURES ---\n`; fail.forEach(i=>{ out+=`${i}: ${(S.res[i].note||'(no note)')}\n`; }); }
+  if(S.so.problems&&S.so.problems.trim()){ out+=`\n--- TOP PROBLEMS ---\n${S.so.problems.trim()}\n`; }
+  const ccLines=ccRows.map((r,i)=>{const c=S.cc[i]||{}; return (c.f||c.d)?`${r}: Fido ${c.f||'—'} | Daybook ${c.d||'—'}`:null;}).filter(Boolean);
+  if(ccLines.length){ out+=`\n--- CROSS-CHECK ---\n${ccLines.join('\n')}\n`; }
+  return out;
+}
+
+// Counts for the summary / server payload
+function counts(){
+  const passed=allIds.filter(i=>S.res[i]&&S.res[i].st==='pass').length;
+  const failed=allIds.filter(i=>S.res[i]&&S.res[i].st==='fail').length;
+  const na=allIds.filter(i=>S.res[i]&&S.res[i].st==='na').length;
+  return {passed,failed,na,total:allIds.length};
+}
+
+// Email a copy to Torama
+document.getElementById('b-mail').addEventListener('click',()=>{
+  const m=S.meta; const subj=`Daybook test — ${m.site||'?'} — ${m.tester||'?'} (${m.date||''})`;
+  location.href=`mailto:${REPORT_TO}?subject=${encodeURIComponent(subj)}&body=${encodeURIComponent(summary())}`;
+});
+// Save now (manual flush — auto-save already runs in the background)
+document.getElementById('b-save').addEventListener('click',()=>{ clearTimeout(syncT); doSync().then(()=>{ if(!dirty) toast('Saved ✓'); }); });
+// Explicit discard — wipe this tester's saved data (server + this device)
+document.getElementById('b-discard').addEventListener('click',async()=>{
+  if(!confirm('Discard this test sheet? Your saved answers are deleted from the server and this device. This cannot be undone.')) return;
+  try{ await fetch('/api/testplan/'+encodeURIComponent(S.id),{method:'DELETE',headers:AUTHH()}); }catch{}
+  localStorage.removeItem(KEY); location.reload();
+});
+
+// View submitted results from all sites
+const resultsEl=document.getElementById('results'), rBody=document.getElementById('r-body');
+async function loadResults(){
+  rBody.innerHTML='<div style="color:var(--muted);padding:20px;text-align:center">Loading…</div>';
+  try{
+    const rows=await (await fetch('/api/testplan')).json();
+    if(!rows.length){ rBody.innerHTML='<div style="color:var(--muted);padding:20px;text-align:center">No results submitted yet.</div>'; return; }
+    const READY={ready:'✅ Ready',small:'🟡 Small fixes',no:'🔴 Not ready'};
+    rBody.innerHTML=rows.map(r=>{
+      const when=new Date(((r.updated_at||r.created_at)||0)*1000).toLocaleString();
+      const canDel=isAdmin||(r.user_id&&r.user_id===myUserId);
+      return `<div style="background:#fff;border-radius:12px;padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(2,6,23,.06)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">
+          <strong>${esc(r.site||'?')}</strong>
+          <span style="font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center">${esc(when)}${canDel?` <button data-del="${esc(r.id)}" style="border:none;background:none;color:var(--err);cursor:pointer;font-size:15px;padding:0 2px">🗑</button>`:''}</span>
+        </div>
+        <div style="font-size:13px;color:var(--muted);margin:2px 0 6px">${esc(r.tester||'?')}${r.role?' · '+esc(r.role):''}${r.test_date?' · '+esc(r.test_date):''}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;font-size:12px;font-weight:700">
+          <span style="background:var(--okbg);color:var(--ok);padding:2px 9px;border-radius:20px">${r.passed} pass</span>
+          <span style="background:${r.failed?'var(--errbg)':'#eef2f7'};color:${r.failed?'var(--err)':'#64748b'};padding:2px 9px;border-radius:20px">${r.failed} fail</span>
+          <span style="background:#eef2f7;color:#475569;padding:2px 9px;border-radius:20px">${r.na} n/a</span>
+          <span style="margin-left:auto;color:#475569">${READY[r.readiness]||''}</span>
+        </div>
+        ${r.summary?`<details style="margin-top:8px"><summary style="cursor:pointer;font-size:13px;color:var(--blue2)">View details</summary><pre style="white-space:pre-wrap;font-size:12px;background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:8px;margin-top:6px;overflow:auto">${esc(r.summary)}</pre></details>`:''}
+      </div>`;
+    }).join('');
+    rBody.querySelectorAll('button[data-del]').forEach((b)=>b.addEventListener('click',async()=>{
+      if(!confirm('Delete this submitted result? This cannot be undone.')) return;
+      try{
+        const res=await fetch('/api/testplan/'+encodeURIComponent(b.getAttribute('data-del')),{method:'DELETE',headers:AUTHH()});
+        if(!res.ok) throw new Error();
+        loadResults();
+      }catch{ toast('Could not delete (admins only)'); }
+    }));
+  }catch{ rBody.innerHTML='<div style="color:var(--err);padding:20px;text-align:center">Could not load results.</div>'; }
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+document.getElementById('b-view').addEventListener('click',()=>{ resultsEl.style.display='flex'; loadResults(); });
+document.getElementById('r-close').addEventListener('click',()=>{ resultsEl.style.display='none'; });
+document.getElementById('r-refresh').addEventListener('click',loadResults);
+</script>
+</body>
+</html>

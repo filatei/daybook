@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useBackHandler, useRole, atLeast } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 import { useVoiceInput } from '../hooks/useVoiceInput.js';
 import Cash from './Cash.jsx';
 
@@ -138,9 +139,7 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
       />
       {sites.length > 1 && <>
         <label className="fl">Site</label>
-        <select className="input" value={f.site_id} onChange={(e) => set('site_id', e.target.value)}>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        <SearchSelect value={f.site_id} onChange={(val) => set('site_id', val)} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select site" />
       </>}
 
       {/* Payments — incremental ticket payments + vendor balance */}
@@ -875,11 +874,7 @@ export default function Expenses() {
           <option value="IMPREST">Imprest</option>
           <option value="NON_IMPREST">Non-imprest</option>
         </select>
-        <select className="input" style={{ flex: '1 1 120px' }} value={filter.cat}
-          onChange={(e) => setFilter((p) => ({ ...p, cat: e.target.value }))}>
-          <option value="">All categories</option>
-          {categories.map((c) => <option key={c}>{c}</option>)}
-        </select>
+        <SearchSelect style={{ flex: '1 1 120px' }} value={filter.cat} onChange={(val) => setFilter((p) => ({ ...p, cat: val }))} options={[{ value: '', label: 'All categories' }, ...categories.map((c) => ({ value: c, label: c }))]} placeholder="All categories" />
         <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filter.from}
           onChange={(e) => setFilter((p) => ({ ...p, from: e.target.value }))} />
         <input type="date" className="input" style={{ flex: '1 1 110px' }} value={filter.to}

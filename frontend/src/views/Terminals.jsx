@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, scoped } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 function TerminalForm({ row, sites, siteBound, onSaved, onClose }) {
   const { toast } = useStore();
@@ -44,10 +45,7 @@ function TerminalForm({ row, sites, siteBound, onSaved, onClose }) {
         {!siteBound && sites.length > 0 && (
           <>
             <label className="fl">Site (optional)</label>
-            <select className="input" value={f.site_id} onChange={set('site_id')} style={{ marginBottom: 10 }}>
-              <option value="">All sites</option>
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            <SearchSelect value={f.site_id} onChange={(val) => setF((p) => ({ ...p, site_id: val }))} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" style={{ marginBottom: 10 }} />
           </>
         )}
 

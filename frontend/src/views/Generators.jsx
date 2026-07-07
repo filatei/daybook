@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 function GeneratorForm({ gen, sites, onSave, onClose }) {
   const { toast } = useStore();
@@ -43,9 +44,7 @@ function GeneratorForm({ gen, sites, onSave, onClose }) {
       <input className="input" value={f.make_model} onChange={(e) => set('make_model', e.target.value)} />
       {sites.length > 1 && <>
         <label className="fl">Site</label>
-        <select className="input" value={f.site_id} onChange={(e) => set('site_id', e.target.value)}>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        <SearchSelect value={f.site_id} onChange={(val) => set('site_id', val)} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select…" />
       </>}
       {gen?.id && <>
         <label className="fl">Status</label>

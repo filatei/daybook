@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
+import SearchSelect from '../components/SearchSelect.jsx';
 
 // One diesel-consumption entry per site per day: litres × rate = amount.
 // Upserts on (site, date) so re-entering the same day overwrites rather than duplicates.
@@ -40,10 +41,7 @@ function DieselForm({ sites, defaultSite, onSave, onClose }) {
         {sites.length > 1 && (
           <div>
             <label className="fl">Site</label>
-            <select className="input" value={f.site} onChange={(e) => set('site', e.target.value)}>
-              <option value="">Select…</option>
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            <SearchSelect value={f.site} onChange={(val) => set('site', val)} options={sites.map((s) => ({ value: s.id, label: s.name }))} placeholder="Select…" />
           </div>
         )}
       </div>
@@ -107,10 +105,7 @@ export default function Diesel() {
       <div className="section-title" style={{ marginTop: 0 }}>Diesel</div>
 
       {sites.length > 1 && (
-        <select className="input" style={{ marginBottom: 12 }} value={site} onChange={(e) => setSite(e.target.value)}>
-          <option value="ALL">All sites</option>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        <SearchSelect style={{ marginBottom: 12 }} value={site} onChange={(val) => setSite(val)} options={[{ value: 'ALL', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
       )}
 
       <div className="card" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>

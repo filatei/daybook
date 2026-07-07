@@ -299,6 +299,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const [payOpen, setPayOpen] = useState(false);
   const [payAmt, setPayAmt] = useState('');
   const [payBank, setPayBank] = useState('');
+  const [bankQuery, setBankQuery] = useState('');   // searchable input text for the bank picker
   const [payNote, setPayNote] = useState('');
   const [payFile, setPayFile] = useState(null);
   const [banks, setBanks] = useState([]);
@@ -413,13 +414,17 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 
   const fileIcon = (m) => (m || '').startsWith('image/') ? '🖼️' : (m || '').includes('pdf') ? '📄' : m ? '📎' : '📝';
 
-  // Delete rule: Snr Accountant / GM / Admin (or the recorder) may delete an
-  // UNPAID expense not more than one week old. Backend re-enforces this.
-  const unpaid = paid <= 0 && !['PAID', 'DELIVERED'].includes(wf);
+  // Delete rule: a ticket can be deleted only before approval (draft / validated
+  // / reviewed) and while unpaid. Snr Accountant / GM / Admin may delete any such
+  // ticket regardless of age; the recorder is limited to one week. Backend
+  // re-enforces this.
+  const isSnrPlus = !!(role && atLeast(role, 'SNR_ACCOUNTANT'));
+  const notApproved = ['DRAFT', 'VALIDATED', 'REVIEWED'].includes(wf);
+  const unpaid = paid <= 0 && notApproved;
   const fresh = (Date.now() / 1000 - Number(expense.created_at || 0)) <= 7 * 86400;
-  const canDelete = ((role && atLeast(role, 'SNR_ACCOUNTANT')) || expense.recorded_by === user?.id) && unpaid && fresh;
+  const canDelete = unpaid && (isSnrPlus || (expense.recorded_by === user?.id && fresh));
   const del = async () => {
-    if (!await confirm({ title: 'Delete this expense?', message: 'This permanently removes the unpaid expense and its receipts.', confirmText: 'Delete', danger: true })) return;
+    if (!await confirm({ title: 'Delete this expense?', message: 'This permanently removes the unapproved expense and its receipts.', confirmText: 'Delete', danger: true })) return;
     setBusy(true);
     try { await api(ts(`/expenses/${expense.id}`), { method: 'DELETE' }); toast('Expense deleted', 'ok'); onChanged && onChanged(); onClose(); }
     catch (e) { toast(e.message || 'Could not delete', 'err'); }
@@ -436,7 +441,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>{expense.expense_date}{expense.vendor ? ` · ${expense.vendor}` : ''}{siteName ? ` · ${siteName}` : ''}</div>
         </div>
         <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 20, background: (WF[wf] || WF.DRAFT).bg, color: (WF[wf] || WF.DRAFT).fg }}>{(WF[wf] || WF.DRAFT).label}</span>
-        {canDelete && <button className="btn btn-ghost" style={{ width: 'auto', padding: '4px 8px', color: 'var(--err)' }} disabled={busy} onClick={del} title="Delete this unpaid expense">🗑</button>}
+        {canDelete && <button className="btn btn-ghost" style={{ width: 'auto', padding: '4px 8px', color: 'var(--err)' }} disabled={busy} onClick={del} title="Delete this unapproved expense">🗑</button>}
       </div>
 
       {expense.kind === 'IMPREST' && (
@@ -475,10 +480,25 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
             {(parseFloat(payAmt) || 0) >= balance - 0.01 && (parseFloat(payAmt) || 0) > 0 ? ' · will mark PAID' : ''}
           </div>
           <label className="fl" style={{ marginTop: 8 }}>Paid from (bank account)</label>
-          <select className="input" value={payBank} onChange={(e) => setPayBank(e.target.value)}>
-            <option value="">Cash / unspecified</option>
-            {banks.map((b) => <option key={b.id} value={b._tenant ? `${b.label} (${b._tenant})` : b.label}>{b.label}{b.bank_name ? ` · ${b.bank_name}` : ''}{b.account_number ? ` · ${b.account_number}` : ''}{b._tenant ? ` · ${b._tenant}` : ''}</option>)}
-          </select>
+          <Typeahead
+            value={bankQuery}
+            onChange={setBankQuery}
+            minChars={0}
+            placeholder="Search bank account… (blank = cash)"
+            fetchFn={async (q) => {
+              const s = (q || '').trim().toLowerCase();
+              const match = (b) => [b.label, b.bank_name, b.account_number, b._tenant].filter(Boolean).join(' ').toLowerCase().includes(s);
+              const rows = (s ? banks.filter(match) : banks).slice(0, 50).map((b) => ({
+                label: b._tenant ? `${b.label} (${b._tenant})` : b.label,   // stored as the payment's `bank`
+                sub: [b.bank_name, b.account_number, b._tenant].filter(Boolean).join(' · '),
+              }));
+              return [{ label: 'Cash / unspecified', sub: 'No bank — cash payment', _cash: true }, ...rows];
+            }}
+            onPick={(item) => { const v = item._cash ? '' : item.label; setPayBank(v); setBankQuery(item._cash ? '' : item.label); }}
+          />
+          {payBank
+            ? <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>Paying from <b style={{ color: 'var(--ink)' }}>{payBank}</b> · <button type="button" onClick={() => { setPayBank(''); setBankQuery(''); }} style={{ background: 'none', border: 'none', color: 'var(--brand-d)', cursor: 'pointer', padding: 0, fontSize: 12 }}>use cash instead</button></div>
+            : <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>No bank selected — will record as cash.</div>}
           <label className="fl" style={{ marginTop: 8 }}>Note (optional)</label>
           <input className="input" value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="e.g. transfer ref, teller no." />
           <label className="fl" style={{ marginTop: 8 }}>Receipt (optional)</label>

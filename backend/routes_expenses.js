@@ -264,12 +264,21 @@ router.delete('/:id', requireAuth, async (req, res) => {
   const canByRole = atLeast(a.ctx.role, 'SNR_ACCOUNTANT');
   if (!canByRole && e.recorded_by !== req.user.id)
     return res.status(403).json({ error: 'only Snr Accountant, GM or Admin (or the recorder) can delete an expense' });
-  // Business rule: only UNPAID expenses that are not more than one week old.
-  if (Number(e.amount_paid || 0) > 0 || ['PAID', 'DELIVERED'].includes(e.wf_state))
-    return res.status(409).json({ error: 'this expense has been paid — it cannot be deleted' });
-  const weekAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
-  if (Number(e.created_at || 0) < weekAgo)
-    return res.status(409).json({ error: 'expenses older than one week cannot be deleted' });
+  // Never delete a ticket that has money against it.
+  if (Number(e.amount_paid || 0) > 0)
+    return res.status(409).json({ error: 'this expense has payments recorded — it cannot be deleted' });
+  // Only tickets that are NOT YET APPROVED can be deleted (draft / validated /
+  // reviewed). Once approved, paid or delivered, they're locked.
+  const UNAPPROVED = ['DRAFT', 'VALIDATED', 'REVIEWED'];
+  if (!UNAPPROVED.includes(e.wf_state || 'DRAFT'))
+    return res.status(409).json({ error: 'only tickets not yet approved (draft, validated or reviewed) can be deleted' });
+  // Snr Accountant+ may delete any unapproved ticket regardless of age; the
+  // original recorder is still limited to the one-week window.
+  if (!canByRole) {
+    const weekAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+    if (Number(e.created_at || 0) < weekAgo)
+      return res.status(409).json({ error: 'expenses older than one week cannot be deleted' });
+  }
 
   // Reverse the amount in the linked daily report
   if (e.site_id) {

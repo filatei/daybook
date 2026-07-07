@@ -413,8 +413,12 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     // Pay is not a bare state flip — open the pay form (amount, bank, receipt).
     if (action === 'pay') { setPayAmt(String(balance || '')); setPayOpen(true); return; }
     let note2;
-    if (action === 'decline' || action === 'reset') {
-      note2 = window.prompt(`Reason for ${action} (optional):`) || '';
+    if (action === 'decline') {
+      // Declining requires a reason — it's a rejection the vendor/owner must understand.
+      note2 = (window.prompt('Reason for declining this expense (required):') || '').trim();
+      if (!note2) { toast('A reason is required to decline', 'err'); return; }
+    } else if (action === 'reset') {
+      note2 = window.prompt('Reason for reset (optional):') || '';
     }
     setActing(action);
     try {
@@ -424,6 +428,8 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       onChanged && onChanged();
       const done = { validate: 'Validated ✓', review: 'Reviewed ✓', approve: 'Approved ✓', decline: 'Declined', pay: 'Marked paid ✓', deliver: 'Delivered ✓', reset: 'Reset to draft' };
       toast(done[action] || 'Updated ✓', action === 'decline' ? 'info' : 'ok');
+      // Validate / Approve advance the ticket — close the modal back to the preceding screen.
+      if (action === 'validate' || action === 'approve') { onClose && onClose(); return; }
     } catch (e) { toast(e.message || 'Action failed', 'err'); }
     setActing('');
   };

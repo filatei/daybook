@@ -11,7 +11,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today, isNetErr } from '../api.js';
 import SearchSelect from '../components/SearchSelect.jsx';
-import { useStore } from '../store.jsx';
+import { useStore, useRole, atLeast } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import { useRealtime } from '../hooks/useRealtime.js';
 import Typeahead from '../components/Typeahead.jsx';
@@ -127,6 +127,8 @@ function CartLine({ line, onChange, onPrice, onRemove }) {
 // ── Main component ────────────────────────────────────────────────────────────
 export default function Sell() {
   const { tenant, toast, tenants, user, sites } = useStore();
+  const role = useRole();
+  const isSnr = !!(role && atLeast(role, 'SNR_ACCOUNTANT'));   // SNR+ see ALL terminals; others only their site's
   const activeTenant = (tenants || []).find((t) => String(t.id) === String(tenant));
   // Cashier label: first name, else the part of the email before '@'.
   const servedBy = (user?.name && user.name.trim().split(/\s+/)[0]) || (user?.email ? user.email.split('@')[0] : null);
@@ -599,13 +601,21 @@ export default function Sell() {
             <div style={{ marginTop: 10 }}>
               <label className="fl">POS terminal</label>
               {terminals.length > 0 ? (() => {
-                // Default view shows only the two banks we use most (GTBank +
-                // Moniepoint); "Show all" reveals every other terminal. Options are
-                // grouped by their site/location so multiples per site are clear.
+                // A site-bound sales user already receives ONLY their site's
+                // terminals from the server (plus any unassigned) — show them all,
+                // own-site first. SNR Accountant+ receive EVERY terminal across all
+                // sites, so for them we collapse to the two banks we use most
+                // (GTBank + Moniepoint) with a "More" toggle to reveal the rest.
                 const isPrimary = (b) => /gtb|gt\s*bank|moni/i.test(b || '');
+                const collapse = isSnr && !showAllTerminals;
                 const hasOthers = terminals.some((t) => !isPrimary(t.bank));
-                const list = terminals.filter((t) => showAllTerminals || isPrimary(t.bank));
-                const options = list.map((t) => ({
+                const list = collapse ? terminals.filter((t) => isPrimary(t.bank)) : terminals;
+                // Own-site (named location) terminals first; unassigned ones last.
+                const sorted = [...list].sort((a, b) => {
+                  const au = a.location ? 0 : 1, bu = b.location ? 0 : 1;
+                  return au !== bu ? au - bu : (a.location || '').localeCompare(b.location || '');
+                });
+                const options = sorted.map((t) => ({
                   value: t.label,
                   label: t.label,
                   sub: [t.bank, t.terminal_id, t.sn].filter(Boolean).join(' · '),
@@ -620,7 +630,7 @@ export default function Sell() {
                       placeholder="Select terminal…"
                       searchPlaceholder="Search terminal / bank / site…"
                     />
-                    {hasOthers && (
+                    {isSnr && hasOthers && (
                       <button type="button" onClick={() => setShowAllTerminals((s) => !s)}
                         style={{ marginTop: 4, background: 'none', border: 'none', color: 'var(--brand-d)', cursor: 'pointer', padding: 0, fontSize: 12 }}>
                         {showAllTerminals ? '▲ Show only GTBank & Moniepoint' : '▾ More — show all terminals'}

@@ -238,6 +238,9 @@ function PayablesView() {
   };
   const afterChange = () => { loadRows(); if (vendor) loadVendor(vendor); };
   const totalOwed = (rows || []).reduce((a, r) => a + r.owed, 0);
+  const [pq, setPq] = useState('');   // free-text filter over the payables list
+  const q = pq.trim().toLowerCase();
+  const shown = q ? (rows || []).filter((r) => (r.vendor || '').toLowerCase().includes(q)) : (rows || []);
 
   if (rows === null) return <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>;
   return (
@@ -246,9 +249,15 @@ function PayablesView() {
         <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>We owe {rows.length} vendor{rows.length !== 1 ? 's' : ''}</span>
         <span style={{ fontWeight: 800, fontSize: 18, color: 'var(--err)' }}>{ngn(totalOwed)}</span>
       </div>
-      {rows.length === 0 ? <div className="empty"><div className="ic">🏦</div><p>Nothing owed — all vendors settled</p></div> : (
+      {rows.length > 0 && (
+        <input className="input" value={pq} onChange={(e) => setPq(e.target.value)}
+          placeholder="🔍 Search vendor…" style={{ marginBottom: 12 }} />
+      )}
+      {rows.length === 0 ? <div className="empty"><div className="ic">🏦</div><p>Nothing owed — all vendors settled</p></div> : shown.length === 0 ? (
+        <div className="empty"><div className="ic">🔍</div><p>No vendor matches “{pq}”</p></div>
+      ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-          {rows.map((r) => (
+          {shown.map((r) => (
             <button key={r.vendor} onClick={() => openVendor(r)}
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ borderRadius: 8 }}>{(r.vendor || '?').charAt(0).toUpperCase()}</div>

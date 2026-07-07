@@ -216,18 +216,28 @@ const WF_ACTION = {
   reset:    { label: '↺ Reset', kind: 'ghost' },
 };
 
-// Vendor payables — how much we owe each vendor; tap to see their open tickets.
-function PayablesView({ onOpenExpense }) {
-  const { tenant } = useStore();
+// Vendor payables — how much we owe each vendor; tap to see their open tickets
+// and most recent payments, and drill into any ticket to make corrections.
+function PayablesView() {
+  const { tenant, sites } = useStore();
   const [rows, setRows] = useState(null);
-  const [vendor, setVendor] = useState(null);   // drilled vendor → their unpaid expenses
+  const [vendor, setVendor] = useState(null);   // drilled vendor → their open tickets + recent payments
   const [items, setItems] = useState(null);
-  useBackHandler(!!vendor, () => setVendor(null));   // Back closes the vendor drill
-  useEffect(() => { api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([])); }, [tenant]);
-  const openVendor = async (v) => {
-    setVendor(v); setItems(null);
+  const [recent, setRecent] = useState(null);   // up to 10 most recent payments to this vendor
+  const [openExp, setOpenExp] = useState(null);  // nested ticket detail, stacked ON TOP of the vendor drill
+  // Back closes the top layer first (ticket detail), then the vendor drill.
+  useBackHandler(!!vendor || !!openExp, () => { if (openExp) setOpenExp(null); else setVendor(null); });
+  const loadRows = useCallback(() => { api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([])); }, [tenant]);
+  useEffect(() => { loadRows(); }, [loadRows]);
+  const loadVendor = useCallback(async (v) => {
     try { setItems(await api(scoped(`/expenses?vendor=${encodeURIComponent(v.vendor)}&unpaid=1`))); } catch { setItems([]); }
+    try { setRecent(await api(scoped(`/expenses/vendors/${encodeURIComponent(v.vendor)}/recent-payments`))); } catch { setRecent([]); }
+  }, []);
+  const openVendor = (v) => { setVendor(v); setItems(null); setRecent(null); loadVendor(v); };
+  const openTicket = async (expenseId) => {
+    try { setOpenExp(await api(scoped(`/expenses/${expenseId}`))); } catch { /* ignore */ }
   };
+  const afterChange = () => { loadRows(); if (vendor) loadVendor(vendor); };
   const totalOwed = (rows || []).reduce((a, r) => a + r.owed, 0);
 
   if (rows === null) return <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>;
@@ -259,8 +269,9 @@ function PayablesView({ onOpenExpense }) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
               <strong>{vendor.vendor}</strong><strong style={{ color: 'var(--err)' }}>owe {ngn(vendor.owed)}</strong>
             </div>
-            {items === null ? <div className="skel" style={{ height: 60 }} /> : items.length === 0 ? <div className="empty"><p>No open tickets</p></div> : items.map((e) => (
-              <button key={e.id} onClick={() => { setVendor(null); onOpenExpense(e); }}
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', margin: '4px 0 2px' }}>Open tickets</div>
+            {items === null ? <div className="skel" style={{ height: 60 }} /> : items.length === 0 ? <div className="empty" style={{ padding: '8px 0' }}><p>No open tickets</p></div> : items.map((e) => (
+              <button key={e.id} onClick={() => openTicket(e.id)}
                 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description || e.category}</div>
@@ -269,7 +280,37 @@ function PayablesView({ onOpenExpense }) {
                 <strong style={{ color: 'var(--err)', whiteSpace: 'nowrap' }}>{ngn(e.balance)} ›</strong>
               </button>
             ))}
+
+            {/* Most recent payments — tap one to open its ticket and correct it. */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', margin: '14px 0 2px' }}>Recent payments</div>
+            {recent === null ? <div className="skel" style={{ height: 40 }} /> : recent.length === 0 ? <div style={{ fontSize: 13, color: 'var(--muted)', padding: '6px 4px' }}>No payments yet</div> : recent.map((p) => (
+              <button key={p.id} onClick={() => openTicket(p.expense_id)}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '9px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.description || p.category}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{p.pay_date}{p.method ? ` · ${p.method}` : ''}{p.bank ? ` · ${p.bank}` : ''}</div>
+                </div>
+                <strong style={{ color: 'var(--brand-d)', whiteSpace: 'nowrap' }}>{ngn(p.amount)} ›</strong>
+              </button>
+            ))}
+
             <button className="btn btn-ghost" style={{ marginTop: 12 }} onClick={() => setVendor(null)}>Close</button>
+          </div>
+        </div>
+      )}
+
+      {/* Nested ticket detail — stacked above the vendor drill (z 140 > 120).
+          Closing it returns to the vendor drill; corrections refresh both. */}
+      {openExp && (
+        <div onClick={() => setOpenExp(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 140, padding: 16 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 460, margin: 0, maxHeight: '90vh', overflowY: 'auto' }}>
+            <ExpenseDetail
+              expense={openExp}
+              sites={sites}
+              onEdit={() => {}}
+              onClose={() => setOpenExp(null)}
+              onChanged={afterChange}
+            />
           </div>
         </div>
       )}
@@ -431,6 +472,34 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     setBusy(false);
   };
 
+  // Reverse one payment line. If it drops a fully-paid ticket below its total the
+  // backend returns it to APPROVED (balance owed again).
+  const reversePayment = async (p) => {
+    if (!await confirm({ title: 'Reverse this payment?', message: `Remove the ${ngn(p.amount)} payment. If the ticket was fully paid, it returns to Approved with the balance owed.`, confirmText: 'Reverse', danger: true })) return;
+    setBusy(true);
+    try {
+      const r = await api(ts(`/expenses/payments/${p.id}`), { method: 'DELETE' });
+      setPaid((v) => Math.max(0, Math.round((v - (+p.amount || 0)) * 100) / 100));
+      if (r?.wf_state) setWf(r.wf_state);
+      toast('Payment reversed', 'ok'); loadPays(); loadLog(); onChanged && onChanged();
+    } catch (e) { toast(e.message || 'Could not reverse payment', 'err'); }
+    setBusy(false);
+  };
+  // Reset ALL payments — returns the full amount as outstanding and rolls a paid
+  // ticket back to Approved. Snr Accountant / GM / Admin only.
+  const canResetPay = !!(role && atLeast(role, 'SNR_ACCOUNTANT'));
+  const resetPayments = async () => {
+    if (!await confirm({ title: 'Reset all payments?', message: 'Removes every payment on this ticket and returns the full amount as outstanding. The ticket goes back to Approved (owing).', confirmText: 'Reset payments', danger: true })) return;
+    setBusy(true);
+    try {
+      const r = await api(ts(`/expenses/${expense.id}/reset-payments`), { method: 'POST' });
+      setPaid(0);
+      if (r?.wf_state) setWf(r.wf_state);
+      toast('Payments reset — amount now outstanding', 'ok'); loadPays(); loadLog(); onChanged && onChanged();
+    } catch (e) { toast(e.message || 'Could not reset payments', 'err'); }
+    setBusy(false);
+  };
+
   return (
     <div>
       <div className="grip" />
@@ -538,10 +607,18 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 
       {pays.length > 0 && (
         <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', marginBottom: 4 }}>Payments</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Payments ({pays.length})</div>
+            {canResetPay && <button type="button" disabled={busy} onClick={resetPayments}
+              style={{ background: 'none', border: 'none', color: 'var(--err)', cursor: 'pointer', padding: 0, fontSize: 12, fontWeight: 700 }}
+              title="Remove all payments and return the amount as outstanding">↺ Reset payments</button>}
+          </div>
           {pays.map((p) => (
-            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
-              <span>{p.pay_date} · {p.method || '—'}{p.bank ? ` · ${p.bank}` : ''}</span><span style={{ fontWeight: 700 }}>{ngn(p.amount)}</span>
+            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, fontSize: 13, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
+              <span style={{ flex: 1, minWidth: 0 }}>{p.pay_date} · {p.method || '—'}{p.bank ? ` · ${p.bank}` : ''}</span>
+              <span style={{ fontWeight: 700 }}>{ngn(p.amount)}</span>
+              {canResetPay && <button type="button" disabled={busy} onClick={() => reversePayment(p)} title="Reverse this payment"
+                style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 6, width: 24, height: 24, cursor: 'pointer', flexShrink: 0, lineHeight: 1 }}>✕</button>}
             </div>
           ))}
         </div>
@@ -788,7 +865,7 @@ export default function Expenses() {
         {!isGroup && <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>}
       </div>
 
-      {tab === 'cash' ? <Cash /> : tab === 'payables' ? <PayablesView onOpenExpense={openDetail} /> : (
+      {tab === 'cash' ? <Cash /> : tab === 'payables' ? <PayablesView /> : (
       <>
       {/* Filters */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>

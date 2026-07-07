@@ -10,6 +10,7 @@
  */
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today, isNetErr } from '../api.js';
+import SearchSelect from '../components/SearchSelect.jsx';
 import { useStore } from '../store.jsx';
 import { useBTPrinter } from '../hooks/useBTPrinter.js';
 import { useRealtime } from '../hooks/useRealtime.js';
@@ -144,6 +145,7 @@ export default function Sell() {
   const [bank,      setBank]      = useState('');
   const [terminal,  setTerminal]  = useState('');   // selected terminal label
   const [terminals, setTerminals] = useState([]);
+  const [showAllTerminals, setShowAllTerminals] = useState(false);  // else only GTB + Moniepoint
   const [banks,     setBanks]     = useState([]);
   const [posting,   setPosting]   = useState(false);
   const [lastSale,  setLastSale]  = useState(null);
@@ -596,13 +598,37 @@ export default function Sell() {
           {payMethod === 'POS' && (
             <div style={{ marginTop: 10 }}>
               <label className="fl">POS terminal</label>
-              {terminals.length > 0 ? (
-                <select className="input" value={terminal}
-                  onChange={(e) => { setTerminal(e.target.value); const t = terminals.find((x) => x.label === e.target.value); setBank(t ? (t.bank || '') : ''); }}>
-                  <option value="">Select terminal…</option>
-                  {terminals.map((t) => <option key={t.id} value={t.label}>{t.label}</option>)}
-                </select>
-              ) : (
+              {terminals.length > 0 ? (() => {
+                // Default view shows only the two banks we use most (GTBank +
+                // Moniepoint); "Show all" reveals every other terminal. Options are
+                // grouped by their site/location so multiples per site are clear.
+                const isPrimary = (b) => /gtb|gt\s*bank|moni/i.test(b || '');
+                const hasOthers = terminals.some((t) => !isPrimary(t.bank));
+                const list = terminals.filter((t) => showAllTerminals || isPrimary(t.bank));
+                const options = list.map((t) => ({
+                  value: t.label,
+                  label: t.label,
+                  sub: [t.bank, t.terminal_id, t.sn].filter(Boolean).join(' · '),
+                  group: t.location || 'Unassigned',
+                }));
+                return (
+                  <>
+                    <SearchSelect
+                      value={terminal}
+                      onChange={(val) => { setTerminal(val); const t = terminals.find((x) => x.label === val); setBank(t ? (t.bank || '') : ''); }}
+                      options={options}
+                      placeholder="Select terminal…"
+                      searchPlaceholder="Search terminal / bank / site…"
+                    />
+                    {hasOthers && (
+                      <button type="button" onClick={() => setShowAllTerminals((s) => !s)}
+                        style={{ marginTop: 4, background: 'none', border: 'none', color: 'var(--brand-d)', cursor: 'pointer', padding: 0, fontSize: 12 }}>
+                        {showAllTerminals ? '▲ Show only GTBank & Moniepoint' : '▾ More — show all terminals'}
+                      </button>
+                    )}
+                  </>
+                );
+              })() : (
                 <input className="input" list="bank-list" placeholder="POS bank (e.g. Moniepoint, GTB)"
                   value={bank} onChange={(e) => setBank(e.target.value)} />
               )}

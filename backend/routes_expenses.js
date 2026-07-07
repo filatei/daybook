@@ -214,6 +214,16 @@ router.post('/', requireAuth, async (req, res) => {
   res.status(201).json(created);
 });
 
+// ── GET /expenses/:id — one ticket (with balance + site) for the detail view ────
+router.get('/:id', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const row = await qone(
+    `SELECT e.*, (e.amount - COALESCE(e.amount_paid,0)) AS balance, s.name site_name, s.code site_code
+       FROM expenses e LEFT JOIN sites s ON s.id=e.site_id WHERE e.id=?`, [a.expense.id]);
+  res.json(row);
+});
+
 // ── PATCH /expenses/:id ────────────────────────────────────────────────────────
 router.patch('/:id', requireAuth, async (req, res) => {
   const a = await expenseAccess(req, req.params.id);
@@ -319,6 +329,24 @@ router.get('/vendors/balances', requireAuth, async (req, res) => {
   res.json(rows.map((r) => ({ vendor: r.vendor, billed: Number(r.billed), paid: Number(r.paid), owed: Number(r.owed), open_count: Number(r.open_count) })));
 });
 
+// Most recent payments to a vendor (up to 10) — powers the Payables drill so the
+// user can jump straight to a paid ticket and correct it. Defined before /:id
+// routes so "vendors" isn't captured as an :id.
+router.get('/vendors/:vendor/recent-payments', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });
+  const c = await contextFor(req.user, tid); if (!c) return res.status(403).json({ error: 'forbidden' });
+  const where = ['e.tenant_id=?', 'lower(e.vendor)=lower(?)'], args = [tid, req.params.vendor];
+  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
+  const rows = await qall(
+    `SELECT p.id, p.pay_date, p.amount, p.method, p.bank, p.memo, p.created_at,
+            e.id expense_id, e.description, e.category, e.amount ticket_amount,
+            e.amount_paid, e.wf_state, e.expense_date
+       FROM expense_payments p JOIN expenses e ON e.id=p.expense_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY p.pay_date DESC, p.created_at DESC LIMIT 10`, args);
+  res.json(rows);
+});
+
 router.get('/:id/payments', requireAuth, async (req, res) => {
   const a = await expenseAccess(req, req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
@@ -347,7 +375,9 @@ router.post('/:id/payments', requireAuth, async (req, res) => {
   res.status(201).json({ id, amount_paid: paid, balance: Math.max(0, Math.round((total - paid) * 100) / 100), status });
 });
 
-// Reverse a payment — Manager+.
+// Reverse a single payment line — Manager+. If removing it drops a fully-paid
+// (PAID/DELIVERED) ticket below its total, roll the ticket back to APPROVED so
+// the remaining balance is owed again and it re-enters the payable flow.
 router.delete('/payments/:pid', requireAuth, async (req, res) => {
   const p = await qone('SELECT * FROM expense_payments WHERE id=?', [req.params.pid]);
   if (!p) return res.status(404).json({ error: 'not found' });
@@ -355,11 +385,41 @@ router.delete('/payments/:pid', requireAuth, async (req, res) => {
   if (!c || !atLeast(c.role, 'SITE_MANAGER')) return res.status(403).json({ error: 'only a manager can reverse a payment' });
   await qrun('DELETE FROM expense_payments WHERE id=?', [p.id]);
   const exp = await qone('SELECT * FROM expenses WHERE id=?', [p.expense_id]);
+  let wf = exp ? exp.wf_state : null;
   if (exp) {
+    const total = +exp.amount || 0;
     const paid = Math.max(0, Math.round(((+exp.amount_paid || 0) - (+p.amount || 0)) * 100) / 100);
-    await qrun('UPDATE expenses SET amount_paid=?, status=? WHERE id=?', [paid, payStatus(+exp.amount || 0, paid), exp.id]);
+    wf = exp.wf_state;
+    if (['PAID', 'DELIVERED'].includes(wf) && paid < total - 0.01) wf = 'APPROVED';
+    await qrun('UPDATE expenses SET amount_paid=?, status=?, wf_state=? WHERE id=?', [paid, payStatus(total, paid), wf, exp.id]);
+    if (wf !== exp.wf_state) {
+      await qrun(
+        `INSERT INTO expense_wf_log (id,tenant_id,expense_id,action,from_state,to_state,note,actor,actor_name) VALUES (?,?,?,?,?,?,?,?,?)`,
+        [uuid(), exp.tenant_id, exp.id, 'reopen', exp.wf_state, wf, 'Payment reversed — balance owed again', req.user.id, req.user.name || req.user.email || null]).catch(() => {});
+    }
   }
-  res.json({ ok: true });
+  res.json({ ok: true, wf_state: wf });
+});
+
+// Reset ALL payments on a ticket — Snr Accountant+ (Snr Acct = GM = Admin). The
+// paid amounts are returned as an outstanding balance: every payment line is
+// removed, amount_paid→0, status→UNPAID, and a fully-paid ticket rolls back from
+// PAID/DELIVERED to APPROVED so the whole amount is owed again.
+router.post('/:id/reset-payments', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (!atLeast(a.ctx.role, 'SNR_ACCOUNTANT'))
+    return res.status(403).json({ error: 'only Snr Accountant, GM or Admin can reset payments' });
+  const e = a.expense;
+  const had = await qone('SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM expense_payments WHERE expense_id=?', [e.id]);
+  if (!had || Number(had.c) === 0) return res.status(409).json({ error: 'this ticket has no payments to reset' });
+  await qrun('DELETE FROM expense_payments WHERE expense_id=?', [e.id]);
+  const wf = ['PAID', 'DELIVERED'].includes(e.wf_state) ? 'APPROVED' : e.wf_state;
+  await qrun('UPDATE expenses SET amount_paid=0, status=?, wf_state=? WHERE id=?', ['UNPAID', wf, e.id]);
+  await qrun(
+    `INSERT INTO expense_wf_log (id,tenant_id,expense_id,action,from_state,to_state,note,actor,actor_name) VALUES (?,?,?,?,?,?,?,?,?)`,
+    [uuid(), e.tenant_id, e.id, 'reset-payments', e.wf_state, wf, `Reset ${Number(had.c)} payment(s) totalling ₦${Number(had.s).toLocaleString()} — balance owed again`, req.user.id, req.user.name || req.user.email || null]).catch(() => {});
+  res.json({ ok: true, wf_state: wf, amount_paid: 0, status: 'UNPAID', balance: Math.round((+e.amount || 0) * 100) / 100 });
 });
 
 // ── Receipts & notes on an expense ticket (kept on disk for dispute records) ──

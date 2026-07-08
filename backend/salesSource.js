@@ -220,7 +220,12 @@ async function listOrders({ from, to, sites, method, bank, terminal, product, cu
   if (String(method || '').toUpperCase() === 'INCENTIVE') Object.assign(match, IS_INCENTIVE);
   else { Object.assign(match, NOT_INCENTIVE); const mm = methodMatch(method); if (mm) Object.assign(match, mm); }
   // Filter by which bank / POS terminal the payment went through.
-  if (bank) ands.push({ $or: ['acquirer', 'card_bank', 'bank', 'transfer_from_bank'].map((f) => ({ [f]: exactRegex(bank) })) });
+  // '__NONE__' = the "Unspecified" bucket: NONE of the bank fields carry a value.
+  if (bank === '__NONE__') {
+    ands.push({ $and: ['acquirer', 'card_bank', 'bank', 'transfer_from_bank'].map((f) => ({ $or: [{ [f]: { $in: [null, ''] } }, { [f]: { $exists: false } }] })) });
+  } else if (bank) {
+    ands.push({ $or: ['acquirer', 'card_bank', 'bank', 'transfer_from_bank'].map((f) => ({ [f]: exactRegex(bank) })) });
+  }
   if (terminal) match.terminal_location = exactRegex(terminal);
   if (ands.length) match.$and = ands;
   const rows = await db.collection('fidoorders')

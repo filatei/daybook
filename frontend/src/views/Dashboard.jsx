@@ -445,9 +445,13 @@ export default function Dashboard() {
           tenants={isGroup ? groupTenants : null}
           onClose={() => setBankDrill(null)}
           onPick={(r) => {
-            const f = r.bank ? `bank=${encodeURIComponent(r.bank)}` : '';
+            // Drill to the exact bucket: match the kind (POS vs TRANSFER) and the
+            // bank — using a __NONE__ sentinel for the "Unspecified" (no-bank) group
+            // so it no longer shows every non-cash order.
+            const kindMethod = r.kind === 'POS' ? 'POS' : 'TRANSFER';
+            const bankF = r.bank ? `bank=${encodeURIComponent(r.bank)}` : 'bank=__NONE__';
             setBankDrill(null);
-            openOrders(`${r.kind === 'POS' ? '💳' : '🏦'} ${r.bank || 'Unspecified'}`, `method=NONCASH${f ? '&' + f : ''}`);
+            openOrders(`${r.kind === 'POS' ? '💳' : '🏦'} ${r.bank || 'Unspecified'}`, `method=${kindMethod}&${bankF}`);
           }}
         />
       )}

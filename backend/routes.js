@@ -2688,7 +2688,8 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
   else if (method === 'NONCASH') { where.push("p.payment_method NOT IN ('CASH','INCENTIVE')"); }
   else if (method) { where.push('p.payment_method=?'); args.push(method.toUpperCase()); }
   else { where.push("p.payment_method<>'INCENTIVE'"); }   // exclude bonus from "all orders"
-  if (bank) { where.push('UPPER(p.bank)=UPPER(?)'); args.push(bank); }
+  if (bank === '__NONE__') { where.push("COALESCE(NULLIF(TRIM(p.bank),''),'')=''"); }   // "Unspecified" bucket — no bank recorded
+  else if (bank) { where.push('UPPER(p.bank)=UPPER(?)'); args.push(bank); }
   if (terminal) { where.push('UPPER(p.terminal)=UPPER(?)'); args.push(terminal); }
   // product → row whose items_json mentions it; customer → exact name (Walk-in = none)
   if (product) { where.push('p.items_json ILIKE ?'); args.push(`%${String(product).replace(/[%_]/g, '')}%`); }

@@ -288,7 +288,13 @@ export default function Sell() {
   const tenderedAmt = payMethod === 'CASH' ? (parseFloat(tendered) || 0) : subtotal;
   const change      = payMethod === 'CASH' ? Math.max(0, tenderedAmt - subtotal) : 0;
   const hasCustomer = !!custName.trim();   // customer is compulsory on a sale
-  const canCharge   = cartLines.length > 0 && hasCustomer && !posting && (payMethod !== 'CASH' || tenderedAmt >= subtotal);
+  // Non-cash sales must be attributed: POS needs a terminal (which carries its
+  // bank), Transfer needs the receiving bank — so nothing lands as "Unspecified".
+  const needsTerminal = payMethod === 'POS' && !terminal.trim();
+  const needsBank     = payMethod === 'TRANSFER' && !bank.trim();
+  const canCharge   = cartLines.length > 0 && hasCustomer && !posting
+    && (payMethod !== 'CASH' || tenderedAmt >= subtotal)
+    && !needsTerminal && !needsBank;
 
   // "INCENTIVE" is a payment/bonus type, not a sellable product — hide the tile
   // so cashiers don't ring it up as a sale (give bonus goods via the Incentive
@@ -338,6 +344,8 @@ export default function Sell() {
   // Open the review sheet (Cancel / Confirm) before actually charging.
   const askCharge = (withPrint = false) => {
     if (cartLines.length > 0 && !hasCustomer) { toast('Select or add a customer first', 'err'); return; }
+    if (needsTerminal) { toast('Choose the POS terminal used for this sale', 'err'); return; }
+    if (needsBank) { toast('Choose the bank that received this transfer', 'err'); return; }
     if (!canCharge) return;
     setConfirmSale({ withPrint });
   };
@@ -599,7 +607,8 @@ export default function Sell() {
           {/* Which POS terminal? (carries its bank) */}
           {payMethod === 'POS' && (
             <div style={{ marginTop: 10 }}>
-              <label className="fl">POS terminal</label>
+              <label className="fl">POS terminal <span style={{ color: 'var(--err)' }}>*</span></label>
+              {needsTerminal && <div style={{ color: 'var(--err)', fontSize: 12, marginBottom: 4 }}>Required — pick the terminal used so this sale isn’t “Unspecified”.</div>}
               {terminals.length > 0 ? (() => {
                 // A site-bound sales user already receives ONLY their site's
                 // terminals from the server (plus any unassigned) — show them all,
@@ -648,9 +657,10 @@ export default function Sell() {
           {/* Which bank? (transfer) */}
           {payMethod === 'TRANSFER' && (
             <div style={{ marginTop: 10 }}>
-              <label className="fl">Bank</label>
+              <label className="fl">Bank <span style={{ color: 'var(--err)' }}>*</span></label>
               <input className="input" list="bank-list" placeholder="Bank money came from (e.g. GTB, Access)"
                 value={bank} onChange={(e) => setBank(e.target.value)} />
+              {needsBank && <div style={{ color: 'var(--err)', fontSize: 12, marginTop: 4 }}>Required — choose the receiving bank.</div>}
             </div>
           )}
           <datalist id="bank-list">{banks.map((b) => <option key={b} value={b} />)}</datalist>

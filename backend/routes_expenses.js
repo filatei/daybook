@@ -382,7 +382,9 @@ router.get('/vendors/balances', requireAuth, async (req, res) => {
   res.json(rows.map((r) => ({ vendor: r.vendor, billed: Number(r.billed), paid: Number(r.paid), owed: Number(r.owed), open_count: Number(r.open_count) })));
 });
 
-// Most recent payments to a vendor (up to 10) — powers the Payables drill so the
+// Most recent payments to a vendor (up to 30 — enough to cover a month or two of
+// activity, which is what you need when reconciling against a vendor's statement).
+// Powers the Payables drill so the
 // user can jump straight to a paid ticket and correct it. Defined before /:id
 // routes so "vendors" isn't captured as an :id.
 router.get('/vendors/:vendor/recent-payments', requireAuth, async (req, res) => {
@@ -396,7 +398,7 @@ router.get('/vendors/:vendor/recent-payments', requireAuth, async (req, res) => 
             e.amount_paid, e.wf_state, e.expense_date
        FROM expense_payments p JOIN expenses e ON e.id=p.expense_id
       WHERE ${where.join(' AND ')}
-      ORDER BY p.pay_date DESC, p.created_at DESC LIMIT 10`, args);
+      ORDER BY p.pay_date DESC, p.created_at DESC LIMIT 30`, args);
   res.json(rows);
 });
 

@@ -158,6 +158,7 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
   const role = useRole();
   const canReview = role && atLeast(role, 'SNR_ACCOUNTANT');
   const canValidate = role && atLeast(role, 'ADMIN');
+  const isAdmin = !!(role && atLeast(role, 'ADMIN'));   // AI features are Admin-only
   const canDelete = role && atLeast(role, 'SITE_MANAGER');
   const [d, setD] = useState(null);
   const [note, setNote] = useState('');
@@ -317,7 +318,10 @@ export default function Cash() {
       {!isGroup && (
         <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
           <button className="btn" style={{ flex: 1 }} onClick={openForm}>＋ Record</button>
-          <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => openModal(<AICashModal onCreated={load} onClose={closeModal} />)}>✨ By sentence / voice</button>
+          {/* AI deposit-by-sentence — ADMIN only (backend enforces too) */}
+          {isAdmin && (
+            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => openModal(<AICashModal onCreated={load} onClose={closeModal} />)}>✨ By sentence / voice</button>
+          )}
         </div>
       )}
 

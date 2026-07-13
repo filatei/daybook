@@ -784,7 +784,17 @@ async function migrate() {
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS wf_state TEXT;
     -- Imprest = daily site cash float totalled & transferred to Snr Accountant at
     -- day end; NON_IMPREST = spend-now expense that can't wait for end of day.
-    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'NON_IMPREST';`);
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'NON_IMPREST';
+    -- Soft delete. Deleting an expense used to DROP the row and unlink its receipt
+    -- files — irreversible. Now we stamp deleted_at/deleted_by and keep everything;
+    -- every read filters on "deleted_at IS NULL", and an admin can restore within
+    -- the retention window (see EXPENSE_TRASH_DAYS).
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_by TEXT;
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_reason TEXT;`);
+  // Partial index: the common path (not deleted) stays fast.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_expenses_live ON expenses(tenant_id) WHERE deleted_at IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_expenses_trash ON expenses(tenant_id, deleted_at) WHERE deleted_at IS NOT NULL`);
   // One-time backfill: seed lifecycle from payment status for migrated tickets.
   await pool.query(`UPDATE expenses SET wf_state = CASE WHEN status='PAID' THEN 'PAID' ELSE 'DRAFT' END WHERE wf_state IS NULL`);
   await pool.query(`

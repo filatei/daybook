@@ -111,7 +111,7 @@ async function syncFromRecords(tenant_id, { from, to, posted_by = null } = {}) {
   // 2. Expenses incurred — Dr expense (staff→6100 else 6000), Cr accounts payable.
   const exps = await qall(
     `SELECT id, expense_date, amount, category FROM expenses
-      WHERE tenant_id=? AND expense_date>=? AND expense_date<=? AND amount>0`, [tenant_id, lo, hi]);
+      WHERE tenant_id=? AND deleted_at IS NULL AND expense_date>=? AND expense_date<=? AND amount>0`, [tenant_id, lo, hi]);
   for (const e of exps) {
     const acct = /SALAR|WAGE|PAYROLL/i.test(e.category || '') ? '6100' : '6000';
     await bump('expenses', postJournal(tenant_id, {
@@ -122,8 +122,9 @@ async function syncFromRecords(tenant_id, { from, to, posted_by = null } = {}) {
 
   // 3. Expense payments — Dr accounts payable, Cr cash/bank.
   const pays = await qall(
-    `SELECT id, pay_date, amount, method FROM expense_payments
-      WHERE tenant_id=? AND pay_date>=? AND pay_date<=? AND amount>0`, [tenant_id, lo, hi]);
+    `SELECT p.id, p.pay_date, p.amount, p.method FROM expense_payments p
+      JOIN expenses e ON e.id = p.expense_id AND e.deleted_at IS NULL
+      WHERE p.tenant_id=? AND p.pay_date>=? AND p.pay_date<=? AND p.amount>0`, [tenant_id, lo, hi]);
   for (const p of pays) {
     await bump('expense_payments', postJournal(tenant_id, {
       jdate: p.pay_date, memo: 'Expense payment', source_type: 'exp_pay', source_id: p.id, posted_by,

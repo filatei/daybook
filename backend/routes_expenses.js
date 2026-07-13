@@ -50,8 +50,15 @@ function normItems(arr) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-async function expenseAccess(req, expenseId) {
-  const e = await qone('SELECT * FROM expenses WHERE id=?', [expenseId]);
+// SOFT DELETE: `deleted_at IS NULL` is the rule for every read. A deleted ticket
+// must be invisible to the whole app — lists, reports, vendor balances, the GL and
+// every single-ticket action — otherwise it comes back to haunt a total. The ONLY
+// paths that may see a deleted row are the trash list and restore (opts.includeDeleted).
+async function expenseAccess(req, expenseId, opts = {}) {
+  const sql = opts.includeDeleted
+    ? 'SELECT * FROM expenses WHERE id=?'
+    : 'SELECT * FROM expenses WHERE id=? AND deleted_at IS NULL';
+  const e = await qone(sql, [expenseId]);
   if (!e) return null;
   const c = await contextFor(req.user, e.tenant_id);
   if (!c) return null;
@@ -67,7 +74,7 @@ router.get('/', requireAuth, async (req, res) => {
   if (!c) return res.status(403).json({ error: 'forbidden' });
 
   const { site, from, to, category, vendor, unpaid, kind, q } = req.query;
-  const where = ['e.tenant_id=?'], args = [tid];
+  const where = ['e.tenant_id=?', 'e.deleted_at IS NULL'], args = [tid];
 
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   else if (site) { where.push('e.site_id=?'); args.push(site); }
@@ -106,7 +113,7 @@ router.get('/summary', requireAuth, async (req, res) => {
   if (!c) return res.status(403).json({ error: 'forbidden' });
 
   const { from, to, site } = req.query;
-  const sw = ['e.tenant_id=?'], sargs = [tid];
+  const sw = ['e.tenant_id=?', 'e.deleted_at IS NULL'], sargs = [tid];
   if (siteBound(c)) { sw.push('e.site_id=?'); sargs.push(c.site_id); }
   else if (site) { sw.push('e.site_id=?'); sargs.push(site); }
 
@@ -149,7 +156,7 @@ router.get('/imprest-summary', requireAuth, async (req, res) => {
   if (!c) return res.status(403).json({ error: 'forbidden' });
   const from = req.query.from || new Date().toISOString().slice(0, 10);
   const to = req.query.to || from;
-  const where = ["e.tenant_id=?", "COALESCE(e.kind,'NON_IMPREST')='IMPREST'", 'e.expense_date>=?', 'e.expense_date<=?'];
+  const where = ["e.tenant_id=?", 'e.deleted_at IS NULL', "COALESCE(e.kind,'NON_IMPREST')='IMPREST'", 'e.expense_date>=?', 'e.expense_date<=?'];
   const args = [tid, from, to];
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   const rows = await qall(
@@ -166,7 +173,7 @@ router.get('/categories', requireAuth, async (req, res) => {
   const tid = requestedTenant(req);
   if (!tid) return res.json(EXPENSE_CATS);
   const rows = await qall(
-    "SELECT DISTINCT category FROM expenses WHERE tenant_id=? AND category IS NOT NULL AND category<>'' ORDER BY category", [tid]);
+    "SELECT DISTINCT category FROM expenses WHERE tenant_id=? AND deleted_at IS NULL AND category IS NOT NULL AND category<>'' ORDER BY category", [tid]);
   const merged = Array.from(new Set([...rows.map((r) => r.category), ...EXPENSE_CATS]));
   res.json(merged);
 });
@@ -213,6 +220,32 @@ router.post('/', requireAuth, async (req, res) => {
   // Notify those who validate it next (managers) + creator.
   notifyExpenseEvent({ tenant_id: tid, expense: created, targetState: 'DRAFT', action: 'create', actorId: req.user.id, actorName: req.user.name || req.user.email });
   res.status(201).json(created);
+});
+
+// ── Trash (recently deleted) ──────────────────────────────────────────────────
+// Deleted tickets are kept for TRASH_DAYS so a mistake can be undone. Anything
+// older is out of the window and simply stops being listed (a housekeeping job can
+// purge it later — we never purge on a read).
+const TRASH_DAYS = parseInt(process.env.EXPENSE_TRASH_DAYS || '30', 10);
+const trashCutoff = () => Math.floor(Date.now() / 1000) - TRASH_DAYS * 86400;
+
+// GET /expenses/deleted?vendor=…  — recently deleted tickets, newest first.
+router.get('/deleted', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });
+  const c = await contextFor(req.user, tid); if (!c) return res.status(403).json({ error: 'forbidden' });
+
+  const where = ['e.tenant_id=?', 'e.deleted_at IS NOT NULL', 'e.deleted_at>=?'], args = [tid, trashCutoff()];
+  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
+  if (req.query.vendor) { where.push('lower(e.vendor)=lower(?)'); args.push(req.query.vendor); }
+
+  const rows = await qall(
+    `SELECT e.*, s.name site_name, u.name deleted_by_name
+       FROM expenses e
+       LEFT JOIN sites s ON s.id=e.site_id
+       LEFT JOIN users u ON u.id=e.deleted_by
+      WHERE ${where.join(' AND ')}
+      ORDER BY e.deleted_at DESC LIMIT 100`, args);
+  res.json(rows.map((r) => ({ ...r, restorable_until: Number(r.deleted_at) + TRASH_DAYS * 86400 })));
 });
 
 // ── GET /expenses/:id — one ticket (with balance + site) for the detail view ────
@@ -291,20 +324,39 @@ router.delete('/:id', requireAuth, async (req, res) => {
       return res.status(409).json({ error: 'expenses older than one week cannot be deleted' });
   }
 
-  // Reverse the amount in the linked daily report
+  // SOFT DELETE. Nothing is destroyed: the row is flagged, its attachments stay on
+  // disk, and the ticket disappears from every list, report, vendor balance and the
+  // GL because every read filters `deleted_at IS NULL`. It can be restored intact
+  // from the trash for TRASH_DAYS. (Hard deletes used to unlink the receipt files —
+  // unrecoverable. Never again.)
   if (e.site_id) {
     await qrun(
       `UPDATE daily_reports SET expenses=GREATEST(0,expenses-?) WHERE tenant_id=? AND site_id=? AND report_date=?`,
       [parseFloat(e.amount) || 0, e.tenant_id, e.site_id, e.expense_date]);
   }
-  // Remove attachment files + related rows, then the expense.
-  const atts = await qall('SELECT stored_name FROM expense_attachments WHERE expense_id=?', [e.id]).catch(() => []);
-  for (const at of atts) { if (at.stored_name) { try { fs.unlinkSync(path.join(UPLOAD_DIR, at.stored_name)); } catch { /* gone */ } } }
-  await qrun('DELETE FROM expense_attachments WHERE expense_id=?', [e.id]).catch(() => {});
-  await qrun('DELETE FROM expense_payments WHERE expense_id=?', [e.id]).catch(() => {});
-  await qrun('DELETE FROM expense_wf_log WHERE expense_id=?', [e.id]).catch(() => {});
-  await qrun('DELETE FROM expenses WHERE id=?', [e.id]);
+  const reason = (req.body && req.body.reason ? String(req.body.reason) : '').trim().slice(0, 500) || null;
+  await qrun('UPDATE expenses SET deleted_at=?, deleted_by=?, deleted_reason=? WHERE id=?',
+    [Math.floor(Date.now() / 1000), req.user.id, reason, e.id]);
   res.json({ ok: true });
+});
+
+// POST /expenses/:id/restore — put a deleted ticket back, exactly as it was.
+router.post('/:id/restore', requireAuth, async (req, res) => {
+  const a = await expenseAccess(req, req.params.id, { includeDeleted: true });
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const e = a.expense;
+  if (!e.deleted_at) return res.status(409).json({ error: 'this expense is not deleted' });
+  if (!atLeast(a.ctx.role, 'SNR_ACCOUNTANT'))
+    return res.status(403).json({ error: 'only Snr Accountant, GM or Admin can restore a deleted expense' });
+
+  // Re-apply the amount to the daily report we backed out on delete.
+  if (e.site_id) {
+    await qrun(
+      `UPDATE daily_reports SET expenses=expenses+? WHERE tenant_id=? AND site_id=? AND report_date=?`,
+      [parseFloat(e.amount) || 0, e.tenant_id, e.site_id, e.expense_date]);
+  }
+  await qrun('UPDATE expenses SET deleted_at=NULL, deleted_by=NULL, deleted_reason=NULL WHERE id=?', [e.id]);
+  res.json({ ok: true, id: e.id });
 });
 
 // ── Expense payments (incremental ticket payments) + vendor payables ──────────
@@ -315,7 +367,7 @@ const payStatus = (amount, paid) => (paid <= 0.001 ? 'UNPAID' : (paid >= (amount
 router.get('/vendors/balances', requireAuth, async (req, res) => {
   const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });
   const c = await contextFor(req.user, tid); if (!c) return res.status(403).json({ error: 'forbidden' });
-  const where = ['e.tenant_id=?', "e.vendor IS NOT NULL", "e.vendor<>''"], args = [tid];
+  const where = ['e.tenant_id=?', 'e.deleted_at IS NULL', "e.vendor IS NOT NULL", "e.vendor<>''"], args = [tid];
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   const rows = await qall(
     `SELECT e.vendor,
@@ -336,7 +388,7 @@ router.get('/vendors/balances', requireAuth, async (req, res) => {
 router.get('/vendors/:vendor/recent-payments', requireAuth, async (req, res) => {
   const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });
   const c = await contextFor(req.user, tid); if (!c) return res.status(403).json({ error: 'forbidden' });
-  const where = ['e.tenant_id=?', 'lower(e.vendor)=lower(?)'], args = [tid, req.params.vendor];
+  const where = ['e.tenant_id=?', 'e.deleted_at IS NULL', 'lower(e.vendor)=lower(?)'], args = [tid, req.params.vendor];
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   const rows = await qall(
     `SELECT p.id, p.pay_date, p.amount, p.method, p.bank, p.memo, p.created_at,
@@ -367,11 +419,19 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
   const to = String(req.query.to || '').slice(0, 10);
   if (!from || !to) return res.status(400).json({ error: 'from and to dates are required' });
 
-  const scope = [], sargs = [];
+  const scope = ['e.deleted_at IS NULL'], sargs = [];
   if (siteBound(c)) { scope.push('e.site_id=?'); sargs.push(c.site_id); }
   const scopeSql = scope.length ? ` AND ${scope.join(' AND ')}` : '';
 
   const tenant = await qone('SELECT name FROM tenants WHERE id=?', [tid]);
+
+  // Formatters (defined up here — the row builders below use dmy).
+  const money = (n) => (n ? Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '');
+  const dmy = (s) => {
+    const [y, m, d] = String(s).split('-');
+    const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m) - 1] || m;
+    return `${Number(d)}-${M}-${String(y).slice(2)}`;
+  };
 
   // Opening balance = everything billed before `from` minus everything paid before `from`.
   const ob = await qone(
@@ -390,9 +450,12 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
       WHERE e.tenant_id=? AND lower(e.vendor)=lower(?) AND e.expense_date >= ? AND e.expense_date <= ?${scopeSql}
       ORDER BY e.expense_date, e.created_at`, [tid, vendor, from, to, ...sargs]);
 
-  // Payments we made in the period (Credit).
+  // Payments we made in the period (Credit) — carrying the BILL they settle, so a
+  // 2026 payment against a 2023 invoice shows that 2023 invoice date on its face.
+  // That is the whole point of the statement: match payment ↔ invoice.
   const pays = await qall(
-    `SELECT p.pay_date AS d, p.ext_id, p.id, p.amount, p.method, p.bank, p.memo
+    `SELECT p.pay_date AS d, p.ext_id, p.id, p.amount, p.method, p.bank, p.memo,
+            e.expense_date AS bill_date, e.ext_id AS bill_ref, e.description AS bill_desc, e.category AS bill_cat
        FROM expense_payments p JOIN expenses e ON e.id=p.expense_id
       WHERE e.tenant_id=? AND lower(e.vendor)=lower(?) AND p.pay_date >= ? AND p.pay_date <= ?${scopeSql}
       ORDER BY p.pay_date, p.created_at`, [tid, vendor, from, to, ...sargs]);
@@ -403,8 +466,9 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
       d: b.d,
       side: 'To',
       particulars: (b.description || b.category || 'PURCHASE').toUpperCase(),
+      // A bill's own reference + date, so the vendor can find it in their book.
+      sub: `Invoice${b.ext_id ? ` ${b.ext_id}` : ''} dt ${dmy(b.d)}`,
       vchType: 'BILL',
-      vchNo: b.ext_id || String(b.id).slice(0, 8),
       debit: Number(b.amount || 0),
       credit: 0,
     })),
@@ -412,8 +476,13 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
       d: p.d,
       side: 'By',
       particulars: p.bank || (p.method ? `${p.method} payment` : 'Cash payment'),
+      // Tally-style "Agst Ref" line: WHICH invoice this money settled, and when
+      // that invoice was raised — even if it predates the statement window.
+      sub: p.bill_date
+        ? `Agst invoice${p.bill_ref ? ` ${p.bill_ref}` : ''} dt ${dmy(p.bill_date)}`
+          + (p.bill_desc || p.bill_cat ? ` — ${String(p.bill_desc || p.bill_cat).toUpperCase()}` : '')
+        : '',
       vchType: 'Payment',
-      vchNo: p.ext_id || String(p.id).slice(0, 8),
       debit: 0,
       credit: Number(p.amount || 0),
     })),
@@ -431,12 +500,6 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="ledger-${safe}-${from}-to-${to}.pdf"`);
   doc.pipe(res);
 
-  const money = (n) => (n ? Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '');
-  const dmy = (s) => {
-    const [y, m, d] = String(s).split('-');
-    const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m) - 1] || m;
-    return `${Number(d)}-${M}-${String(y).slice(2)}`;
-  };
 
   // ── Column geometry ───────────────────────────────────────────────────────
   // Content runs 40 → 555 (A4 minus margins). Every column is a FIXED, disjoint
@@ -480,8 +543,9 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
   head();
 
   const row = (r) => {
+    const h = r.sub ? 22 : 14;
     // New page → repeat the column headings so page 2+ is readable on its own.
-    if (y > 750) { doc.addPage(); y = 50; head(); }
+    if (y + h > 760) { doc.addPage(); y = 50; head(); }
     doc.fillColor('#000');
     doc.font('Helvetica').fontSize(8).text(r.date || '', C.date.x, y, { width: C.date.w, lineBreak: false });
     doc.font('Helvetica').fontSize(8).text(r.side || '', C.side.x, y, { width: C.side.w, lineBreak: false });
@@ -489,14 +553,22 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
       .text(r.particulars || '', C.part.x, y, { width: C.part.w, lineBreak: false, ellipsis: true });
     doc.font('Helvetica').fontSize(7)
       .text(r.vchType || '', C.vtype.x, y + 1, { width: C.vtype.w, lineBreak: false, ellipsis: true });
-    doc.fontSize(8);
+    doc.font('Helvetica').fontSize(8).fillColor('#000');
     doc.text(r.debit ? money(r.debit) : '', C.debit.x, y, { width: C.debit.w, align: 'right', lineBreak: false });
     doc.text(r.credit ? money(r.credit) : '', C.credit.x, y, { width: C.credit.w, align: 'right', lineBreak: false });
-    y += 14;
+    // Reference line — for a payment this names the invoice it settles and the date
+    // that invoice was raised (which may be years before this statement window).
+    if (r.sub) {
+      doc.font('Helvetica-Oblique').fontSize(6.5).fillColor('#555')
+        // Runs from Particulars up to (not into) the Debit box.
+        .text(r.sub, C.part.x, y + 9, { width: C.debit.x - C.part.x - 6, lineBreak: false, ellipsis: true });
+      doc.fillColor('#000');
+    }
+    y += h;
   };
 
   row({ date: dmy(from), side: 'To', particulars: 'Opening Balance', debit: opening > 0 ? opening : 0, credit: opening < 0 ? -opening : 0 });
-  for (const r of rows) row({ date: dmy(r.d), side: r.side, particulars: r.particulars, vchType: r.vchType, debit: r.debit, credit: r.credit });
+  for (const r of rows) row({ date: dmy(r.d), side: r.side, particulars: r.particulars, sub: r.sub, vchType: r.vchType, debit: r.debit, credit: r.credit });
 
   // Totals + closing balance (closing goes on the Credit side so both sides agree).
   if (y > 720) { doc.addPage(); y = 50; }

@@ -757,7 +757,7 @@ async function siteProdExp(ctx, site, date) {
   const baggers = prod.filter((r) => Number(r.bagged) > 0).map((r) => ({ name: r.name, bagged: Number(r.bagged) }));
   const totalLoaded = loaders.reduce((a, r) => a + r.loaded, 0);
   const totalBagged = baggers.reduce((a, r) => a + r.bagged, 0);
-  const exp = await qone("SELECT COALESCE(SUM(amount),0) total, COALESCE(SUM(CASE WHEN category='DIESEL' THEN amount ELSE 0 END),0) diesel FROM expenses WHERE tenant_id=? AND site_id=? AND expense_date=?", [ctx.tenant_id, site.id, date]);
+  const exp = await qone("SELECT COALESCE(SUM(amount),0) total, COALESCE(SUM(CASE WHEN category='DIESEL' THEN amount ELSE 0 END),0) diesel FROM expenses WHERE tenant_id=? AND deleted_at IS NULL AND site_id=? AND expense_date=?", [ctx.tenant_id, site.id, date]);
   const expDiesel = Number(exp.diesel) || 0;
   // Diesel now lives in diesel_logs (one entry per site/day). Prefer it; fall
   // back to any legacy DIESEL-category expense when no diesel_logs row exists.
@@ -1846,7 +1846,7 @@ router.get('/suggest/vendors', requireAuth, async (req, res) => {
   const seen = new Set(rows.map((r) => r.name.toLowerCase()));
   // Fallback: any free-typed vendor names already used on expenses but not in the directory.
   const extra = await qall(
-    `SELECT DISTINCT vendor FROM expenses WHERE tenant_id=? AND vendor IS NOT NULL AND vendor <> '' AND vendor ILIKE ? ORDER BY vendor LIMIT 8`,
+    `SELECT DISTINCT vendor FROM expenses WHERE tenant_id=? AND deleted_at IS NULL AND vendor IS NOT NULL AND vendor <> '' AND vendor ILIKE ? ORDER BY vendor LIMIT 8`,
     [s.ctx.tenant_id, `%${q}%`]);
   const out = rows.map((r) => ({
     label: r.name, vendor: r.name,
@@ -1866,7 +1866,7 @@ router.get('/suggest/expense-items', requireAuth, async (req, res) => {
       `SELECT name, COUNT(*) n FROM (
          SELECT TRIM(elem->>'name') AS name
          FROM expenses e, LATERAL jsonb_array_elements(e.items_json::jsonb) elem
-         WHERE e.tenant_id=? AND e.items_json IS NOT NULL AND left(e.items_json,1)='['
+         WHERE e.tenant_id=? AND e.deleted_at IS NULL AND e.items_json IS NOT NULL AND left(e.items_json,1)='['
        ) t
        WHERE name <> '' AND name ILIKE ? GROUP BY name ORDER BY n DESC, name LIMIT 12`,
       [s.ctx.tenant_id, `%${q}%`]);
@@ -2968,7 +2968,7 @@ async function buildGroupPrefill(user, date) {
     summary.transfer += gNum(s.transfer); summary.incentive += gNum(s.incentive);
     summary.diesel += gNum(s.diesel); summary.expenses_total += gNum(s.expenses);
     // Imprest vs non-imprest split from the expenses table for the date.
-    const ex = await qall("SELECT COALESCE(kind,'NON_IMPREST') k, COALESCE(SUM(amount),0) total FROM expenses WHERE tenant_id=? AND expense_date=? GROUP BY 1", [t.id, date]).catch(() => []);
+    const ex = await qall("SELECT COALESCE(kind,'NON_IMPREST') k, COALESCE(SUM(amount),0) total FROM expenses WHERE tenant_id=? AND deleted_at IS NULL AND expense_date=? GROUP BY 1", [t.id, date]).catch(() => []);
     for (const r of ex) { if (String(r.k) === 'IMPREST') summary.imprest_expenses += gNum(r.total); else summary.non_imprest_expenses += gNum(r.total); }
     if (s.productionTotals) for (const k of Object.keys(production)) production[k] += gNum(s.productionTotals[k]);
     if (s.stockTotals) for (const k of Object.keys(stock)) stock[k] += gNum(s.stockTotals[k]);
@@ -3079,7 +3079,7 @@ router.get('/accounts/year-statement.xlsx', requireAuth, needTenant('SNR_ACCOUNT
     // Expenses by category (staff salaries handled via payroll below — excluded here to avoid double count).
     const exRows = await qall(
       `SELECT COALESCE(NULLIF(TRIM(category),''),'UNCATEGORISED') cat, COALESCE(kind,'NON_IMPREST') kind, COALESCE(SUM(amount),0) total
-         FROM expenses WHERE tenant_id=? AND expense_date>=? AND expense_date<=? GROUP BY 1,2 ORDER BY total DESC`, [tid, y0, y1]);
+         FROM expenses WHERE tenant_id=? AND deleted_at IS NULL AND expense_date>=? AND expense_date<=? GROUP BY 1,2 ORDER BY total DESC`, [tid, y0, y1]);
     const isSalaryCat = (c) => /SALAR|WAGE|PAYROLL/i.test(c || '');
     const opexTotal = exRows.filter((r) => !isSalaryCat(r.cat)).reduce((a, r) => a + Number(r.total), 0);
     const salaryInExpenses = exRows.filter((r) => isSalaryCat(r.cat)).reduce((a, r) => a + Number(r.total), 0);

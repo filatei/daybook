@@ -226,10 +226,13 @@ const WF_ACTION = {
 // and most recent payments, and drill into any ticket to make corrections.
 function PayablesView() {
   const { tenant, sites, toast } = useStore();
+  const role = useRole();
+  const canRestore = !!(role && atLeast(role, 'SNR_ACCOUNTANT'));
   const [rows, setRows] = useState(null);
   const [vendor, setVendor] = useState(null);   // drilled vendor → their open tickets + recent payments
   const [items, setItems] = useState(null);
   const [recent, setRecent] = useState(null);   // up to 10 most recent payments to this vendor
+  const [trash, setTrash] = useState(null);     // recently deleted tickets for this vendor (restorable)
   const [openExp, setOpenExp] = useState(null);  // nested ticket detail, stacked ON TOP of the vendor drill
   // Vendor statement (PDF) — date range, so it can be reconciled line-for-line
   // against the vendor's own ledger.
@@ -259,8 +262,18 @@ function PayablesView() {
   const loadVendor = useCallback(async (v) => {
     try { setItems(await api(scoped(`/expenses?vendor=${encodeURIComponent(v.vendor)}&unpaid=1`))); } catch { setItems([]); }
     try { setRecent(await api(scoped(`/expenses/vendors/${encodeURIComponent(v.vendor)}/recent-payments`))); } catch { setRecent([]); }
+    try { setTrash(await api(scoped(`/expenses/deleted?vendor=${encodeURIComponent(v.vendor)}`))); } catch { setTrash([]); }
   }, []);
-  const openVendor = (v) => { setVendor(v); setItems(null); setRecent(null); loadVendor(v); };
+  const openVendor = (v) => { setVendor(v); setItems(null); setRecent(null); setTrash(null); loadVendor(v); };
+  // Undo a delete. Nothing was destroyed — the ticket comes back exactly as it was,
+  // attachments and payment history intact.
+  const restore = async (e) => {
+    try {
+      await api(scoped(`/expenses/${e.id}/restore`), { method: 'POST' });
+      toast('Expense restored', 'ok');
+      loadRows(); if (vendor) loadVendor(vendor);
+    } catch (err) { toast(err.message || 'Could not restore', 'err'); }
+  };
   const openTicket = async (expenseId) => {
     try { setOpenExp(await api(scoped(`/expenses/${expenseId}`))); } catch { /* ignore */ }
   };
@@ -340,6 +353,35 @@ function PayablesView() {
                 <strong style={{ color: 'var(--brand-d)', whiteSpace: 'nowrap' }}>{ngn(p.amount)} ›</strong>
               </button>
             ))}
+
+            {/* Recently deleted — deletes are reversible for 30 days. Nothing is
+                destroyed on delete, so a mistake is one tap away from being undone. */}
+            {trash && trash.length > 0 && (
+              <>
+                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', margin: '14px 0 2px' }}>
+                  🗑 Recently deleted
+                </div>
+                {trash.map((e) => (
+                  <div key={e.id}
+                    style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '9px 4px', borderBottom: '1px solid var(--line)' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'line-through', color: 'var(--muted)' }}>
+                        {e.description || e.category}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                        {e.expense_date} · {ngn(e.amount)} · deleted {new Date(Number(e.deleted_at) * 1000).toLocaleDateString()}
+                        {e.deleted_by_name ? ` by ${e.deleted_by_name}` : ''}
+                      </div>
+                      {e.deleted_reason ? <div style={{ fontSize: 12, color: 'var(--muted)', fontStyle: 'italic' }}>“{e.deleted_reason}”</div> : null}
+                    </div>
+                    {canRestore ? (
+                      <button className="btn btn-ghost" style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}
+                        onClick={() => restore(e)}>↩ Restore</button>
+                    ) : null}
+                  </div>
+                ))}
+              </>
+            )}
 
             <button className="btn btn-ghost" style={{ marginTop: 12 }} onClick={() => setVendor(null)}>Close</button>
           </div>
@@ -570,7 +612,9 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const fresh = (Date.now() / 1000 - Number(expense.created_at || 0)) <= 7 * 86400;
   const canDelete = unpaid && (isSnrPlus || (expense.recorded_by === user?.id && fresh));
   const del = async () => {
-    if (!await confirm({ title: 'Delete this expense?', message: 'This permanently removes the unapproved expense and its receipts.', confirmText: 'Delete', danger: true })) return;
+    // Not permanent any more — the ticket goes to the trash (receipts and all) and a
+    // Snr Accountant / GM / Admin can restore it from the vendor's Payables drill.
+    if (!await confirm({ title: 'Delete this expense?', message: 'It moves to Recently deleted and can be restored for 30 days. Nothing is destroyed.', confirmText: 'Delete', danger: true })) return;
     setBusy(true);
     try { await api(ts(`/expenses/${expense.id}`), { method: 'DELETE' }); toast('Expense deleted', 'ok'); onChanged && onChanged(); onClose(); }
     catch (e) { toast(e.message || 'Could not delete', 'err'); }

@@ -3,7 +3,6 @@ import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useBackHandler, useRole, atLeast } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
-import { useVoiceInput } from '../hooks/useVoiceInput.js';
 import Cash from './Cash.jsx';
 
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
@@ -678,84 +677,10 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   );
 }
 
-// ── AI expense — type or speak a sentence; the model fills the form for you. ──
-function AIExpenseModal({ onCreated, onClose }) {
-  const { toast } = useStore();
-  const [text, setText] = useState('');
-  const [draft, setDraft] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const { supported, listening, start, stop } = useVoiceInput((t) => setText(t));
-
-  const interpret = async () => {
-    if (!text.trim()) return toast('Say what the expense is for', 'err');
-    setBusy(true);
-    try { const r = await api(scoped('/ai/expense-parse'), { method: 'POST', body: { text: text.trim() } }); setDraft(r.draft); }
-    catch (e) { toast(e.message || 'Could not interpret', 'err'); }
-    setBusy(false);
-  };
-  const create = async () => {
-    if (!draft) return;
-    if (!draft.items?.length) return toast('No items detected — rephrase with item, qty and price', 'err');
-    setBusy(true);
-    try {
-      await api(scoped('/expenses'), { method: 'POST', body: {
-        site_id: draft.site_id, category: draft.category, kind: draft.kind, vendor: draft.vendor,
-        description: draft.description, expense_date: today(), items: draft.items, amount: draft.total,
-      } });
-      toast('Expense created ✓', 'ok'); onCreated && onCreated(); onClose();
-    } catch (e) { toast(e.message || 'Could not create', 'err'); }
-    setBusy(false);
-  };
-
-  return (
-    <div style={{ maxHeight: '88vh', overflowY: 'auto' }}>
-      <div className="grip" />
-      <h3 style={{ margin: '0 0 4px' }}>✨ Add expense by sentence</h3>
-      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 10px' }}>
-        e.g. “Bought 2 bags of cement at ₦9,000 from Dangote for Akenfa, plant repair — imprest.”
-      </p>
-      <div style={{ position: 'relative' }}>
-        <textarea className="input" rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="Type or tap the mic to speak…" />
-        {supported && (
-          <button onClick={() => (listening ? stop() : start())} title={listening ? 'Stop' : 'Speak'}
-            style={{ position: 'absolute', right: 8, bottom: 10, border: 'none', borderRadius: '50%', width: 38, height: 38, cursor: 'pointer', fontSize: 18, background: listening ? 'var(--err)' : 'var(--brand)', color: '#fff' }}>
-            {listening ? '⏹' : '🎤'}
-          </button>
-        )}
-      </div>
-      <button className="btn" style={{ width: '100%', marginTop: 10 }} onClick={interpret} disabled={busy}>{busy && !draft ? <span className="spin" /> : '✨ Interpret'}</button>
-
-      {draft && (
-        <div className="card" style={{ marginTop: 12, padding: '12px 14px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <strong>{draft.vendor || 'Vendor —'}</strong>
-            <strong style={{ color: 'var(--brand-d)' }}>{ngn(draft.total)}</strong>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', margin: '2px 0 8px' }}>
-            {draft.site_name || 'Site —'} · {draft.category} · {draft.kind === 'IMPREST' ? 'Imprest' : 'Non-imprest'}{draft.description ? ` · ${draft.description}` : ''}
-          </div>
-          {(draft.items || []).map((it, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '2px 0' }}>
-              <span>{it.name} <span style={{ color: 'var(--muted)' }}>{it.qty} × {ngn(it.price)}</span></span>
-              <span style={{ fontWeight: 600 }}>{ngn(it.qty * it.price)}</span>
-            </div>
-          ))}
-          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setDraft(null)} disabled={busy}>↺ Redo</button>
-            <button className="btn" style={{ flex: 1.4 }} onClick={create} disabled={busy}>{busy ? <span className="spin" /> : '✓ Create expense'}</button>
-          </div>
-        </div>
-      )}
-      <button className="btn btn-ghost" style={{ width: '100%', marginTop: 10 }} onClick={onClose} disabled={busy}>Close</button>
-    </div>
-  );
-}
-
 export default function Expenses() {
   const { openModal, closeModal, toast, tenant, sites, isGroup, groupTenants } = useStore();
   const role = useRole();
   const canBulk = role && atLeast(role, 'SNR_ACCOUNTANT');   // Snr Accountant / GM / Admin
-  const isAdmin = !!(role && atLeast(role, 'ADMIN'));         // AI features are Admin-only
   const [selMode, setSelMode] = useState(false);
   const [openGroups, setOpenGroups] = useState({});   // status → expanded? (FAQ-style)
   const toggleGroupOpen = (st) => setOpenGroups((p) => ({ ...p, [st]: !p[st] }));
@@ -900,14 +825,6 @@ export default function Expenses() {
       {/* Free-text search — id / vendor / site / description / item names */}
       <input className="input" style={{ marginBottom: 12 }} value={search} onChange={(e) => setSearch(e.target.value)}
         placeholder="🔍 Search by ID, vendor, site, description or item…" />
-
-      {/* AI: type or speak an expense in plain English — ADMIN only (backend enforces too) */}
-      {!isGroup && isAdmin && (
-        <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 12 }}
-          onClick={() => openModal(<AIExpenseModal onCreated={load} onClose={closeModal} />)}>
-          ✨ Add expense by sentence / voice
-        </button>
-      )}
 
       {/* Imprest summary — what each site transfers to the Snr Accountant */}
       {filter.kind === 'IMPREST' && imprest && imprest.sites && imprest.sites.length > 0 && (

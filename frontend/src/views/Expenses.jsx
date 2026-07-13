@@ -212,6 +212,8 @@ const WF_ACTION = {
   decline:  { label: '✗ Decline', kind: 'danger' },
   pay:      { label: '💵 Pay', kind: '' },
   reset:    { label: '↺ Reset', kind: 'ghost' },
+  // Admin-only: undo an approval and send the ticket back to draft to correct it.
+  unapprove: { label: '↺ Back to draft', kind: 'danger' },
 };
 
 // Vendor payables — how much we owe each vendor; tap to see their open tickets
@@ -418,6 +420,16 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       if (!note2) { toast('A reason is required to decline', 'err'); return; }
     } else if (action === 'reset') {
       note2 = window.prompt('Reason for reset (optional):') || '';
+    } else if (action === 'unapprove') {
+      // Undoing an approval must be explained — it lands in the audit log.
+      if (!await confirm({
+        title: 'Send this approved ticket back to draft?',
+        message: 'This undoes the approval so the ticket can be corrected. It will need to be validated, reviewed and approved again.',
+        confirmText: 'Back to draft',
+        danger: true,
+      })) return;
+      note2 = (window.prompt('Reason for un-approving this ticket (required):') || '').trim();
+      if (!note2) { toast('A reason is required', 'err'); return; }
     }
     setActing(action);
     try {
@@ -425,7 +437,7 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       setWf(r.wf_state); setActions(r.actions || []);
       loadLog();
       onChanged && onChanged();
-      const done = { validate: 'Validated ✓', review: 'Reviewed ✓', approve: 'Approved ✓', decline: 'Declined', pay: 'Marked paid ✓', deliver: 'Delivered ✓', reset: 'Reset to draft' };
+      const done = { validate: 'Validated ✓', review: 'Reviewed ✓', approve: 'Approved ✓', decline: 'Declined', pay: 'Marked paid ✓', deliver: 'Delivered ✓', reset: 'Reset to draft', unapprove: 'Sent back to draft' };
       toast(done[action] || 'Updated ✓', action === 'decline' ? 'info' : 'ok');
       // Validate / Approve advance the ticket — close the modal back to the preceding screen.
       if (action === 'validate' || action === 'approve') { onClose && onClose(); return; }
@@ -904,6 +916,8 @@ export default function Expenses() {
                         <div style={{ fontWeight: 700 }}>{e.description || e.category}{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>
                         <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                           #{e.ext_id || String(e.id).slice(0, 6)} · {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{isGroup && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
+                          {/* Last payment date — so you can see at a glance when a ticket was last settled. */}
+                          {e.last_payment_date ? <span style={{ color: '#166534' }}> · paid {e.last_payment_date}</span> : ''}
                         </div>
                       </div>
                       <div style={{ fontWeight: 800 }}>{ngn(e.amount)}</div>

@@ -89,7 +89,8 @@ router.get('/', requireAuth, async (req, res) => {
   if (kind) { where.push('COALESCE(e.kind,?)=?'); args.push('NON_IMPREST', kind.toUpperCase()); }
 
   const rows = await qall(
-    `SELECT e.*, (e.amount - COALESCE(e.amount_paid,0)) AS balance, s.name site_name, s.code site_code
+    `SELECT e.*, (e.amount - COALESCE(e.amount_paid,0)) AS balance, s.name site_name, s.code site_code,
+            (SELECT MAX(p.pay_date) FROM expense_payments p WHERE p.expense_id = e.id) AS last_payment_date
        FROM expenses e LEFT JOIN sites s ON s.id=e.site_id
       WHERE ${where.join(' AND ')}
       ORDER BY e.expense_date DESC, e.created_at DESC LIMIT 500`,
@@ -493,6 +494,21 @@ const FLOW = {
   // Send a ticket back to draft to correct it — allowed before approval only
   // (approved/paid tickets cannot be edited or reset).
   reset:    { from: ['VALIDATED', 'REVIEWED', 'DECLINED'], to: 'DRAFT', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
+  // ADMIN ONLY: pull an already-APPROVED ticket back to DRAFT to correct it.
+  // This undoes an approval, so it is deliberately a higher bar than `reset`.
+  //
+  // GUARD: only DRAFT tickets are editable, so sending a part-paid ticket back to
+  // DRAFT would let someone change the amount AFTER money went out — orphaning the
+  // payments and breaking the vendor/GL balances. If any payment exists, refuse and
+  // tell them to reverse the payments first (POST /:id/reset-payments).
+  unapprove: {
+    from: ['APPROVED'],
+    to: 'DRAFT',
+    allow: (c) => atLeast(c.role, 'ADMIN'),
+    guard: (e) => ((+e.amount_paid || 0) > 0.001
+      ? 'This ticket already has payments recorded. Reset the payments first, then send it back to draft.'
+      : null),
+  },
 };
 
 // Which transitions a given role may run from the ticket's current state.
@@ -509,6 +525,11 @@ async function performTransition(a, action, req, note = null) {
   const cur = a.expense.wf_state || 'DRAFT';
   if (!f.from.includes(cur)) return { error: `cannot ${action} from ${cur}`, code: 409 };
   if (!f.allow(a.ctx, a.expense, req.user.id)) return { error: `you cannot ${action} this ticket`, code: 403 };
+  // Data-integrity guard (e.g. don't un-approve a ticket that's already part-paid).
+  if (f.guard) {
+    const blocked = f.guard(a.expense);
+    if (blocked) return { error: blocked, code: 409 };
+  }
   await qrun('UPDATE expenses SET wf_state=? WHERE id=?', [f.to, a.expense.id]);
   // Paying an imprest (cash-at-hand) ticket closes it: settle the outstanding
   // balance with a CASH payment so it shows fully paid (and the GL/vendor

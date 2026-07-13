@@ -229,6 +229,48 @@ router.post('/', requireAuth, async (req, res) => {
 const TRASH_DAYS = parseInt(process.env.EXPENSE_TRASH_DAYS || '30', 10);
 const trashCutoff = () => Math.floor(Date.now() / 1000) - TRASH_DAYS * 86400;
 
+// ── GET /expenses/attachments ─────────────────────────────────────────────────
+// Every receipt / proof-of-payment in the workspace, newest first, each carrying the
+// ticket it was filed against. This is the "show me the evidence" list: when a
+// vendor disputes a payment you want to go straight to the bank slip, not hunt
+// through tickets one by one.
+//
+// Declared BEFORE /:id so "attachments" isn't captured as an expense id.
+router.get('/attachments', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });
+  const c = await contextFor(req.user, tid); if (!c) return res.status(403).json({ error: 'forbidden' });
+
+  const { from, to, vendor, q } = req.query;
+  const where = ['a.tenant_id=?', 'e.deleted_at IS NULL'], args = [tid];
+  if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
+  if (vendor) { where.push('lower(e.vendor)=lower(?)'); args.push(vendor); }
+  // Dates filter on the TICKET date (what the receipt is evidence of), not the
+  // upload timestamp — that's the date a person is thinking of.
+  if (from) { where.push('e.expense_date>=?'); args.push(from); }
+  if (to)   { where.push('e.expense_date<=?'); args.push(to); }
+  const qq = (q || '').trim();
+  if (qq) {
+    const like = `%${qq}%`;
+    where.push('(e.vendor ILIKE ? OR e.description ILIKE ? OR a.file_name ILIKE ? OR a.note ILIKE ?)');
+    args.push(like, like, like, like);
+  }
+
+  const rows = await qall(
+    `SELECT a.id, a.file_name, a.mime, a.size, a.note, a.created_at, a.uploaded_by,
+            u.name AS uploaded_by_name,
+            e.id AS expense_id, e.expense_date, e.vendor, e.description, e.category,
+            e.amount, COALESCE(e.amount_paid,0) AS amount_paid, e.wf_state,
+            s.name AS site_name,
+            (SELECT MAX(p.pay_date) FROM expense_payments p WHERE p.expense_id = e.id) AS last_payment_date
+       FROM expense_attachments a
+       JOIN expenses e ON e.id = a.expense_id
+       LEFT JOIN sites s ON s.id = e.site_id
+       LEFT JOIN users u ON u.id = a.uploaded_by
+      WHERE ${where.join(' AND ')}
+      ORDER BY a.created_at DESC LIMIT 500`, args);
+  res.json(rows);
+});
+
 // GET /expenses/deleted?vendor=…  — recently deleted tickets, newest first.
 router.get('/deleted', requireAuth, async (req, res) => {
   const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });

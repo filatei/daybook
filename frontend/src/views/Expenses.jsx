@@ -224,6 +224,107 @@ const WF_ACTION = {
 
 // Vendor payables — how much we owe each vendor; tap to see their open tickets
 // and most recent payments, and drill into any ticket to make corrections.
+// ── Receipts ──────────────────────────────────────────────────────────────────
+// Every proof-of-payment / receipt in one place, newest first, each one linked to
+// the ticket it belongs to. Tap the file to view it; tap the row to open the
+// expense behind it. This is what you reach for when a vendor says "we never got
+// paid on the 18th" — the bank slip is right here.
+function ReceiptsView() {
+  const { tenant, toast } = useStore();
+  const [rows, setRows] = useState(null);
+  const [q, setQ] = useState('');
+  const [qd, setQd] = useState('');
+  const [openExp, setOpenExp] = useState(null);
+  useEffect(() => { const t = setTimeout(() => setQd(q.trim()), 300); return () => clearTimeout(t); }, [q]);
+  useBackHandler(!!openExp, () => setOpenExp(null));
+
+  const load = useCallback(() => {
+    const p = new URLSearchParams();
+    if (qd) p.set('q', qd);
+    api(scoped(`/expenses/attachments?${p}`)).then(setRows).catch(() => setRows([]));
+  }, [tenant, qd]);
+  useEffect(() => { load(); }, [load]);
+
+  // Fetch with the bearer token, then hand the browser a blob URL — the file route
+  // is auth-guarded, so a plain <a href> would 401.
+  const view = async (r, download) => {
+    try {
+      const res = await fetch(
+        `/api/expenses/${r.expense_id}/attachments/${r.id}/file${download ? '?download=1&' : '?'}tenant=${tenant || ''}`,
+        { headers: { Authorization: 'Bearer ' + getToken() } });
+      if (!res.ok) throw new Error('Could not open the file');
+      const url = URL.createObjectURL(await res.blob());
+      if (download) { const x = document.createElement('a'); x.href = url; x.download = r.file_name || 'receipt'; x.click(); }
+      else window.open(url, '_blank');
+    } catch (e) { toast(e.message || 'Could not open the file', 'err'); }
+  };
+  const openTicket = async (id) => { try { setOpenExp(await api(scoped(`/expenses/${id}`))); } catch { /* ignore */ } };
+  const icon = (m, n) => {
+    const s = `${m || ''} ${n || ''}`.toLowerCase();
+    if (s.includes('pdf')) return '📕';
+    if (/(image|png|jpe?g|gif|webp|heic)/.test(s)) return '🖼';
+    if (/(sheet|excel|xls|csv)/.test(s)) return '📊';
+    return '📎';
+  };
+  const kb = (n) => (n ? `${Math.max(1, Math.round(Number(n) / 1024))} KB` : '');
+
+  if (rows === null) return <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>;
+  return (
+    <div>
+      <input className="input" value={q} onChange={(e) => setQ(e.target.value)}
+        placeholder="🔍 Search vendor, description, file name…" style={{ marginBottom: 12 }} />
+      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 16px', marginBottom: 12 }}>
+        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+          {rows.length} receipt{rows.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="empty"><div className="ic">📎</div><p>No receipts uploaded yet</p></div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {rows.map((r) => (
+            <div key={r.id}
+              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', borderBottom: '1px solid var(--line)' }}>
+              <button onClick={() => view(r, false)} title="View file"
+                style={{ fontSize: 22, border: 'none', background: 'none', cursor: 'pointer', padding: 0, lineHeight: 1 }}>
+                {icon(r.mime, r.file_name)}
+              </button>
+              <button onClick={() => openTicket(r.expense_id)}
+                style={{ flex: 1, minWidth: 0, border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
+                <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.vendor || r.description || r.category}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {/* Ticket date · billed · when it was actually paid — the three
+                      facts you compare a receipt against. */}
+                  {r.expense_date} · {ngn(r.amount)}
+                  {r.last_payment_date ? <span style={{ color: '#166534' }}> · paid {r.last_payment_date}</span> : ' · unpaid'}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.file_name || 'file'}{r.size ? ` · ${kb(r.size)}` : ''} · uploaded {new Date(Number(r.created_at) * 1000).toLocaleDateString()}
+                  {r.uploaded_by_name ? ` by ${r.uploaded_by_name}` : ''}
+                  {r.note ? ` · ${r.note}` : ''}
+                </div>
+              </button>
+              <button className="btn btn-ghost" onClick={() => view(r, true)} title="Download"
+                style={{ padding: '6px 9px', fontSize: 12 }}>⬇</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {openExp && (
+        <div onClick={() => setOpenExp(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 140, padding: 16 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 460, margin: 0, maxHeight: '90vh', overflowY: 'auto' }}>
+            <ExpenseDetail expense={openExp} onClose={() => setOpenExp(null)} onChanged={load} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PayablesView() {
   const { tenant, sites, toast } = useStore();
   const role = useRole();
@@ -864,7 +965,7 @@ export default function Expenses() {
   const [filter, setFilter] = useState({ cat: '', from: today(), to: today(), kind: '' });
   const [search, setSearch] = useState('');   // free-text: id / vendor / site
   const [qDebounced, setQDebounced] = useState('');   // debounced → server search (all history)
-  const [tab, setTab] = useState('list');   // list | cash | payables
+  const [tab, setTab] = useState('list');   // list | cash | payables | receipts
   useEffect(() => { const t = setTimeout(() => setQDebounced(search.trim()), 300); return () => clearTimeout(t); }, [search]);
   const [imprest, setImprest] = useState(null);   // per-site imprest summary
 
@@ -974,9 +1075,11 @@ export default function Expenses() {
         <button className={`seg-b${tab === 'list' ? ' on' : ''}`} onClick={() => setTab('list')}>💸 Expenses</button>
         <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash deposits</button>
         {!isGroup && <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>}
+        {/* Receipts are per-workspace files, so not offered in the combined group view. */}
+        {!isGroup && <button className={`seg-b${tab === 'receipts' ? ' on' : ''}`} onClick={() => setTab('receipts')}>📎 Receipts</button>}
       </div>
 
-      {tab === 'cash' ? <Cash /> : tab === 'payables' ? <PayablesView /> : (
+      {tab === 'cash' ? <Cash /> : tab === 'payables' ? <PayablesView /> : tab === 'receipts' ? <ReceiptsView /> : (
       <>
       {/* Filters */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>

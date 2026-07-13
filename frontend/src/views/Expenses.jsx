@@ -284,7 +284,11 @@ function PayablesView() {
                 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description || e.category}</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{e.expense_date} · billed {ngn(e.amount)} · paid {ngn(e.amount_paid)}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                    {e.expense_date} · billed {ngn(e.amount)} · paid {ngn(e.amount_paid)}
+                    {/* When it was last settled — the question you actually ask of an open ticket. */}
+                    {e.last_payment_date ? <span style={{ color: '#166534' }}> · last pay {e.last_payment_date}</span> : ''}
+                  </div>
                 </div>
                 <strong style={{ color: 'var(--err)', whiteSpace: 'nowrap' }}>{ngn(e.balance)} ›</strong>
               </button>
@@ -345,6 +349,11 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const [actions, setActions] = useState([]);
   const [, setLog] = useState([]);
   const [acting, setActing] = useState('');
+  // Un-approve dialog — a real in-app modal stacked ON TOP of this ticket modal
+  // (the global modal store holds only one, so opening another would REPLACE
+  // this one). No browser prompt/alert.
+  const [unapOpen, setUnapOpen] = useState(false);
+  const [unapReason, setUnapReason] = useState('');
   // Pay form (opened from the Pay action): amount, source bank account, note, receipt.
   const [payOpen, setPayOpen] = useState(false);
   const [payAmt, setPayAmt] = useState('');
@@ -413,6 +422,9 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
   const runAction = async (action) => {
     // Pay is not a bare state flip — open the pay form (amount, bank, receipt).
     if (action === 'pay') { setPayAmt(String(balance || '')); setPayOpen(true); return; }
+    // Un-approving is destructive and must be explained — collect the reason in a
+    // proper in-app dialog stacked over this modal, not a browser prompt.
+    if (action === 'unapprove') { setUnapReason(''); setUnapOpen(true); return; }
     let note2;
     if (action === 'decline') {
       // Declining requires a reason — it's a rejection the vendor/owner must understand.
@@ -420,17 +432,12 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       if (!note2) { toast('A reason is required to decline', 'err'); return; }
     } else if (action === 'reset') {
       note2 = window.prompt('Reason for reset (optional):') || '';
-    } else if (action === 'unapprove') {
-      // Undoing an approval must be explained — it lands in the audit log.
-      if (!await confirm({
-        title: 'Send this approved ticket back to draft?',
-        message: 'This undoes the approval so the ticket can be corrected. It will need to be validated, reviewed and approved again.',
-        confirmText: 'Back to draft',
-        danger: true,
-      })) return;
-      note2 = (window.prompt('Reason for un-approving this ticket (required):') || '').trim();
-      if (!note2) { toast('A reason is required', 'err'); return; }
     }
+    await applyTransition(action, note2);
+  };
+
+  // Shared: run one transition and refresh the ticket.
+  const applyTransition = async (action, note2) => {
     setActing(action);
     try {
       const r = await api(ts(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action, note: note2 } });
@@ -443,6 +450,14 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
       if (action === 'validate' || action === 'approve') { onClose && onClose(); return; }
     } catch (e) { toast(e.message || 'Action failed', 'err'); }
     setActing('');
+  };
+
+  // Confirm from the stacked un-approve dialog.
+  const confirmUnapprove = async () => {
+    const reason = unapReason.trim();
+    if (!reason) { toast('A reason is required', 'err'); return; }
+    setUnapOpen(false);
+    await applyTransition('unapprove', reason);
   };
 
   const addAttachment = async () => {
@@ -685,6 +700,41 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
         {/* Editing is only possible in DRAFT — reset the ticket first to change it. */}
         {wf === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={onEdit}>✏️ Edit</button>}
       </div>
+
+      {/* ── Un-approve dialog — stacked ON TOP of this ticket modal ──────────
+          The global modal store holds only one modal, so opening another there
+          would REPLACE the ticket. This is a local overlay at a higher z-index
+          than .modal-bg (50), so it layers over the open ticket instead. */}
+      {unapOpen && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget && !acting) setUnapOpen(false); }}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 500,
+            background: 'rgba(15,23,42,.55)', backdropFilter: 'blur(3px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+          }}>
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ background: 'var(--card, #fff)', borderRadius: 16, padding: 20, width: '100%', maxWidth: 380, boxShadow: '0 20px 60px rgba(15,23,42,.28)' }}>
+            <h3 style={{ margin: '0 0 6px', color: 'var(--err)' }}>Send back to draft?</h3>
+            <p style={{ margin: '0 0 12px', fontSize: 14, color: 'var(--muted)', lineHeight: 1.5 }}>
+              This <b>undoes the approval</b> so the ticket can be corrected. It will have to be
+              validated, reviewed and approved again.
+            </p>
+            <label className="fl">Reason (required)</label>
+            <textarea className="input" rows={3} autoFocus
+              value={unapReason} onChange={(e) => setUnapReason(e.target.value)}
+              placeholder="Why is this being sent back? (recorded in the audit log)"
+              style={{ resize: 'vertical' }} />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 8, marginTop: 14 }}>
+              <button className="btn btn-ghost" disabled={!!acting} onClick={() => setUnapOpen(false)}>Cancel</button>
+              <button className="btn" style={{ background: 'var(--err)' }}
+                disabled={!!acting || !unapReason.trim()} onClick={confirmUnapprove}>
+                {acting === 'unapprove' ? <span className="spin" /> : '↺ Back to draft'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

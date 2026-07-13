@@ -1202,6 +1202,7 @@ export default function Reports() {
   const [readOnly, setReadOnly] = useState(false);    // fido drill-down orders can't be deleted
   const [askDelete, setAskDelete] = useState(false);  // animated delete confirm step
   const [busy, setBusy] = useState(false);
+  const [trash, setTrash] = useState([]);             // voided sales, restorable for 30 days (GM+)
   const [drill, setDrill] = useState(null);           // orders drill-down list (or null = closed)
   const [drillLoading, setDrillLoading] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1239,7 +1240,7 @@ export default function Reports() {
           return api(`/pos/range?${p}`).catch(() => null);
         }));
         setPos(mergePosRanges(ranges, groupTenants.map((t) => t.name)));
-        setReports([]); setOrders([]); setPosBanks([]); setManualReports([]);
+        setReports([]); setOrders([]); setPosBanks([]); setManualReports([]); setTrash([]);
         try { setGroupReports(await api(`/group/report/list?from=${filters.from || ''}&to=${filters.to || ''}`)); } catch { setGroupReports([]); }
         setLoading(false);
         return;
@@ -1252,6 +1253,8 @@ export default function Reports() {
         api(scoped(`/pos/banks?${params}`)).catch(() => []),    // POS/transfer split by acquiring bank
       ]);
       setReports(data); setPos(posData); setOrders(ord || []); setPosBanks(Array.isArray(banks) ? banks : []);
+      // Voided sales (GM+ only — the endpoint 403s for everyone else).
+      if (isGM) { try { setTrash(await api(scoped('/pos/sales-deleted'))); } catch { setTrash([]); } } else setTrash([]);
       if (!isSM) {
         try { setManualReports(await api(scoped(`/reports/manual/list?${params}`))); } catch { setManualReports([]); }
       } else setManualReports([]);
@@ -1321,6 +1324,23 @@ export default function Reports() {
       toast('Order deleted', 'ok');
       closeOrder();
     } catch (e) { toast(e.message || 'Delete failed', 'err'); setBusy(false); }
+  };
+
+  // Put a voided receipt back. It starts counting again everywhere (totals, reports,
+  // the GL) and the stock it consumed is taken back off the shelf, server-side.
+  const restoreSale = async (o) => {
+    if (!await confirm({
+      title: `Restore order #${o.receipt_no || ''}?`,
+      message: `${ngn(o.total)} will count towards sales again, and the stock will be deducted.`,
+      confirmText: 'Restore',
+    })) return;
+    setBusy(true);
+    try {
+      await api(scoped(`/pos/sales/${o.id}/restore`), { method: 'POST', body: {} });
+      toast('Order restored', 'ok');
+      await load();   // totals, orders and the trash all move — reload the lot
+    } catch (e) { toast(e.message || 'Restore failed', 'err'); }
+    setBusy(false);
   };
 
   const shownOrders = orders.filter((o) => {
@@ -1561,6 +1581,33 @@ export default function Reports() {
                   <button title="Delete order" onClick={() => openOrder(o, true)}
                     style={{ border: 'none', background: '#fee2e2', color: 'var(--err)', borderRadius: 7, width: 30, height: 30, fontSize: 15, cursor: 'pointer', display: 'grid', placeItems: 'center' }}>🗑</button>
                 )}
+              </div>
+            ))}
+          </div>
+        </Collapsible>
+      )}
+
+      {/* Recently deleted — voided receipts. They count for nothing anywhere in the
+          app, but they are not destroyed: a GM/Admin can put one back for 30 days. */}
+      {!loading && isGM && trash.length > 0 && (
+        <Collapsible icon="🗑" title="Recently deleted" subtitle={`${trash.length} voided · restorable for 30 days`}>
+          <div style={{ margin: '0 -14px' }}>
+            {trash.map((o) => (
+              <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, textDecoration: 'line-through', color: 'var(--muted)' }}>
+                    #{String(o.receipt_no || '').padStart(4, '0')} <span style={{ fontWeight: 400 }}>{o.customer_name || 'Walk-in'}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                    {o.sale_date} · {o.site_name || '—'} · {o.payment_method}
+                    {' · deleted '}{new Date(Number(o.deleted_at) * 1000).toLocaleDateString()}
+                    {o.deleted_by_name ? ` by ${o.deleted_by_name}` : ''}
+                  </div>
+                  {o.deleted_reason ? <div style={{ fontSize: 12, color: 'var(--muted)', fontStyle: 'italic' }}>“{o.deleted_reason}”</div> : null}
+                </div>
+                <div style={{ fontWeight: 800, whiteSpace: 'nowrap', marginRight: 4, color: 'var(--muted)' }}>{ngn(o.total)}</div>
+                <button className="btn btn-ghost" disabled={busy} onClick={() => restoreSale(o)}
+                  style={{ padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap' }}>↩ Restore</button>
               </div>
             ))}
           </div>

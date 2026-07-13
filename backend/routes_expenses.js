@@ -348,6 +348,157 @@ router.get('/vendors/:vendor/recent-payments', requireAuth, async (req, res) => 
   res.json(rows);
 });
 
+// ── Vendor Ledger Account (PDF) ───────────────────────────────────────────────
+// A statement of account for ONE vendor over a date range, laid out like the
+// vendor's own Tally statement (Date · Particulars · Vch Type · Vch No. · Debit ·
+// Credit, with opening/closing balance), so the two can be placed side by side
+// and reconciled line-for-line: what we say we paid vs what they acknowledged.
+//
+// Perspective mirrors the vendor's book so the columns line up:
+//   Debit  = what they billed us  (our expense tickets)      → increases what we owe
+//   Credit = what we paid them    (our payments)             → reduces what we owe
+//   Closing balance sits on the Credit side so both totals agree.
+router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
+  const tid = requestedTenant(req); if (!tid) return res.status(400).json({ error: 'select a workspace' });
+  const c = await contextFor(req.user, tid); if (!c) return res.status(403).json({ error: 'forbidden' });
+
+  const vendor = String(req.params.vendor || '').trim();
+  const from = String(req.query.from || '').slice(0, 10);
+  const to = String(req.query.to || '').slice(0, 10);
+  if (!from || !to) return res.status(400).json({ error: 'from and to dates are required' });
+
+  const scope = [], sargs = [];
+  if (siteBound(c)) { scope.push('e.site_id=?'); sargs.push(c.site_id); }
+  const scopeSql = scope.length ? ` AND ${scope.join(' AND ')}` : '';
+
+  const tenant = await qone('SELECT name FROM tenants WHERE id=?', [tid]);
+
+  // Opening balance = everything billed before `from` minus everything paid before `from`.
+  const ob = await qone(
+    `SELECT
+       (SELECT COALESCE(SUM(e.amount),0) FROM expenses e
+         WHERE e.tenant_id=? AND lower(e.vendor)=lower(?) AND e.expense_date < ?${scopeSql}) AS billed,
+       (SELECT COALESCE(SUM(p.amount),0) FROM expense_payments p JOIN expenses e ON e.id=p.expense_id
+         WHERE e.tenant_id=? AND lower(e.vendor)=lower(?) AND p.pay_date < ?${scopeSql}) AS paid`,
+    [tid, vendor, from, ...sargs, tid, vendor, from, ...sargs]);
+  const opening = Number(ob?.billed || 0) - Number(ob?.paid || 0);
+
+  // Bills raised on us in the period (Debit).
+  const bills = await qall(
+    `SELECT e.expense_date AS d, e.ext_id, e.id, e.description, e.category, e.amount
+       FROM expenses e
+      WHERE e.tenant_id=? AND lower(e.vendor)=lower(?) AND e.expense_date >= ? AND e.expense_date <= ?${scopeSql}
+      ORDER BY e.expense_date, e.created_at`, [tid, vendor, from, to, ...sargs]);
+
+  // Payments we made in the period (Credit).
+  const pays = await qall(
+    `SELECT p.pay_date AS d, p.ext_id, p.id, p.amount, p.method, p.bank, p.memo
+       FROM expense_payments p JOIN expenses e ON e.id=p.expense_id
+      WHERE e.tenant_id=? AND lower(e.vendor)=lower(?) AND p.pay_date >= ? AND p.pay_date <= ?${scopeSql}
+      ORDER BY p.pay_date, p.created_at`, [tid, vendor, from, to, ...sargs]);
+
+  // Merge into one date-ordered ledger.
+  const rows = [
+    ...bills.map((b) => ({
+      d: b.d,
+      side: 'To',
+      particulars: (b.description || b.category || 'PURCHASE').toUpperCase(),
+      vchType: 'BILL',
+      vchNo: b.ext_id || String(b.id).slice(0, 8),
+      debit: Number(b.amount || 0),
+      credit: 0,
+    })),
+    ...pays.map((p) => ({
+      d: p.d,
+      side: 'By',
+      particulars: p.bank || (p.method ? `${p.method} payment` : 'Cash payment'),
+      vchType: 'Payment',
+      vchNo: p.ext_id || String(p.id).slice(0, 8),
+      debit: 0,
+      credit: Number(p.amount || 0),
+    })),
+  ].sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
+
+  const totalDebit = opening + rows.reduce((s, r) => s + r.debit, 0);
+  const totalCredit = rows.reduce((s, r) => s + r.credit, 0);
+  const closing = totalDebit - totalCredit;   // what we still owe at `to`
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  const PDFDocument = require('pdfkit');
+  const doc = new PDFDocument({ size: 'A4', margin: 40 });
+  const safe = vendor.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="ledger-${safe}-${from}-to-${to}.pdf"`);
+  doc.pipe(res);
+
+  const money = (n) => (n ? Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '');
+  const dmy = (s) => {
+    const [y, m, d] = String(s).split('-');
+    const M = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m) - 1] || m;
+    return `${Number(d)}-${M}-${String(y).slice(2)}`;
+  };
+
+  // Column geometry (x positions), matching the Flexplast statement.
+  const X = { date: 40, part: 100, vtype: 285, vno: 360, debit: 470, credit: 555 };
+  const RIGHT_DEBIT = 545;   // right edge for the Debit column
+
+  // Header — us (the issuer), then the vendor account.
+  doc.font('Helvetica-Bold').fontSize(13).text((tenant?.name || 'Daybook').toUpperCase(), { align: 'center' });
+  doc.moveDown(0.6);
+  doc.font('Helvetica-Bold').fontSize(12).text(vendor.toUpperCase(), { align: 'center' });
+  doc.font('Helvetica').fontSize(9).text('Ledger Account', { align: 'center' });
+  doc.moveDown(0.8);
+  doc.fontSize(8).text(`${dmy(from)} to ${dmy(to)}`, { align: 'center' });
+  doc.moveDown(0.8);
+
+  let y = doc.y;
+  const line = (yy) => { doc.moveTo(40, yy).lineTo(555, yy).lineWidth(0.6).strokeColor('#000').stroke(); };
+
+  // Table head
+  doc.font('Helvetica-Bold').fontSize(8);
+  doc.text('Date', X.date, y); doc.text('Particulars', X.part, y);
+  doc.text('Vch Type', X.vtype, y); doc.text('Vch No.', X.vno, y);
+  doc.text('Debit', X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
+  doc.text('Credit', X.credit - 60, y, { width: 60, align: 'right' });
+  y += 12; line(y); y += 6;
+
+  const row = (r) => {
+    // New page when we run out of room — repeat nothing fancy, just continue.
+    if (y > 760) { doc.addPage(); y = 50; }
+    doc.font('Helvetica').fontSize(8);
+    doc.text(r.date || '', X.date, y, { width: 55 });
+    doc.font('Helvetica-Bold').fontSize(8).text(`${r.side || ''}  ${r.particulars}`, X.part, y, { width: 180, ellipsis: true });
+    doc.font('Helvetica').fontSize(7).text(r.vchType || '', X.vtype, y + 1, { width: 70 });
+    doc.fontSize(8).text(r.vchNo || '', X.vno, y, { width: 100, ellipsis: true });
+    doc.text(r.debit ? money(r.debit) : '', X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
+    doc.text(r.credit ? money(r.credit) : '', X.credit - 60, y, { width: 60, align: 'right' });
+    y += 14;
+  };
+
+  row({ date: dmy(from), side: 'To', particulars: 'Opening Balance', debit: opening > 0 ? opening : 0, credit: opening < 0 ? -opening : 0 });
+  for (const r of rows) row({ date: dmy(r.d), side: r.side, particulars: r.particulars, vchType: r.vchType, vchNo: r.vchNo, debit: r.debit, credit: r.credit });
+
+  // Totals + closing balance (closing goes on the Credit side so both sides agree).
+  y += 2; line(y); y += 6;
+  doc.font('Helvetica-Bold').fontSize(8);
+  doc.text(money(totalDebit), X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
+  doc.text(money(totalCredit), X.credit - 60, y, { width: 60, align: 'right' });
+  y += 14;
+  doc.text('By', X.part - 30, y);
+  doc.text('Closing Balance', X.part, y);
+  doc.text(money(closing), X.credit - 60, y, { width: 60, align: 'right' });
+  y += 14; line(y); y += 4;
+  doc.text(money(totalDebit), X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
+  doc.text(money(totalDebit), X.credit - 60, y, { width: 60, align: 'right' });
+  y += 12; line(y);
+
+  doc.font('Helvetica').fontSize(7).fillColor('#555')
+    .text(`Prepared from ${tenant?.name || 'Daybook'} records on ${new Date().toISOString().slice(0, 10)} — for reconciliation against the vendor's own statement.`,
+      40, y + 10, { width: 515, align: 'center' });
+
+  doc.end();
+});
+
 router.get('/:id/payments', requireAuth, async (req, res) => {
   const a = await expenseAccess(req, req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });

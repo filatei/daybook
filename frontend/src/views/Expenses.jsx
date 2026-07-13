@@ -1,11 +1,17 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { api, scoped, ngn, today, getToken } from '../api.js';
+import { api, scoped, ngn, today, getToken, downloadFile } from '../api.js';
 import { useStore, useBackHandler, useRole, atLeast } from '../store.jsx';
 import Typeahead from '../components/Typeahead.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
 import Cash from './Cash.jsx';
 
 const CATS = ['Fuel', 'Maintenance', 'Utilities', 'Supplies', 'Salary', 'Transport', 'Other'];
+
+// First day of the current month — the default start for a vendor statement.
+const monthStart = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+};
 
 function ExpenseForm({ expense, sites, onSave, onClose }) {
   const { toast, tenant, setDirty, confirm } = useStore();
@@ -219,12 +225,33 @@ const WF_ACTION = {
 // Vendor payables — how much we owe each vendor; tap to see their open tickets
 // and most recent payments, and drill into any ticket to make corrections.
 function PayablesView() {
-  const { tenant, sites } = useStore();
+  const { tenant, sites, toast } = useStore();
   const [rows, setRows] = useState(null);
   const [vendor, setVendor] = useState(null);   // drilled vendor → their open tickets + recent payments
   const [items, setItems] = useState(null);
   const [recent, setRecent] = useState(null);   // up to 10 most recent payments to this vendor
   const [openExp, setOpenExp] = useState(null);  // nested ticket detail, stacked ON TOP of the vendor drill
+  // Vendor statement (PDF) — date range, so it can be reconciled line-for-line
+  // against the vendor's own ledger.
+  const [stmtOpen, setStmtOpen] = useState(false);
+  const [stmtFrom, setStmtFrom] = useState(monthStart());
+  const [stmtTo, setStmtTo] = useState(today());
+  const [stmtBusy, setStmtBusy] = useState(false);
+
+  const downloadStatement = async () => {
+    if (!vendor || !stmtFrom || !stmtTo) return;
+    if (stmtFrom > stmtTo) { toast('Start date is after the end date', 'err'); return; }
+    setStmtBusy(true);
+    try {
+      const q = `from=${stmtFrom}&to=${stmtTo}`;
+      await downloadFile(
+        scoped(`/expenses/vendors/${encodeURIComponent(vendor.vendor)}/ledger.pdf?${q}`),
+        `ledger-${vendor.vendor.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${stmtFrom}-to-${stmtTo}.pdf`,
+      );
+      setStmtOpen(false);
+    } catch (e) { toast(e.message || 'Could not generate the statement', 'err'); }
+    setStmtBusy(false);
+  };
   // Back closes the top layer first (ticket detail), then the vendor drill.
   useBackHandler(!!vendor || !!openExp, () => { if (openExp) setOpenExp(null); else setVendor(null); });
   const loadRows = useCallback(() => { api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([])); }, [tenant]);
@@ -278,6 +305,13 @@ function PayablesView() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
               <strong>{vendor.vendor}</strong><strong style={{ color: 'var(--err)' }}>owe {ngn(vendor.owed)}</strong>
             </div>
+
+            {/* Statement of account — reconcile our record against the vendor's own ledger. */}
+            <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 10 }}
+              onClick={() => { setStmtFrom(monthStart()); setStmtTo(today()); setStmtOpen(true); }}>
+              📄 Statement of account (PDF)
+            </button>
+
             <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--muted)', margin: '4px 0 2px' }}>Open tickets</div>
             {items === null ? <div className="skel" style={{ height: 60 }} /> : items.length === 0 ? <div className="empty" style={{ padding: '8px 0' }}><p>No open tickets</p></div> : items.map((e) => (
               <button key={e.id} onClick={() => openTicket(e.id)}
@@ -309,6 +343,37 @@ function PayablesView() {
 
             <button className="btn btn-ghost" style={{ marginTop: 12 }} onClick={() => setVendor(null)}>Close</button>
           </div>
+
+          {/* Statement date range — stacked above the vendor drill (z 120). */}
+          {stmtOpen && (
+            <div onClick={(e) => { if (e.target === e.currentTarget && !stmtBusy) setStmtOpen(false); }}
+              style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(15,23,42,.55)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center', padding: 16 }}>
+              <div onClick={(e) => e.stopPropagation()}
+                style={{ background: 'var(--card, #fff)', borderRadius: 16, padding: 20, width: '100%', maxWidth: 380, boxShadow: '0 20px 60px rgba(15,23,42,.28)' }}>
+                <h3 style={{ margin: '0 0 4px' }}>Statement of account</h3>
+                <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
+                  A ledger for <b>{vendor.vendor}</b> — opening balance, bills, payments and closing balance —
+                  laid out like their own statement so you can compare line by line.
+                </p>
+                <div className="grid2">
+                  <div>
+                    <label className="fl">From</label>
+                    <input type="date" className="input" value={stmtFrom} onChange={(e) => setStmtFrom(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className="fl">To</label>
+                    <input type="date" className="input" value={stmtTo} onChange={(e) => setStmtTo(e.target.value)} />
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 8, marginTop: 14 }}>
+                  <button className="btn btn-ghost" disabled={stmtBusy} onClick={() => setStmtOpen(false)}>Cancel</button>
+                  <button className="btn" disabled={stmtBusy || !stmtFrom || !stmtTo} onClick={downloadStatement}>
+                    {stmtBusy ? <span className="spin" /> : '📄 Download PDF'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

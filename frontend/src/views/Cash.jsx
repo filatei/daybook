@@ -158,7 +158,6 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
   const role = useRole();
   const canReview = role && atLeast(role, 'SNR_ACCOUNTANT');
   const canValidate = role && atLeast(role, 'ADMIN');
-  const isAdmin = !!(role && atLeast(role, 'ADMIN'));   // AI features are Admin-only
   const canDelete = role && atLeast(role, 'SITE_MANAGER');
   const [d, setD] = useState(null);
   const [note, setNote] = useState('');
@@ -268,6 +267,7 @@ export default function Cash() {
   const { openModal, closeModal, tenant, sites, isGroup, groupTenants } = useStore();
   const role = useRole();
   const isAdminish = role && atLeast(role, 'SNR_ACCOUNTANT');
+  const isAdmin = !!(role && atLeast(role, 'ADMIN'));   // AI features are Admin-only
   const [data, setData] = useState({ rows: [], total: 0 });
   const [accounts, setAccounts] = useState([]);
   const [cashSales, setCashSales] = useState(null);   // today's CASH collected (reconcile)

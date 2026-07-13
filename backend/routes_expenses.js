@@ -242,6 +242,9 @@ router.get('/attachments', requireAuth, async (req, res) => {
 
   const { from, to, vendor, q } = req.query;
   const where = ['a.tenant_id=?', 'e.deleted_at IS NULL'], args = [tid];
+  // ?paid=1 → only slips pinned to an actual payment. That's the reconciliation
+  // view: every proof-of-transfer, nothing else.
+  if (req.query.paid === '1') where.push('a.payment_id IS NOT NULL');
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   if (vendor) { where.push('lower(e.vendor)=lower(?)'); args.push(vendor); }
   // Dates filter on the TICKET date (what the receipt is evidence of), not the
@@ -256,14 +259,17 @@ router.get('/attachments', requireAuth, async (req, res) => {
   }
 
   const rows = await qall(
-    `SELECT a.id, a.file_name, a.mime, a.size, a.note, a.created_at, a.uploaded_by,
+    `SELECT a.id, a.file_name, a.mime, a.size, a.note, a.created_at, a.uploaded_by, a.payment_id,
             u.name AS uploaded_by_name,
             e.id AS expense_id, e.expense_date, e.vendor, e.description, e.category,
             e.amount, COALESCE(e.amount_paid,0) AS amount_paid, e.wf_state,
             s.name AS site_name,
+            -- The payment this slip actually evidences (null = filed against the ticket).
+            pp.pay_date, pp.amount AS pay_amount, pp.method AS pay_method, pp.bank AS pay_bank,
             (SELECT MAX(p.pay_date) FROM expense_payments p WHERE p.expense_id = e.id) AS last_payment_date
        FROM expense_attachments a
        JOIN expenses e ON e.id = a.expense_id
+       LEFT JOIN expense_payments pp ON pp.id = a.payment_id
        LEFT JOIN sites s ON s.id = e.site_id
        LEFT JOIN users u ON u.id = a.uploaded_by
       WHERE ${where.join(' AND ')}
@@ -715,22 +721,38 @@ router.post('/:id/reset-payments', requireAuth, async (req, res) => {
 router.get('/:id/attachments', requireAuth, async (req, res) => {
   const a = await expenseAccess(req, req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
-  const rows = await qall('SELECT id,note,file_name,mime,size,uploaded_by,created_at FROM expense_attachments WHERE expense_id=? ORDER BY created_at DESC', [req.params.id]);
+  const rows = await qall(
+    `SELECT a.id, a.note, a.file_name, a.mime, a.size, a.uploaded_by, a.created_at, a.payment_id,
+            p.pay_date, p.amount AS pay_amount, p.method AS pay_method, p.bank AS pay_bank
+       FROM expense_attachments a
+       LEFT JOIN expense_payments p ON p.id = a.payment_id
+      WHERE a.expense_id=? ORDER BY a.created_at DESC`, [req.params.id]);
   res.json(rows.map((r) => ({ ...r, has_file: !!r.file_name })));
 });
 
 // Add a note and/or a receipt file (one entry). Anyone with access to the expense.
+// Pass `payment_id` to pin the receipt to the exact payment it evidences (the bank
+// slip for THAT transfer) rather than to the ticket in general.
 router.post('/:id/attachments', requireAuth, upload.single('file'), async (req, res) => {
   // Anyone with access to the expense may attach receipts/notes (record-keeping).
   const a = await expenseAccess(req, req.params.id);
   if (!a) { if (req.file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename)); } catch {} } return res.status(404).json({ error: 'not found' }); }
   const note = (req.body && req.body.note ? String(req.body.note) : '').trim() || null;
   if (!req.file && !note) return res.status(400).json({ error: 'attach a receipt or write a note' });
+
+  // The payment must belong to THIS ticket — otherwise a slip could be pinned to
+  // another vendor's payment and quietly corrupt a reconciliation.
+  let paymentId = (req.body && req.body.payment_id ? String(req.body.payment_id) : '').trim() || null;
+  if (paymentId) {
+    const p = await qone('SELECT id FROM expense_payments WHERE id=? AND expense_id=?', [paymentId, a.expense.id]);
+    if (!p) paymentId = null;
+  }
+
   const id = uuid();
-  await qrun('INSERT INTO expense_attachments (id,tenant_id,expense_id,note,file_name,stored_name,mime,size,uploaded_by) VALUES (?,?,?,?,?,?,?,?,?)',
-    [id, a.expense.tenant_id, a.expense.id, note,
+  await qrun('INSERT INTO expense_attachments (id,tenant_id,expense_id,payment_id,note,file_name,stored_name,mime,size,uploaded_by) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [id, a.expense.tenant_id, a.expense.id, paymentId, note,
       req.file ? req.file.originalname : null, req.file ? req.file.filename : null, req.file ? req.file.mimetype : null, req.file ? req.file.size : null, req.user.id]);
-  res.status(201).json({ id });
+  res.status(201).json({ id, payment_id: paymentId });
 });
 
 // Stream/download a receipt file.

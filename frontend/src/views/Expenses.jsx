@@ -234,6 +234,7 @@ function ReceiptsView() {
   const [rows, setRows] = useState(null);
   const [q, setQ] = useState('');
   const [qd, setQd] = useState('');
+  const [paidOnly, setPaidOnly] = useState(false);   // only slips pinned to a payment
   const [openExp, setOpenExp] = useState(null);
   useEffect(() => { const t = setTimeout(() => setQd(q.trim()), 300); return () => clearTimeout(t); }, [q]);
   useBackHandler(!!openExp, () => setOpenExp(null));
@@ -241,8 +242,9 @@ function ReceiptsView() {
   const load = useCallback(() => {
     const p = new URLSearchParams();
     if (qd) p.set('q', qd);
+    if (paidOnly) p.set('paid', '1');
     api(scoped(`/expenses/attachments?${p}`)).then(setRows).catch(() => setRows([]));
-  }, [tenant, qd]);
+  }, [tenant, qd, paidOnly]);
   useEffect(() => { load(); }, [load]);
 
   // Fetch with the bearer token, then hand the browser a blob URL — the file route
@@ -273,10 +275,14 @@ function ReceiptsView() {
     <div>
       <input className="input" value={q} onChange={(e) => setQ(e.target.value)}
         placeholder="🔍 Search vendor, description, file name…" style={{ marginBottom: 12 }} />
-      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 16px', marginBottom: 12 }}>
+      <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', marginBottom: 12 }}>
         <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
           {rows.length} receipt{rows.length !== 1 ? 's' : ''}
         </span>
+        <label style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          <input type="checkbox" checked={paidOnly} onChange={(e) => setPaidOnly(e.target.checked)} />
+          Payment proofs only
+        </label>
       </div>
 
       {rows.length === 0 ? (
@@ -296,10 +302,16 @@ function ReceiptsView() {
                   {r.vendor || r.description || r.category}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {/* Ticket date · billed · when it was actually paid — the three
-                      facts you compare a receipt against. */}
-                  {r.expense_date} · {ngn(r.amount)}
-                  {r.last_payment_date ? <span style={{ color: '#166534' }}> · paid {r.last_payment_date}</span> : ' · unpaid'}
+                  {/* If the slip is pinned to a payment, show THAT payment — the
+                      exact transfer it proves. Otherwise fall back to the ticket. */}
+                  {r.payment_id ? (
+                    <span style={{ color: '#166534', fontWeight: 600 }}>
+                      Pays {ngn(r.pay_amount)} on {r.pay_date}
+                      {r.pay_bank ? ` · ${r.pay_bank}` : r.pay_method ? ` · ${r.pay_method}` : ''}
+                    </span>
+                  ) : (
+                    <>{r.expense_date} · {ngn(r.amount)}{r.last_payment_date ? ` · last pay ${r.last_payment_date}` : ' · unpaid'}</>
+                  )}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {r.file_name || 'file'}{r.size ? ` · ${kb(r.size)}` : ''} · uploaded {new Date(Number(r.created_at) * 1000).toLocaleDateString()}
@@ -612,8 +624,16 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     if (amt > balance + 0.01) return toast(`Max ₦${balance.toLocaleString()} — that's the balance`, 'err');
     setBusy(true);
     try {
-      await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, method: payBank ? 'TRANSFER' : 'CASH', bank: payBank || null, memo: payNote.trim() || null } });
-      if (payFile) { const fd = new FormData(); fd.append('file', payFile); if (payNote.trim()) fd.append('note', payNote.trim()); await api(ts(`/expenses/${expense.id}/attachments`), { method: 'POST', form: fd }).catch(() => {}); }
+      const created = await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, method: payBank ? 'TRANSFER' : 'CASH', bank: payBank || null, memo: payNote.trim() || null } });
+      // Pin the slip to THIS payment, not just the ticket — so a receipt can always
+      // be matched back to the exact transfer that left the bank.
+      if (payFile) {
+        const fd = new FormData();
+        fd.append('file', payFile);
+        if (payNote.trim()) fd.append('note', payNote.trim());
+        if (created && created.id) fd.append('payment_id', created.id);
+        await api(ts(`/expenses/${expense.id}/attachments`), { method: 'POST', form: fd }).catch(() => {});
+      }
       const newPaid = Math.round((paid + amt) * 100) / 100;
       const newBal = Math.max(0, Math.round((billed - newPaid) * 100) / 100);
       if (newBal <= 0.01 && wf === 'APPROVED') { try { await api(ts(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action: 'pay' } }); } catch { /* keep going */ } }
@@ -884,6 +904,12 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
               <span style={{ fontSize: 18, lineHeight: '20px', flexShrink: 0 }}>{fileIcon(a.mime)}</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 {a.file_name && <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.file_name}</div>}
+                {/* Which payment this slip proves — the whole point of keeping it. */}
+                {a.payment_id && a.pay_date && (
+                  <div style={{ fontSize: 12, color: '#166534', fontWeight: 600 }}>
+                    Proof of {ngn(a.pay_amount)} paid {a.pay_date}{a.pay_bank ? ` · ${a.pay_bank}` : a.pay_method ? ` · ${a.pay_method}` : ''}
+                  </div>
+                )}
                 {a.note && <div style={{ fontSize: 12.5, color: 'var(--muted)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{a.note}</div>}
               </div>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>

@@ -851,6 +851,15 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_exp_att ON expense_attachments(expense_id);
 
+    -- A receipt can be pinned to the exact PAYMENT it evidences (the bank slip for
+    -- the ₦3.4m that left on 18-Jun), not just to the ticket. Nullable: a receipt
+    -- may still be filed against the ticket generally (the vendor's invoice, a
+    -- delivery note). ON DELETE SET NULL — reversing a payment must not destroy the
+    -- evidence that it happened.
+    ALTER TABLE expense_attachments
+      ADD COLUMN IF NOT EXISTS payment_id TEXT REFERENCES expense_payments(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS idx_exp_att_pay ON expense_attachments(payment_id) WHERE payment_id IS NOT NULL;
+
     -- CASH AT HAND — managers/secretaries log cash handed to POS agents that must
     -- land in the company bank account. Admin reviews (SEEN) + validates at EOD,
     -- checking total recorded = cash collected. Each entry carries transfer receipts.

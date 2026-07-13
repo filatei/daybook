@@ -438,9 +438,23 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
     return `${Number(d)}-${M}-${String(y).slice(2)}`;
   };
 
-  // Column geometry (x positions), matching the Flexplast statement.
-  const X = { date: 40, part: 100, vtype: 285, vno: 360, debit: 470, credit: 555 };
-  const RIGHT_DEBIT = 545;   // right edge for the Debit column
+  // ── Column geometry ───────────────────────────────────────────────────────
+  // Content runs 40 → 555 (A4 minus margins). Every column is a FIXED, disjoint
+  // box with lineBreak:false, so nothing can wrap into the row below or bleed
+  // into its neighbour. Debit and Credit get their own right-aligned boxes with
+  // a real gap between them.
+  //
+  // No "Vch No." column: our voucher ids are UUIDs, which are meaningless to the
+  // vendor and long enough to wrap and scramble the table. Date + particulars +
+  // amount is what you reconcile on.
+  const C = {
+    date:   { x: 40,  w: 58 },
+    side:   { x: 100, w: 16 },
+    part:   { x: 118, w: 192 },   // 118 → 310
+    vtype:  { x: 315, w: 65 },    // 315 → 380
+    debit:  { x: 388, w: 82 },    // 388 → 470  (right-aligned)
+    credit: { x: 478, w: 77 },    // 478 → 555  (right-aligned)
+  };
 
   // Header — us (the issuer), then the vendor account.
   doc.font('Helvetica-Bold').fontSize(13).text((tenant?.name || 'Daybook').toUpperCase(), { align: 'center' });
@@ -454,42 +468,49 @@ router.get('/vendors/:vendor/ledger.pdf', requireAuth, async (req, res) => {
   let y = doc.y;
   const line = (yy) => { doc.moveTo(40, yy).lineTo(555, yy).lineWidth(0.6).strokeColor('#000').stroke(); };
 
-  // Table head
-  doc.font('Helvetica-Bold').fontSize(8);
-  doc.text('Date', X.date, y); doc.text('Particulars', X.part, y);
-  doc.text('Vch Type', X.vtype, y); doc.text('Vch No.', X.vno, y);
-  doc.text('Debit', X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
-  doc.text('Credit', X.credit - 60, y, { width: 60, align: 'right' });
-  y += 12; line(y); y += 6;
+  const head = () => {
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#000');
+    doc.text('Date', C.date.x, y, { width: C.date.w, lineBreak: false });
+    doc.text('Particulars', C.part.x, y, { width: C.part.w, lineBreak: false });
+    doc.text('Vch Type', C.vtype.x, y, { width: C.vtype.w, lineBreak: false });
+    doc.text('Debit', C.debit.x, y, { width: C.debit.w, align: 'right', lineBreak: false });
+    doc.text('Credit', C.credit.x, y, { width: C.credit.w, align: 'right', lineBreak: false });
+    y += 12; line(y); y += 6;
+  };
+  head();
 
   const row = (r) => {
-    // New page when we run out of room — repeat nothing fancy, just continue.
-    if (y > 760) { doc.addPage(); y = 50; }
-    doc.font('Helvetica').fontSize(8);
-    doc.text(r.date || '', X.date, y, { width: 55 });
-    doc.font('Helvetica-Bold').fontSize(8).text(`${r.side || ''}  ${r.particulars}`, X.part, y, { width: 180, ellipsis: true });
-    doc.font('Helvetica').fontSize(7).text(r.vchType || '', X.vtype, y + 1, { width: 70 });
-    doc.fontSize(8).text(r.vchNo || '', X.vno, y, { width: 100, ellipsis: true });
-    doc.text(r.debit ? money(r.debit) : '', X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
-    doc.text(r.credit ? money(r.credit) : '', X.credit - 60, y, { width: 60, align: 'right' });
+    // New page → repeat the column headings so page 2+ is readable on its own.
+    if (y > 750) { doc.addPage(); y = 50; head(); }
+    doc.fillColor('#000');
+    doc.font('Helvetica').fontSize(8).text(r.date || '', C.date.x, y, { width: C.date.w, lineBreak: false });
+    doc.font('Helvetica').fontSize(8).text(r.side || '', C.side.x, y, { width: C.side.w, lineBreak: false });
+    doc.font('Helvetica-Bold').fontSize(8)
+      .text(r.particulars || '', C.part.x, y, { width: C.part.w, lineBreak: false, ellipsis: true });
+    doc.font('Helvetica').fontSize(7)
+      .text(r.vchType || '', C.vtype.x, y + 1, { width: C.vtype.w, lineBreak: false, ellipsis: true });
+    doc.fontSize(8);
+    doc.text(r.debit ? money(r.debit) : '', C.debit.x, y, { width: C.debit.w, align: 'right', lineBreak: false });
+    doc.text(r.credit ? money(r.credit) : '', C.credit.x, y, { width: C.credit.w, align: 'right', lineBreak: false });
     y += 14;
   };
 
   row({ date: dmy(from), side: 'To', particulars: 'Opening Balance', debit: opening > 0 ? opening : 0, credit: opening < 0 ? -opening : 0 });
-  for (const r of rows) row({ date: dmy(r.d), side: r.side, particulars: r.particulars, vchType: r.vchType, vchNo: r.vchNo, debit: r.debit, credit: r.credit });
+  for (const r of rows) row({ date: dmy(r.d), side: r.side, particulars: r.particulars, vchType: r.vchType, debit: r.debit, credit: r.credit });
 
   // Totals + closing balance (closing goes on the Credit side so both sides agree).
+  if (y > 720) { doc.addPage(); y = 50; }
   y += 2; line(y); y += 6;
-  doc.font('Helvetica-Bold').fontSize(8);
-  doc.text(money(totalDebit), X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
-  doc.text(money(totalCredit), X.credit - 60, y, { width: 60, align: 'right' });
+  doc.font('Helvetica-Bold').fontSize(8).fillColor('#000');
+  doc.text(money(totalDebit), C.debit.x, y, { width: C.debit.w, align: 'right', lineBreak: false });
+  doc.text(money(totalCredit), C.credit.x, y, { width: C.credit.w, align: 'right', lineBreak: false });
   y += 14;
-  doc.text('By', X.part - 30, y);
-  doc.text('Closing Balance', X.part, y);
-  doc.text(money(closing), X.credit - 60, y, { width: 60, align: 'right' });
+  doc.text('By', C.side.x, y, { width: C.side.w, lineBreak: false });
+  doc.text('Closing Balance', C.part.x, y, { width: C.part.w, lineBreak: false });
+  doc.text(money(closing), C.credit.x, y, { width: C.credit.w, align: 'right', lineBreak: false });
   y += 14; line(y); y += 4;
-  doc.text(money(totalDebit), X.debit, y, { width: RIGHT_DEBIT - X.debit, align: 'right' });
-  doc.text(money(totalDebit), X.credit - 60, y, { width: 60, align: 'right' });
+  doc.text(money(totalDebit), C.debit.x, y, { width: C.debit.w, align: 'right', lineBreak: false });
+  doc.text(money(totalDebit), C.credit.x, y, { width: C.credit.w, align: 'right', lineBreak: false });
   y += 12; line(y);
 
   doc.font('Helvetica').fontSize(7).fillColor('#555')

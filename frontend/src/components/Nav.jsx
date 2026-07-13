@@ -3,7 +3,6 @@ import { useStore, useRole, useActiveTenant, atLeast, isGateRole } from '../stor
 import { api, scoped } from '../api.js';
 import { useRealtime } from '../hooks/useRealtime.js';
 import { pushSupported, pushPermission, enablePush } from '../push.js';
-import AIAssistant from './AIAssistant.jsx';
 
 // Live total of unread direct messages → the Nav chat badge.
 function useChatUnread(meId) {
@@ -79,7 +78,7 @@ function ProfileMenu({ user, isGMup, isMgr, go, logout, canInstall, install, can
 }
 
 export default function Nav() {
-  const { go, tab, tenants, tenant, setTenant, logout, user, openModal, closeModal, toast } = useStore();
+  const { go, tab, tenants, tenant, setTenant, logout, user, toast } = useStore();
   const role    = useRole();
   const active  = useActiveTenant();
   const { canInstall, install } = useInstallPrompt();
@@ -95,7 +94,6 @@ export default function Nav() {
 
   const isGMup       = role && atLeast(role, 'GENERAL_MANAGER');
   const isMgr        = role && atLeast(role, 'SITE_MANAGER');
-  const isAdmin      = role && atLeast(role, 'ADMIN');
   const isSuperAdmin = user?.is_superadmin && !tenant;
   const isGate       = isGateRole(role);
   const showSell = !!active;
@@ -123,11 +121,7 @@ export default function Nav() {
       <header className="nav" style={{ '--brand': brand }}>
         <div className="nav-top">
           <span className="nav-logo">📒 Daybook</span>
-          {isAdmin && (
-            <button className="chat-btn ai-hdr-btn" onClick={() => openModal(<AIAssistant onClose={closeModal} />, { guard: true })} title="Ask Daybook AI" aria-label="AI assistant">
-              🤖
-            </button>
-          )}
+          {/* AI moved under Admin → 🤖 AI (admin-only). No global entry point. */}
           <button className="chat-btn" onClick={() => go('chat')} title="Chat" aria-label="Chat"
             style={{ position: 'relative' }}>
             💬
@@ -159,13 +153,6 @@ export default function Nav() {
           ))}
         </nav>
       </header>
-
-      {/* AI assistant — floating FAB on mobile (bottom-left), Admin only */}
-      {isAdmin && (
-        <button className="ai-fab" onClick={() => openModal(<AIAssistant onClose={closeModal} />, { guard: true })} title="Ask Daybook AI" aria-label="AI assistant">
-          🤖
-        </button>
-      )}
 
       {/* ── Bottom nav (mobile only, fixed at bottom) ─────────── */}
       <nav className="bottom-nav">

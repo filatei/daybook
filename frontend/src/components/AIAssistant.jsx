@@ -5,7 +5,10 @@ import Markdown from './Markdown.jsx';
 
 // Admin-only assistant — asks the backend /ai/chat, which reads THIS company's
 // data (live POS/expenses/payroll/staff + Daybook reports) scoped to the user.
+// Lives under Admin → 🤖 AI. Renders EMBEDDED (no modal grip/Close) when no
+// `onClose` is passed; keeps modal chrome when it is (legacy modal callers).
 export default function AIAssistant({ onClose }) {
+  const embedded = typeof onClose !== 'function';
   const { toast } = useStore();
   const [msgs, setMsgs] = useState([
     { role: 'assistant', content: 'Hi! Ask me about your data — e.g. “sales by site this week”, “which site has the highest diesel cost?”, “staff headcount”, or “summarise yesterday’s reports”.' },
@@ -33,8 +36,8 @@ export default function AIAssistant({ onClose }) {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', maxHeight: '82vh' }}>
-      <div className="grip" />
+    <div style={{ display: 'flex', flexDirection: 'column', maxHeight: embedded ? 'none' : '82vh' }}>
+      {!embedded && <div className="grip" />}
       <h3 style={{ margin: '0 0 8px' }}>🤖 Daybook Assistant</h3>
 
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, padding: '4px 2px', minHeight: 200 }}>
@@ -57,7 +60,9 @@ export default function AIAssistant({ onClose }) {
           onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} autoFocus />
         <button className="btn" style={{ width: 'auto', padding: '0 18px' }} onClick={send} disabled={busy || !q.trim()}>{busy ? <span className="spin" /> : 'Ask'}</button>
       </div>
-      <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={onClose}>Close</button>
+      {!embedded && (
+        <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={onClose}>Close</button>
+      )}
     </div>
   );
 }

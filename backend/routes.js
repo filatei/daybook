@@ -1656,7 +1656,8 @@ router.get('/payroll', requireAuth, needTenant('GENERAL_MANAGER'), async (req, r
   } catch (e) { res.status(e.httpStatus || 502).json({ error: e.message, code: e.code }); }
 });
 
-router.post('/ai/analyse', requireAuth, async (req, res) => {
+// AI analysis is ADMIN-only (it reads company-wide site/POS/report data).
+router.post('/ai/analyse', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const { site: siteId, date } = req.body || {};
   if (!siteId || !date) return res.status(400).json({ error: 'site and date required' });
   const a = await siteAccess(req, siteId); if (!a) return res.status(403).json({ error: 'no access to this site' });
@@ -1683,7 +1684,7 @@ function parseAiJson(text) {
 // ── AI: natural-language EXPENSE → structured draft ───────────────────────────
 // The user types/speaks a sentence; the model maps it onto the expense form.
 // Returns a draft the user reviews + confirms (we never auto-post from text).
-router.post('/ai/expense-parse', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+router.post('/ai/expense-parse', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!aiConfigured()) return res.status(503).json({ error: 'AI is not configured on the server' });
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'say what the expense is for' });
@@ -1722,7 +1723,7 @@ CATEGORIES: ${JSON.stringify(allCats)}`;
 });
 
 // ── AI: natural-language CASH DEPOSIT → structured draft ──────────────────────
-router.post('/ai/cash-parse', requireAuth, needTenant('SECRETARY'), async (req, res) => {
+router.post('/ai/cash-parse', requireAuth, needTenant('ADMIN'), async (req, res) => {
   if (!aiConfigured()) return res.status(503).json({ error: 'AI is not configured on the server' });
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'say the deposit amount and who paid it in' });

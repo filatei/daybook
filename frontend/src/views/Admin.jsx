@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { api, scoped, ngn, downloadFile } from '../api.js';
 import { useStore, useRole, atLeast, ROLE_LABELS } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
+import AIAssistant from '../components/AIAssistant.jsx';
 
 function SiteForm({ site, onSave, onClose }) {
   const { toast, confirm } = useStore();
@@ -825,10 +826,14 @@ export default function Admin() {
         {isSnr && <button className={`seg-b${tab === 'banks' ? ' on' : ''}`} onClick={() => setTab('banks')}>🏦 Bank accounts</button>}
         {isSnr && <button className={`seg-b${tab === 'accounts' ? ' on' : ''}`} onClick={() => setTab('accounts')}>📒 Accounts</button>}
         {isSnr && <button className={`seg-b${tab === 'ledger' ? ' on' : ''}`} onClick={() => setTab('ledger')}>📖 Ledger</button>}
+        {isAdmin && <button className={`seg-b${tab === 'ai' ? ' on' : ''}`} onClick={() => setTab('ai')}>🤖 AI</button>}
         {isAdmin && <button className={`seg-b${tab === 'settings' ? ' on' : ''}`} onClick={() => setTab('settings')}>⚙️ Settings</button>}
       </div>
 
-      {tab === 'ledger' ? <LedgerTab /> : tab === 'accounts' ? <AccountsTab /> : tab === 'banks' ? <BankAccountsTab /> : tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
+      {/* AI analysis is Admin-only — it reads company-wide data, so it lives here
+          rather than in the global nav. The backend /ai/* routes enforce ADMIN too. */}
+      {tab === 'ai' ? (isAdmin ? <div className="card"><AIAssistant /></div> : null)
+        : tab === 'ledger' ? <LedgerTab /> : tab === 'accounts' ? <AccountsTab /> : tab === 'banks' ? <BankAccountsTab /> : tab === 'reportmail' ? <ReportEmailsTab /> : tab === 'settings' ? <SettingsTab /> : loading ? (
         <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : tab === 'sites' ? (
         <>

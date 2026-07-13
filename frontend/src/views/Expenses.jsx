@@ -755,6 +755,7 @@ export default function Expenses() {
   const { openModal, closeModal, toast, tenant, sites, isGroup, groupTenants } = useStore();
   const role = useRole();
   const canBulk = role && atLeast(role, 'SNR_ACCOUNTANT');   // Snr Accountant / GM / Admin
+  const isAdmin = !!(role && atLeast(role, 'ADMIN'));         // AI features are Admin-only
   const [selMode, setSelMode] = useState(false);
   const [openGroups, setOpenGroups] = useState({});   // status → expanded? (FAQ-style)
   const toggleGroupOpen = (st) => setOpenGroups((p) => ({ ...p, [st]: !p[st] }));
@@ -900,8 +901,8 @@ export default function Expenses() {
       <input className="input" style={{ marginBottom: 12 }} value={search} onChange={(e) => setSearch(e.target.value)}
         placeholder="🔍 Search by ID, vendor, site, description or item…" />
 
-      {/* AI: type or speak an expense in plain English */}
-      {!isGroup && (
+      {/* AI: type or speak an expense in plain English — ADMIN only (backend enforces too) */}
+      {!isGroup && isAdmin && (
         <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 12 }}
           onClick={() => openModal(<AIExpenseModal onCreated={load} onClose={closeModal} />)}>
           ✨ Add expense by sentence / voice

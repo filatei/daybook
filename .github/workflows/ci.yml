@@ -27,7 +27,11 @@ jobs:
           --health-retries 5
 
     steps:
+      # Need history so we can replay the PREVIOUS release's schema and then
+      # upgrade it with this commit's migration (see "Migration — upgrade path").
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -53,6 +57,43 @@ jobs:
       - name: TypeScript check (scaffolding — non-blocking until conversion)
         continue-on-error: true
         run: npx tsc --noEmit
+      # ── Migrations ───────────────────────────────────────────────────────────
+      # A DDL ordering bug (an index above the ALTER that adds its column) is
+      # invisible to node --check and ESLint, and takes production down on boot.
+      # Executing the migration is the only thing that catches it.
+      - name: Migration — fresh database
+        env:
+          DATABASE_URL: postgres://daybook:ci-password@localhost:5432/daybook_ci
+        run: node scripts/migrate-check.js --label fresh
+
+      # The case a fresh DB CANNOT catch: a migration that works on an empty
+      # database but not on one that already carries the previous release's schema.
+      # That is what every real deploy does. So: build the old schema, then run the
+      # new migration on top of it — exactly what the server will do.
+      - name: Migration — upgrade path (previous release → this commit)
+        env:
+          PGPASSWORD: ci-password
+        run: |
+          BASE="${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'HEAD^' }}"
+          if ! git rev-parse --verify --quiet "$BASE" >/dev/null; then
+            echo "No parent commit to upgrade from — skipping."; exit 0
+          fi
+          echo "Replaying schema from $(git rev-parse --short "$BASE"), then upgrading to $(git rev-parse --short HEAD)"
+
+          psql -h localhost -U daybook -d postgres -c 'DROP DATABASE IF EXISTS daybook_upgrade'
+          psql -h localhost -U daybook -d postgres -c 'CREATE DATABASE daybook_upgrade'
+
+          # Old db.js, run standalone against the empty upgrade DB.
+          rm -rf /tmp/base && mkdir -p /tmp/base
+          git archive "$BASE" backend/db.js | tar -x -C /tmp/base
+          DATABASE_URL=postgres://daybook:ci-password@localhost:5432/daybook_upgrade \
+            DB_MODULE=/tmp/base/backend/db.js \
+            node scripts/migrate-check.js --label "old-schema"
+
+          # Now this commit's migration, on top of that older schema.
+          DATABASE_URL=postgres://daybook:ci-password@localhost:5432/daybook_upgrade \
+            node scripts/migrate-check.js --label "upgrade"
+
       - name: Boot + smoke test
         env:
           JWT_SECRET: ci-test-secret

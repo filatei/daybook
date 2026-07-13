@@ -9,9 +9,65 @@ env:
   IMAGE: ghcr.io/filatei/daybook
 
 jobs:
+  # ── 0. GATE ─────────────────────────────────────────────────────────────────
+  # Nothing ships unless the migration actually runs. CI already catches this, but
+  # CI and Deploy were independent workflows — on 2026-07-13 CI went red on a DDL
+  # ordering bug and Deploy shipped the same commit anyway, crash-looping the
+  # container and taking production down. The deploy path now blocks on its own
+  # check, so a broken migration can never reach the server again.
+  gate:
+    name: Gate — lint + migration must run
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: daybook_gate
+          POSTGRES_USER: daybook
+          POSTGRES_PASSWORD: ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U daybook -d daybook_gate"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install
+        run: npm ci || npm install
+      - name: Lint (error-level blocks)
+        run: npx eslint . --quiet
+      - name: Migration — fresh database
+        env:
+          DATABASE_URL: postgres://daybook:ci-password@localhost:5432/daybook_gate
+        run: node scripts/migrate-check.js --label fresh
+      - name: Migration — upgrade path (previous release → this commit)
+        env:
+          PGPASSWORD: ci-password
+        run: |
+          if ! git rev-parse --verify --quiet HEAD^ >/dev/null; then
+            echo "No parent commit to upgrade from — skipping."; exit 0
+          fi
+          psql -h localhost -U daybook -d postgres -c 'DROP DATABASE IF EXISTS daybook_upgrade'
+          psql -h localhost -U daybook -d postgres -c 'CREATE DATABASE daybook_upgrade'
+          rm -rf /tmp/base && mkdir -p /tmp/base
+          git archive HEAD^ backend/db.js | tar -x -C /tmp/base
+          DATABASE_URL=postgres://daybook:ci-password@localhost:5432/daybook_upgrade \
+            DB_MODULE=/tmp/base/backend/db.js node scripts/migrate-check.js --label old-schema
+          DATABASE_URL=postgres://daybook:ci-password@localhost:5432/daybook_upgrade \
+            node scripts/migrate-check.js --label upgrade
+
   # ── 1. Build + push the container image to GHCR ─────────────────────────────
   build:
     name: Build & push image
+    needs: gate
     runs-on: ubuntu-latest
     permissions:
       contents: read

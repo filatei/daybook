@@ -791,7 +791,16 @@ async function migrate() {
     -- the retention window (see EXPENSE_TRASH_DAYS).
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_by TEXT;
-    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_reason TEXT;`);
+    ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+
+    -- SOFT DELETE for sales, same contract as expenses: a voided receipt keeps its
+    -- row (so it can be restored and so the trail survives), but is excluded from
+    -- EVERY read — lists, summaries, totals, exports, the GL. Money that was voided
+    -- must never turn up in a figure again.
+    -- These columns MUST be added before the partial indexes below reference them.
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_at     BIGINT;
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_by     TEXT;
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_reason TEXT;`);
   // Partial index: the common path (not deleted) stays fast.
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sales_live  ON pos_sales(tenant_id, sale_date) WHERE deleted_at IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_sales_trash ON pos_sales(tenant_id, deleted_at) WHERE deleted_at IS NOT NULL`);
@@ -862,13 +871,8 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS payment_id TEXT REFERENCES expense_payments(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_exp_att_pay ON expense_attachments(payment_id) WHERE payment_id IS NOT NULL;
 
-    -- SOFT DELETE for sales, same contract as expenses: a deleted receipt keeps its
-    -- row (so it can be restored and so the trail survives), but is excluded from
-    -- EVERY read — lists, summaries, totals, exports, the GL. Money that was voided
-    -- must never turn up in a figure again.
-    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_at     BIGINT;
-    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_by     TEXT;
-    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
+    -- (pos_sales soft-delete columns are added earlier — they must exist before the
+    -- partial indexes that reference them.)
 
     -- CASH AT HAND — managers/secretaries log cash handed to POS agents that must
     -- land in the company bank account. Admin reviews (SEEN) + validates at EOD,

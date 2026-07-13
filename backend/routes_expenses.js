@@ -385,6 +385,12 @@ router.delete('/:id', requireAuth, async (req, res) => {
   const reason = (req.body && req.body.reason ? String(req.body.reason) : '').trim().slice(0, 500) || null;
   await qrun('UPDATE expenses SET deleted_at=?, deleted_by=?, deleted_reason=? WHERE id=?',
     [Math.floor(Date.now() / 1000), req.user.id, reason, e.id]);
+  // Stamp the workflow trail. This survives now (the row does), so "who deleted what,
+  // when, and why" is answerable — which it was NOT under the old hard delete.
+  await qrun(
+    `INSERT INTO expense_wf_log (id,tenant_id,expense_id,action,from_state,to_state,note,actor,actor_name) VALUES (?,?,?,?,?,?,?,?,?)`,
+    [uuid(), e.tenant_id, e.id, 'delete', e.wf_state || 'DRAFT', e.wf_state || 'DRAFT',
+      reason || 'Deleted (recoverable for 30 days)', req.user.id, req.user.name || req.user.email || null]).catch(() => {});
   res.json({ ok: true });
 });
 
@@ -404,6 +410,10 @@ router.post('/:id/restore', requireAuth, async (req, res) => {
       [parseFloat(e.amount) || 0, e.tenant_id, e.site_id, e.expense_date]);
   }
   await qrun('UPDATE expenses SET deleted_at=NULL, deleted_by=NULL, deleted_reason=NULL WHERE id=?', [e.id]);
+  await qrun(
+    `INSERT INTO expense_wf_log (id,tenant_id,expense_id,action,from_state,to_state,note,actor,actor_name) VALUES (?,?,?,?,?,?,?,?,?)`,
+    [uuid(), e.tenant_id, e.id, 'restore', e.wf_state || 'DRAFT', e.wf_state || 'DRAFT',
+      'Restored from Recently deleted', req.user.id, req.user.name || req.user.email || null]).catch(() => {});
   res.json({ ok: true, id: e.id });
 });
 

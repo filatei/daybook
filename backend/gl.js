@@ -100,7 +100,7 @@ async function syncFromRecords(tenant_id, { from, to, posted_by = null } = {}) {
   // 1. Sales — Dr cash/bank, Cr sales revenue (net of incentive/free goods).
   const sales = await qall(
     `SELECT id, sale_date, total, payment_method FROM pos_sales
-      WHERE tenant_id=? AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE' AND total>0`, [tenant_id, lo, hi]);
+      WHERE tenant_id=? AND deleted_at IS NULL AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE' AND total>0`, [tenant_id, lo, hi]);
   for (const s of sales) {
     await bump('sales', postJournal(tenant_id, {
       jdate: s.sale_date, memo: 'POS sale', source_type: 'sale', source_id: s.id, posted_by,

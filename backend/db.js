@@ -793,6 +793,8 @@ async function migrate() {
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_by TEXT;
     ALTER TABLE expenses ADD COLUMN IF NOT EXISTS deleted_reason TEXT;`);
   // Partial index: the common path (not deleted) stays fast.
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_sales_live  ON pos_sales(tenant_id, sale_date) WHERE deleted_at IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_sales_trash ON pos_sales(tenant_id, deleted_at) WHERE deleted_at IS NOT NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_expenses_live ON expenses(tenant_id) WHERE deleted_at IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_expenses_trash ON expenses(tenant_id, deleted_at) WHERE deleted_at IS NOT NULL`);
   // One-time backfill: seed lifecycle from payment status for migrated tickets.
@@ -859,6 +861,14 @@ async function migrate() {
     ALTER TABLE expense_attachments
       ADD COLUMN IF NOT EXISTS payment_id TEXT REFERENCES expense_payments(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_exp_att_pay ON expense_attachments(payment_id) WHERE payment_id IS NOT NULL;
+
+    -- SOFT DELETE for sales, same contract as expenses: a deleted receipt keeps its
+    -- row (so it can be restored and so the trail survives), but is excluded from
+    -- EVERY read — lists, summaries, totals, exports, the GL. Money that was voided
+    -- must never turn up in a figure again.
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_at     BIGINT;
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_by     TEXT;
+    ALTER TABLE pos_sales ADD COLUMN IF NOT EXISTS deleted_reason TEXT;
 
     -- CASH AT HAND — managers/secretaries log cash handed to POS agents that must
     -- land in the company bank account. Admin reviews (SEEN) + validates at EOD,

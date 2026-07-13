@@ -177,7 +177,8 @@ export default function Sell() {
     try { setFeed((await api(scoped('/pos/recent?limit=40'))).map((r) => ({ ...r, src: 'db' }))); } catch { /* not selected / offline */ }
   }, [tenant]);
   useEffect(() => { seedFeed(); }, [seedFeed]);
-  // Testing: delete an in-app sale (GM only). Restores stock server-side.
+  // Delete an in-app sale (GM only). Soft delete: the receipt stops counting towards
+  // every total and report but is restorable for 30 days; stock is restored server-side.
   const [confirmDel, setConfirmDel] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [confirmSale, setConfirmSale] = useState(null);   // { withPrint } → review before charging

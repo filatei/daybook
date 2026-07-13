@@ -144,7 +144,7 @@ router.get('/finished', requireAuth, async (req, res) => {
     }
     // sold via POS (match by product name)
     try {
-      const sw = ['p.tenant_id=?', "p.items_json IS NOT NULL", "left(p.items_json,1)='['", 'lower(elem->>?)=lower(?)'], sa = [c.tenant_id, 'name', pr.name];
+      const sw = ['p.tenant_id=?', 'p.deleted_at IS NULL', "p.items_json IS NOT NULL", "left(p.items_json,1)='['", 'lower(elem->>?)=lower(?)'], sa = [c.tenant_id, 'name', pr.name];
       if (sb) { sw.push('p.site_id=?'); sa.push(sb); }
       for (const r of await qall(`SELECT p.site_id, COALESCE(SUM((elem->>'qty')::numeric),0) total, COALESCE(SUM(CASE WHEN p.sale_date BETWEEN ? AND ? THEN (elem->>'qty')::numeric ELSE 0 END),0) period FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem WHERE ${sw.join(' AND ')} GROUP BY p.site_id`, [from, to, ...sa])) {
         const s = touch(r.site_id); s.sold_total += Number(r.total); s.sold_period += Number(r.period);

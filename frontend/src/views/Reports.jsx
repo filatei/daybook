@@ -1311,7 +1311,9 @@ export default function Reports() {
 
   const confirmDelete = async () => {
     if (!viewOrder) return;
-    if (!await confirm({ title: `Delete order #${viewOrder.receipt_no || ''}?`, message: 'This permanently removes the sale. This cannot be undone.', confirmText: 'Delete', danger: true })) return;
+    // Soft delete: the receipt stops counting towards every total and report, but
+    // the row survives and a GM/Admin can restore it for 30 days.
+    if (!await confirm({ title: `Delete order #${viewOrder.receipt_no || ''}?`, message: 'The sale stops counting towards all totals and reports. It can be restored for 30 days.', confirmText: 'Delete', danger: true })) return;
     setBusy(true);
     try {
       await api(scoped(`/pos/sales/${viewOrder.id}`), { method: 'DELETE' });

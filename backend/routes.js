@@ -322,7 +322,7 @@ router.patch('/sites/:id', requireAuth, async (req, res) => {
 
 // Errant Postgres orders already imported before the quarantine rule existed:
 // pos_sales rows with no order number (receipt_no) or no timestamp.
-const ERRANT_POS_WHERE = '(receipt_no IS NULL OR created_at IS NULL OR sale_date IS NULL)';
+const ERRANT_POS_WHERE = 'deleted_at IS NULL AND (receipt_no IS NULL OR created_at IS NULL OR sale_date IS NULL)';
 
 router.get('/pos/errant', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const rows = await qall(
@@ -735,7 +735,7 @@ async function siteSalesBuckets(ctx, site, date) {
     } catch { /* fall through */ }
   }
   if (!orders && !cash && !pos && !transfer) {
-    const rows = await qall("SELECT payment_method, COALESCE(SUM(total),0) amt, COUNT(*) n FROM pos_sales WHERE tenant_id=? AND site_id=? AND sale_date=? GROUP BY payment_method", [ctx.tenant_id, site.id, date]);
+    const rows = await qall("SELECT payment_method, COALESCE(SUM(total),0) amt, COUNT(*) n FROM pos_sales WHERE tenant_id=? AND deleted_at IS NULL AND site_id=? AND sale_date=? GROUP BY payment_method", [ctx.tenant_id, site.id, date]);
     for (const r of rows) {
       const k = classifyMethod(r.payment_method); const amt = Number(r.amt);
       if (k === 'incentive') { incentive += amt; continue; }
@@ -803,7 +803,7 @@ async function bagDayReport(ctx, siteId, date) {
         `SELECT COALESCE(SUM((elem->>'qty')::numeric),0) total,
                 COALESCE(SUM(CASE WHEN p.sale_date=? THEN (elem->>'qty')::numeric ELSE 0 END),0) today
            FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
-          WHERE p.tenant_id=? AND p.site_id=? AND p.sale_date>=? AND p.sale_date<=?
+          WHERE p.tenant_id=? AND p.deleted_at IS NULL AND p.site_id=? AND p.sale_date>=? AND p.sale_date<=?
             AND COALESCE(p.payment_method,'') ${incentive ? '=' : '<>'} 'INCENTIVE'
             AND p.items_json IS NOT NULL AND left(p.items_json,1)='[' AND lower(elem->>'name')=lower(?)`,
         [date, ctx.tenant_id, siteId, asOf, date, pr.name]);
@@ -853,7 +853,7 @@ async function salesByProduct(ctx, siteIds, date, incentive = false) {
                 COALESCE(SUM((elem->>'qty')::numeric),0) qty,
                 COALESCE(SUM((elem->>'amount')::numeric),0) amount
            FROM pos_sales p, LATERAL jsonb_array_elements(p.items_json::jsonb) elem
-          WHERE p.tenant_id=? AND p.site_id=? AND p.sale_date=?
+          WHERE p.tenant_id=? AND p.deleted_at IS NULL AND p.site_id=? AND p.sale_date=?
             AND COALESCE(p.payment_method,'') ${incentive ? '=' : '<>'} 'INCENTIVE'
             AND p.items_json IS NOT NULL AND left(p.items_json,1)='['
           GROUP BY lower(elem->>'name')`,
@@ -921,7 +921,7 @@ async function buildGeneratedReport(ctx, date, siteArg) {
       try {
         rows = await qall(
           `SELECT COALESCE(NULLIF(TRIM(bank),''),'Unspecified') bank, COALESCE(SUM(total),0) amount
-             FROM pos_sales WHERE tenant_id=? AND site_id=? AND sale_date=? AND payment_method='POS'
+             FROM pos_sales WHERE tenant_id=? AND deleted_at IS NULL AND site_id=? AND sale_date=? AND payment_method='POS'
              GROUP BY 1`,
           [ctx.tenant_id, sid, date]);
       } catch { rows = []; }
@@ -1538,7 +1538,7 @@ async function daybookMetric(tenant_id, ctx, input) {
     case 'staff_hours': return { metric: 'staff_hours', ...(await qone(`SELECT COUNT(CASE WHEN present=1 THEN 1 END) days_present, COALESCE(SUM(hours),0) hours, COALESCE(SUM(bags_bagged),0) bags_bagged, COALESCE(SUM(bags_loaded),0) bags_loaded FROM timesheets WHERE ${base}${dateW('work_date')}`, args)) };
     case 'generators': return { metric: 'generators', rows: await qall(`SELECT name, fuel_type, capacity_kva FROM generators WHERE ${base} ORDER BY name`, args) };
     case 'generator_diesel': return { metric: 'generator_diesel', ...(await qone(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE ${base} AND type='DIESEL'${dateW('log_date')}`, args)) };
-    case 'pos_sales': return { metric: 'pos_sales', ...(await qone(`SELECT COUNT(*) sales, COALESCE(SUM(total),0) total FROM pos_sales WHERE ${base}${dateW('sale_date')}`, args)) };
+    case 'pos_sales': return { metric: 'pos_sales', ...(await qone(`SELECT COUNT(*) sales, COALESCE(SUM(total),0) total FROM pos_sales WHERE deleted_at IS NULL AND ${base}${dateW('sale_date')}`, args)) };
     default: return { error: 'unknown metric' };
   }
 }
@@ -2279,7 +2279,7 @@ router.post('/pos/sales', requireAuth, needTenant('SECRETARY'), async (req, res)
 });
 router.get('/pos/sales', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
-  const { from, to, site, source } = req.query; const where = ['p.tenant_id=?'], args = [s.ctx.tenant_id];
+  const { from, to, site, source } = req.query; const where = ['p.tenant_id=?', 'p.deleted_at IS NULL'], args = [s.ctx.tenant_id];
   if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
   if (from) { where.push('p.sale_date>=?'); args.push(from); }
   if (to) { where.push('p.sale_date<=?'); args.push(to); }
@@ -2289,17 +2289,22 @@ router.get('/pos/sales', requireAuth, async (req, res) => {
     WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT 300`, args));
 });
 router.get('/pos/sales/:id', requireAuth, async (req, res) => {
-  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=? AND deleted_at IS NULL', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
   if (!c || (siteBound(c) && sale.site_id && sale.site_id !== c.site_id)) return res.status(404).json({ error: 'not found' });
   res.json({ ...sale, items: J(sale.items_json, []), tenant: await tenantById(sale.tenant_id), site: sale.site_id ? await siteById(sale.site_id) : null });
 });
 
-// Delete a sale (GM/Admin) — used during testing.  Restores tracked stock and
-// reverses inventory moves so figures stay consistent.
+// Void a sale (GM/Admin). SOFT DELETE: the receipt row stays — it just stops
+// counting. Every read of pos_sales filters `deleted_at IS NULL`, so a voided
+// receipt disappears from lists, summaries, totals, exports and the GL, and can
+// never creep back into a figure. Stock is restored and the inventory moves are
+// reversed, exactly as before. Restorable from the trash.
+const SALES_TRASH_DAYS = parseInt(process.env.SALES_TRASH_DAYS || '30', 10);
+
 router.delete('/pos/sales/:id', requireAuth, async (req, res) => {
-  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=? AND deleted_at IS NULL', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
   if (!c || !atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'only a manager can delete a sale' });
@@ -2311,10 +2316,46 @@ router.delete('/pos/sales/:id', requireAuth, async (req, res) => {
     if (p && p.track_stock) await qrun('UPDATE products SET stock_qty=stock_qty+? WHERE id=?', [+l.qty || 0, l.product_id]);
   }
   await qrun('DELETE FROM inventory_moves WHERE tenant_id=? AND ref=?', [sale.tenant_id, 'receipt#' + sale.receipt_no]);
-  await qrun('DELETE FROM pos_sales WHERE id=?', [sale.id]);
-  audit(sale.tenant_id, req.user.id, 'DELETE', 'pos_sale', sale.id, { receipt_no: sale.receipt_no, total: sale.total });
+  const reason = (req.body && req.body.reason ? String(req.body.reason) : '').trim().slice(0, 500) || null;
+  await qrun('UPDATE pos_sales SET deleted_at=?, deleted_by=?, deleted_reason=? WHERE id=?',
+    [Math.floor(Date.now() / 1000), req.user.id, reason, sale.id]);
+  audit(sale.tenant_id, req.user.id, 'DELETE', 'pos_sale', sale.id,
+    { receipt_no: sale.receipt_no, total: sale.total, sale_date: sale.sale_date, customer: sale.customer_name, reason });
   emitEvent(sale.tenant_id, sale.site_id, 'sale.deleted', { sale_id: sale.id, receipt_no: sale.receipt_no });
   res.json({ ok: true });
+});
+
+// Recently deleted sales (GM/Admin) — the void trail, restorable for 30 days.
+router.get('/pos/sales-deleted', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) => {
+  const cutoff = Math.floor(Date.now() / 1000) - SALES_TRASH_DAYS * 86400;
+  const rows = await qall(
+    `SELECT p.id, p.receipt_no, p.sale_date, p.customer_name, p.total, p.payment_method, p.items_json,
+            p.deleted_at, p.deleted_reason, s.name site_name, u.name deleted_by_name
+       FROM pos_sales p
+       LEFT JOIN sites s ON s.id=p.site_id
+       LEFT JOIN users u ON u.id=p.deleted_by
+      WHERE p.tenant_id=? AND p.deleted_at IS NOT NULL AND p.deleted_at>=?
+      ORDER BY p.deleted_at DESC LIMIT 200`, [req.ctx.tenant_id, cutoff]);
+  res.json(rows.map((r) => ({ ...r, items: J(r.items_json, []) })));
+});
+
+// Restore a voided sale (GM/Admin) — puts the receipt back and takes the stock
+// out again, so the books and the shelves agree.
+router.post('/pos/sales/:id/restore', requireAuth, async (req, res) => {
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  if (!sale) return res.status(404).json({ error: 'not found' });
+  if (!sale.deleted_at) return res.status(409).json({ error: 'this sale is not deleted' });
+  const c = await contextFor(req.user, sale.tenant_id);
+  if (!c || !atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'only a manager can restore a sale' });
+  // Re-consume the stock we handed back when the sale was voided.
+  for (const l of J(sale.items_json, [])) {
+    if (!l.product_id) continue;
+    const p = await qone('SELECT track_stock FROM products WHERE id=?', [l.product_id]);
+    if (p && p.track_stock) await qrun('UPDATE products SET stock_qty=stock_qty-? WHERE id=?', [+l.qty || 0, l.product_id]);
+  }
+  await qrun('UPDATE pos_sales SET deleted_at=NULL, deleted_by=NULL, deleted_reason=NULL WHERE id=?', [sale.id]);
+  audit(sale.tenant_id, req.user.id, 'RESTORE', 'pos_sale', sale.id, { receipt_no: sale.receipt_no, total: sale.total });
+  res.json({ ok: true, id: sale.id });
 });
 
 // Gate: look up receipt by number (for gate staff to verify before releasing vehicle)
@@ -2326,7 +2367,7 @@ router.get('/pos/gate/:receiptNo', requireAuth, async (req, res) => {
   const sale = await qone(
     `SELECT p.*, s.name site_name FROM pos_sales p
      LEFT JOIN sites s ON s.id = p.site_id
-     WHERE p.tenant_id=? AND p.receipt_no=?
+     WHERE p.tenant_id=? AND p.deleted_at IS NULL AND p.receipt_no=?
      ORDER BY p.created_at DESC LIMIT 1`,
     [s.ctx.tenant_id, rn],
   );
@@ -2336,7 +2377,7 @@ router.get('/pos/gate/:receiptNo', requireAuth, async (req, res) => {
 
 // Gate: mark sale as exited (truck/customer has left the premises)
 router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
-  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=? AND deleted_at IS NULL', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
   // Gateman / Security release goods; Managers+ may also.  Supervisors only load.
@@ -2353,7 +2394,7 @@ router.post('/pos/sales/:id/exit', requireAuth, async (req, res) => {
 
 // Loading point: mark order as loaded (goods handed to customer/truck)
 router.post('/pos/sales/:id/loaded', requireAuth, async (req, res) => {
-  const sale = await qone('SELECT * FROM pos_sales WHERE id=?', [req.params.id]);
+  const sale = await qone('SELECT * FROM pos_sales WHERE id=? AND deleted_at IS NULL', [req.params.id]);
   if (!sale) return res.status(404).json({ error: 'not found' });
   const c = await contextFor(req.user, sale.tenant_id);
   // Supervisors mark goods loaded; Managers+ may also.  Gatemen only release.
@@ -2371,7 +2412,7 @@ router.post('/pos/sales/:id/loaded', requireAuth, async (req, res) => {
 router.get('/pos/summary', requireAuth, async (req, res) => {
   const s = await scope(req); if (s.error || !s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const date = req.query.date; if (!date) return res.status(400).json({ error: 'date required' });
-  const where = ['tenant_id=?', 'sale_date=?'], args = [s.ctx.tenant_id, date];
+  const where = ['tenant_id=?', 'deleted_at IS NULL', 'sale_date=?'], args = [s.ctx.tenant_id, date];
   if (siteBound(s.ctx)) { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
   const rows = await qall(`SELECT * FROM pos_sales WHERE ${where.join(' AND ')}`, args);
   const pay = {}; const prod = {}; let total = 0, orders = 0, incentive = 0;
@@ -2437,7 +2478,7 @@ router.get('/pos/range', requireAuth, async (req, res) => {
     } catch (e) { /* fall through to the pos_sales snapshot on any source error */ }
   }
 
-  const where = ['tenant_id=?'], args = [s.ctx.tenant_id];
+  const where = ['tenant_id=?', 'deleted_at IS NULL'], args = [s.ctx.tenant_id];
   if (siteBound(s.ctx)) { where.push('site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('site_id=?'); args.push(site); }
   if (from) { where.push('sale_date>=?'); args.push(from); }
   if (to) { where.push('sale_date<=?'); args.push(to); }
@@ -2491,7 +2532,7 @@ router.get('/pos/range', requireAuth, async (req, res) => {
 // ── Excel exports (sales + customers) ────────────────────────────────────────
 // Build the native pos_sales WHERE clause for the caller's workspace + filters.
 function salesScopeWhere(ctx, q) {
-  const where = ['tenant_id=?'], args = [ctx.tenant_id];
+  const where = ['tenant_id=?', 'deleted_at IS NULL'], args = [ctx.tenant_id];
   if (siteBound(ctx)) { where.push('site_id=?'); args.push(ctx.site_id); }
   else if (q.site) { where.push('site_id=?'); args.push(q.site); }
   if (q.from) { where.push('sale_date>=?'); args.push(q.from); }
@@ -2588,7 +2629,7 @@ router.get('/pos/recent', requireAuth, async (req, res) => {
       return res.json(await sales.recentOrders({ sites, date, limit }));
     } catch (e) { /* fall through to pos_sales */ }
   }
-  const where = ['p.tenant_id=?', 'p.sale_date=?'], args = [s.ctx.tenant_id, date];
+  const where = ['p.tenant_id=?', 'p.deleted_at IS NULL', 'p.sale_date=?'], args = [s.ctx.tenant_id, date];
   if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); }
   const rows = await qall(`SELECT p.id, p.receipt_no, p.total amount, p.payment_method, p.customer_name customer, s.name site, p.created_at, p.sale_date
     FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE ${where.join(' AND ')} ORDER BY p.created_at DESC LIMIT ${limit}`, args);
@@ -2611,7 +2652,7 @@ router.get('/pos/orders', requireAuth, async (req, res) => {
       return res.json(await sales.listOrders({ from, to, sites, method, bank, terminal, product, customer, limit: 800 }));
     } catch (e) { /* fall through */ }
   }
-  const where = ['p.tenant_id=?', 'p.sale_date>=?', 'p.sale_date<=?'], args = [s.ctx.tenant_id, from, to];
+  const where = ['p.tenant_id=?', 'p.deleted_at IS NULL', 'p.sale_date>=?', 'p.sale_date<=?'], args = [s.ctx.tenant_id, from, to];
   if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
   if (method === 'CASH') { where.push("p.payment_method='CASH'"); }
   else if (method === 'NONCASH') { where.push("p.payment_method NOT IN ('CASH','INCENTIVE')"); }
@@ -2646,7 +2687,7 @@ router.get('/pos/banks', requireAuth, async (req, res) => {
       return res.json(await sales.bankBreakdown({ from, to, sites }));
     } catch (e) { /* fall through */ }
   }
-  const where = ['p.tenant_id=?', 'p.sale_date>=?', 'p.sale_date<=?', "p.payment_method NOT IN ('CASH','INCENTIVE')"], args = [s.ctx.tenant_id, from, to];
+  const where = ['p.tenant_id=?', 'p.deleted_at IS NULL', 'p.sale_date>=?', 'p.sale_date<=?', "p.payment_method NOT IN ('CASH','INCENTIVE')"], args = [s.ctx.tenant_id, from, to];
   if (siteBound(s.ctx)) { where.push('p.site_id=?'); args.push(s.ctx.site_id); } else if (site) { where.push('p.site_id=?'); args.push(site); }
   const rows = await qall(`SELECT p.payment_method, UPPER(COALESCE(p.bank,'')) bank, UPPER(COALESCE(p.terminal,'')) terminal,
       COALESCE(SUM(p.total),0) amount, COUNT(*) orders
@@ -2670,7 +2711,7 @@ router.get('/pos/orders/:id', requireAuth, async (req, res) => {
     } catch (e) { /* fall through */ }
   }
   const r = await qone(`SELECT p.id, p.receipt_no order_no, p.total amount, p.payment_method, p.customer_name customer, p.items_json, p.bank, p.terminal, s.name site, u.name entry_by, p.created_at, p.sale_date, p.tenant_id, p.site_id
-    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE p.id=?`, [req.params.id]);
+    FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id LEFT JOIN users u ON u.id=p.sold_by WHERE p.id=? AND p.deleted_at IS NULL`, [req.params.id]);
   if (!r || r.tenant_id !== s.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (siteBound(s.ctx) && r.site_id && r.site_id !== s.ctx.site_id) return res.status(404).json({ error: 'not found' });
   res.json({ id: String(r.id), order_no: r.order_no, site: r.site || '', customer: r.customer || null, entry_by: r.entry_by || null, amount: Number(r.amount), payment_method: r.payment_method, bank: r.bank || null, terminal: r.terminal || null, items: J(r.items_json, []), at: r.created_at, sale_date: r.sale_date });
@@ -2745,7 +2786,7 @@ router.get('/pos/banks', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
   const set = new Set();
   try { (await qall('SELECT DISTINCT bank FROM pos_terminals WHERE tenant_id=? AND bank IS NOT NULL', [s.ctx.tenant_id])).forEach((r) => r.bank && set.add(String(r.bank).toUpperCase())); } catch { /* table may be empty */ }
-  try { (await qall("SELECT DISTINCT bank FROM pos_sales WHERE tenant_id=? AND bank IS NOT NULL AND bank<>'' LIMIT 200", [s.ctx.tenant_id])).forEach((r) => r.bank && set.add(String(r.bank).toUpperCase())); } catch { /* ignore */ }
+  try { (await qall("SELECT DISTINCT bank FROM pos_sales WHERE tenant_id=? AND deleted_at IS NULL AND bank IS NOT NULL AND bank<>'' LIMIT 200", [s.ctx.tenant_id])).forEach((r) => r.bank && set.add(String(r.bank).toUpperCase())); } catch { /* ignore */ }
   COMMON_BANKS.forEach((b) => set.add(b));
   res.json([...set].sort());
 });
@@ -2997,14 +3038,14 @@ router.get('/group/sales.xlsx', requireAuth, async (req, res) => {
   const dayMap = {}, methodMap = {}, prodMap = {}; const siteRows = [], custRows = [], detailRows = [];
   const itemsText = (j) => J(j, []).map((it) => `${it.name || '?'}×${it.qty || 0}`).join(', ');
   for (const t of tenants) {
-    const W = `WHERE tenant_id=?${dateW}`; const Wn = W + " AND payment_method<>'INCENTIVE'"; const a = dArgs(t.id);
+    const W = `WHERE tenant_id=? AND deleted_at IS NULL${dateW}`; const Wn = W + " AND payment_method<>'INCENTIVE'"; const a = dArgs(t.id);
     const tot = await qone(`SELECT COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN total ELSE 0 END),0) sales, SUM(CASE WHEN payment_method<>'INCENTIVE' THEN 1 ELSE 0 END) orders, COALESCE(SUM(CASE WHEN payment_method='CASH' THEN total ELSE 0 END),0) cash, COALESCE(SUM(CASE WHEN payment_method NOT IN ('CASH','INCENTIVE') THEN total ELSE 0 END),0) transfer, COALESCE(SUM(CASE WHEN payment_method='INCENTIVE' THEN total ELSE 0 END),0) incentive FROM pos_sales ${W}`, a);
     tSales += Number(tot.sales); tOrders += parseInt(tot.orders, 10); tCash += Number(tot.cash); tTransfer += Number(tot.transfer); tIncentive += Number(tot.incentive);
     (await qall(`SELECT sale_date AS "day", COALESCE(SUM(total),0) sales FROM pos_sales ${Wn} GROUP BY sale_date`, a)).forEach((r) => { dayMap[r.day] = (dayMap[r.day] || 0) + Number(r.sales); });
-    (await qall(`SELECT s.name site, COALESCE(SUM(p.total),0) sales, COUNT(*) orders FROM pos_sales p JOIN sites s ON s.id=p.site_id WHERE p.tenant_id=?${dateW.replace(/sale_date/g, 'p.sale_date')} AND p.payment_method<>'INCENTIVE' GROUP BY s.id,s.name ORDER BY sales DESC`, a)).forEach((r) => siteRows.push([r.site, t.name, Number(r.sales), Number(r.orders)]));
+    (await qall(`SELECT s.name site, COALESCE(SUM(p.total),0) sales, COUNT(*) orders FROM pos_sales p JOIN sites s ON s.id=p.site_id WHERE p.tenant_id=? AND p.deleted_at IS NULL${dateW.replace(/sale_date/g, 'p.sale_date')} AND p.payment_method<>'INCENTIVE' GROUP BY s.id,s.name ORDER BY sales DESC`, a)).forEach((r) => siteRows.push([r.site, t.name, Number(r.sales), Number(r.orders)]));
     (await qall(`SELECT COALESCE(payment_method,'—') method, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${W} GROUP BY payment_method`, a)).forEach((r) => { (methodMap[r.method] = methodMap[r.method] || { sales: 0, orders: 0 }); methodMap[r.method].sales += Number(r.sales); methodMap[r.method].orders += Number(r.orders); });
     (await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, a)).forEach((r) => custRows.push([r.customer, t.name, Number(r.sales), Number(r.orders)]));
-    const det = await qall(`SELECT p.sale_date, p.receipt_no, s.name site, p.customer_name, p.items_json, p.total, p.payment_method, p.status FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE p.tenant_id=?${dateW.replace(/sale_date/g, 'p.sale_date')} ORDER BY p.sale_date, p.receipt_no`, a);
+    const det = await qall(`SELECT p.sale_date, p.receipt_no, s.name site, p.customer_name, p.items_json, p.total, p.payment_method, p.status FROM pos_sales p LEFT JOIN sites s ON s.id=p.site_id WHERE p.tenant_id=? AND p.deleted_at IS NULL${dateW.replace(/sale_date/g, 'p.sale_date')} ORDER BY p.sale_date, p.receipt_no`, a);
     for (const r of det) {
       detailRows.push([r.sale_date, r.receipt_no, r.site || '', t.name, r.customer_name || 'Walk-in', itemsText(r.items_json), Number(r.total), r.payment_method || '', r.status || '']);
       for (const it of J(r.items_json, [])) { if (String(r.payment_method).toUpperCase() === 'INCENTIVE') continue; const k = (it.name || 'Unknown').trim() || 'Unknown'; prodMap[k] = prodMap[k] || { qty: 0, sales: 0 }; prodMap[k].qty += Number(it.qty) || 0; prodMap[k].sales += Number(it.amount) || 0; }
@@ -3034,7 +3075,7 @@ router.get('/group/customers.xlsx', requireAuth, async (req, res) => {
   const cust = "COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in')";
   const daily = [], monthly = [], overall = [];
   for (const t of tenants) {
-    const Wn = `WHERE tenant_id=?${dateW} AND payment_method<>'INCENTIVE'`; const a = dArgs(t.id);
+    const Wn = `WHERE tenant_id=? AND deleted_at IS NULL${dateW} AND payment_method<>'INCENTIVE'`; const a = dArgs(t.id);
     (await qall(`SELECT ${cust} customer, sale_date, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1, sale_date ORDER BY customer, sale_date`, a)).forEach((r) => daily.push([r.customer, t.name, r.sale_date, Number(r.sales), Number(r.orders)]));
     (await qall(`SELECT ${cust} customer, SUBSTR(sale_date,1,7) AS "month", COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1, SUBSTR(sale_date,1,7) ORDER BY customer, SUBSTR(sale_date,1,7)`, a)).forEach((r) => monthly.push([r.customer, t.name, r.month, Number(r.sales), Number(r.orders)]));
     (await qall(`SELECT ${cust} customer, COALESCE(SUM(total),0) sales, COUNT(*) orders FROM pos_sales ${Wn} GROUP BY 1 ORDER BY sales DESC`, a)).forEach((r) => overall.push([r.customer, t.name, Number(r.sales), Number(r.orders)]));
@@ -3065,13 +3106,13 @@ router.get('/accounts/year-statement.xlsx', requireAuth, needTenant('SNR_ACCOUNT
       `SELECT COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN total ELSE 0 END),0) net,
               COALESCE(SUM(CASE WHEN payment_method='INCENTIVE' THEN total ELSE 0 END),0) incentive,
               COALESCE(SUM(CASE WHEN payment_method<>'INCENTIVE' THEN 1 ELSE 0 END),0) orders
-         FROM pos_sales WHERE tenant_id=? AND sale_date>=? AND sale_date<=?`, [tid, y0, y1]);
+         FROM pos_sales WHERE tenant_id=? AND deleted_at IS NULL AND sale_date>=? AND sale_date<=?`, [tid, y0, y1]);
     const byMonth = await qall(
       `SELECT SUBSTR(sale_date,1,7) AS "mon", COALESCE(SUM(total),0) net
-         FROM pos_sales WHERE tenant_id=? AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE'
+         FROM pos_sales WHERE tenant_id=? AND deleted_at IS NULL AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE'
          GROUP BY 1 ORDER BY 1`, [tid, y0, y1]);
     // Revenue by product (items_json is TEXT — aggregate in JS).
-    const prodRows = await qall(`SELECT items_json FROM pos_sales WHERE tenant_id=? AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE'`, [tid, y0, y1]);
+    const prodRows = await qall(`SELECT items_json FROM pos_sales WHERE tenant_id=? AND deleted_at IS NULL AND sale_date>=? AND sale_date<=? AND payment_method<>'INCENTIVE'`, [tid, y0, y1]);
     const prod = {};
     for (const r of prodRows) for (const it of J(r.items_json, [])) { const k = (it.name || 'Unknown').trim() || 'Unknown'; prod[k] = prod[k] || { qty: 0, amount: 0 }; prod[k].qty += Number(it.qty) || 0; prod[k].amount += Number(it.amount) || 0; }
     const byProduct = Object.entries(prod).map(([name, v]) => ({ name, qty: v.qty, amount: v.amount })).sort((a, b) => b.amount - a.amount);

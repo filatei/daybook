@@ -83,11 +83,12 @@ jobs:
           psql -h localhost -U daybook -d postgres -c 'DROP DATABASE IF EXISTS daybook_upgrade'
           psql -h localhost -U daybook -d postgres -c 'CREATE DATABASE daybook_upgrade'
 
-          # Old db.js, run standalone against the empty upgrade DB.
-          rm -rf /tmp/base && mkdir -p /tmp/base
-          git archive "$BASE" backend/db.js | tar -x -C /tmp/base
+          # Old db.js. Extract it INSIDE the workspace: Node resolves `pg` by walking
+          # up from the file, so a copy in /tmp would never find ./node_modules.
+          rm -rf .migrate-base && mkdir -p .migrate-base
+          git archive "$BASE" backend/db.js | tar -x -C .migrate-base
           DATABASE_URL=postgres://daybook:ci-password@localhost:5432/daybook_upgrade \
-            DB_MODULE=/tmp/base/backend/db.js \
+            DB_MODULE="$GITHUB_WORKSPACE/.migrate-base/backend/db.js" \
             node scripts/migrate-check.js --label "old-schema"
 
           # Now this commit's migration, on top of that older schema.

@@ -18,6 +18,7 @@ module.exports = [
       'infra/**', 'docs/**', 'scripts/**', 'backend/data/**',
       'frontend/app.js',   // legacy pre-React single-file SPA (superseded by frontend/src)
       '**/*.min.js', 'eslint.config.js',
+      '.migrate-base/**',   // CI scratch: an old copy of db.js, not our code to lint
     ],
   },
 

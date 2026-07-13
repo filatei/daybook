@@ -6,3 +6,6 @@ uploads/
 *.log
 .DS_Store
 npm-debug.log*
+
+# CI scratch: previous release's db.js, extracted for the migration upgrade check
+.migrate-base/

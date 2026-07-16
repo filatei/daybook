@@ -104,9 +104,30 @@ router.post('/', requireAuth, upload.single('file'), async (req, res) => {
 router.get('/:id', requireAuth, async (req, res) => {
   const a = await cashAccess(req, req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
-  const site = a.cash.site_id ? await qone('SELECT name FROM sites WHERE id=?', [a.cash.site_id]) : null;
+  const site = a.cash.site_id ? await qone('SELECT name, code FROM sites WHERE id=?', [a.cash.site_id]) : null;
   const receipts = await qall('SELECT id,note,file_name,mime,size,created_at FROM cash_attachments WHERE cash_id=? ORDER BY created_at', [req.params.id]);
-  res.json({ ...a.cash, site_name: site && site.name, receipts: receipts.map((r) => ({ ...r, has_file: !!r.file_name })) });
+
+  // Resolve the audit trail (recorded / seen / validated) from user ids to names,
+  // so the detail screen can show WHO did what and when.
+  const ids = [...new Set([a.cash.created_by, a.cash.seen_by, a.cash.validated_by].filter(Boolean))];
+  const people = ids.length
+    ? await qall(`SELECT id, name, email FROM users WHERE id IN (${ids.map(() => '?').join(',')})`, ids)
+    : [];
+  const nameOf = (id) => {
+    if (!id) return null;
+    const u = people.find((p) => p.id === id);
+    return u ? (u.name || u.email) : null;
+  };
+
+  res.json({
+    ...a.cash,
+    site_name: site && site.name,
+    site_code: site && site.code,
+    created_by_name: nameOf(a.cash.created_by),
+    seen_by_name: nameOf(a.cash.seen_by),
+    validated_by_name: nameOf(a.cash.validated_by),
+    receipts: receipts.map((r) => ({ ...r, has_file: !!r.file_name })),
+  });
 });
 
 // ── Receipts: anyone with access can attach ────────────────────────────────────

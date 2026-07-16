@@ -10,10 +10,17 @@ const ST = {
   VALIDATED: { bg: '#dcfce7', fg: '#166534', label: 'VALIDATED' },
 };
 const when = (s) => new Date((s || 0) * 1000).toLocaleString('en-NG', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+// Day navigation — the backend already filters on ?from=&to= (defaults to today).
+const shiftDay = (d, n) => { const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
+const prettyDay = (d) => (d === today()
+  ? 'today'
+  : new Date(d + 'T00:00:00').toLocaleDateString('en-NG', { weekday: 'short', day: '2-digit', month: 'short' }));
 
 // ── Add / record a cash entry ───────────────────────────────────────────────
-function CashForm({ sites, accounts, onSave, onClose }) {
+function CashForm({ sites, accounts, date, onSave, onClose }) {
   const { toast, tenant, confirm } = useStore();
+  const day = date || today();
+  const backdated = day !== today();
   const [f, setF] = useState({ amount: '', depositor: '', site_id: sites[0]?.id || '', payee_account: '', memo: '' });
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -21,11 +28,16 @@ function CashForm({ sites, accounts, onSave, onClose }) {
 
   const submit = async () => {
     if (!(parseFloat(f.amount) > 0)) return toast('Enter an amount', 'err');
-    if (!await confirm({ title: 'Record this cash deposit?', message: `${ngn(parseFloat(f.amount) || 0)}${f.payee_account ? ` → ${f.payee_account}` : ''}`, confirmText: 'Record' })) return;
+    if (!await confirm({
+      title: 'Record this cash deposit?',
+      message: `${ngn(parseFloat(f.amount) || 0)}${f.payee_account ? ` → ${f.payee_account}` : ''}${backdated ? `\n\nDated ${prettyDay(day)} (not today).` : ''}`,
+      confirmText: 'Record',
+    })) return;
     setBusy(true);
     try {
       const fd = new FormData();
       fd.append('amount', f.amount);
+      fd.append('deposit_date', day);   // record into the day being viewed
       if (f.depositor) fd.append('depositor', f.depositor);
       if (f.site_id) fd.append('site_id', f.site_id);
       if (f.payee_account) fd.append('payee_account', f.payee_account);
@@ -45,6 +57,11 @@ function CashForm({ sites, accounts, onSave, onClose }) {
       <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 10px' }}>
         Cash collected from customers that staff paid into the bank, or handed to a POS agent who transferred it to our account. Attach the transfer/deposit receipt.
       </p>
+      {backdated && (
+        <div style={{ fontSize: 12.5, fontWeight: 700, background: '#fef3c7', color: '#92400e', borderRadius: 8, padding: '8px 10px', margin: '0 0 10px' }}>
+          Dating this deposit <strong>{prettyDay(day)}</strong> — the day you’re viewing, not today.
+        </div>
+      )}
       <label className="fl">Amount</label>
       <input type="number" inputMode="decimal" className="input" value={f.amount} onChange={(e) => set('amount', e.target.value)} placeholder="0" autoFocus />
       <label className="fl">Depositor / agent</label>
@@ -159,13 +176,45 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
         </div>
       )}
 
-      <div style={{ background: 'var(--bg)', borderRadius: 10, padding: 12, margin: '10px 0' }}>
-        {[['Amount', ngn(d.amount)], ['Date', d.deposit_date], ['Site', d.site_name || '—'], ['Depositor', d.depositor || '—'], ['Payee account', d.payee_account || '—']].map(([k, v]) => (
-          <div key={k} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 14 }}>
-            <span style={{ color: 'var(--muted)' }}>{k}</span><span style={{ fontWeight: 700 }}>{v}</span>
+      {/* Amount + day */}
+      <div style={{ background: 'var(--bg)', borderRadius: 10, padding: 14, margin: '10px 0', textAlign: 'center' }}>
+        <div style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 800, letterSpacing: 1 }}>AMOUNT</div>
+        <div style={{ fontSize: 28, fontWeight: 800, marginTop: 2 }}>{ngn(d.amount)}</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+          {d.deposit_date}{d.deposit_date !== today() ? '' : ' · today'}
+        </div>
+      </div>
+
+      {/* Where it came from / went to */}
+      <div style={{ background: 'var(--bg)', borderRadius: 10, padding: 12, marginBottom: 10 }}>
+        {[
+          ['Site', d.site_name ? `${d.site_name}${d.site_code ? ` (${d.site_code})` : ''}` : '—'],
+          ['Depositor / sender', d.depositor || '—'],
+          ['Payee account', d.payee_account || '—'],
+          ['Note / reference', d.memo || '—'],
+        ].map(([k, v]) => (
+          <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '4px 0', fontSize: 14 }}>
+            <span style={{ color: 'var(--muted)', whiteSpace: 'nowrap' }}>{k}</span>
+            <span style={{ fontWeight: 700, textAlign: 'right', wordBreak: 'break-word' }}>{v}</span>
           </div>
         ))}
-        {d.memo && <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 6 }}>{d.memo}</div>}
+      </div>
+
+      {/* Audit trail — who recorded / reviewed / validated, and when */}
+      <div style={{ background: 'var(--bg)', borderRadius: 10, padding: 12, marginBottom: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>Trail</div>
+        {[
+          ['Recorded', d.created_by_name, d.created_at],
+          ['Seen', d.seen_by_name, d.seen_at],
+          ['Validated', d.validated_by_name, d.validated_at],
+        ].map(([k, who, at]) => (
+          <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '4px 0', fontSize: 13 }}>
+            <span style={{ color: 'var(--muted)', whiteSpace: 'nowrap' }}>{k}</span>
+            <span style={{ fontWeight: 600, textAlign: 'right' }}>
+              {at ? <>{who || 'someone'} <span style={{ color: 'var(--muted)', fontWeight: 500 }}>· {when(at)}</span></> : <span style={{ color: 'var(--muted)', fontWeight: 500 }}>—</span>}
+            </span>
+          </div>
+        ))}
       </div>
 
       <div style={{ borderTop: '2px solid var(--line)', paddingTop: 10 }}>
@@ -198,10 +247,12 @@ export default function Cash() {
   const isAdminish = role && atLeast(role, 'SNR_ACCOUNTANT');
   const [data, setData] = useState({ rows: [], total: 0 });
   const [accounts, setAccounts] = useState([]);
-  const [cashSales, setCashSales] = useState(null);   // today's CASH collected (reconcile)
+  const [cashSales, setCashSales] = useState(null);   // selected day's CASH collected (reconcile)
   const [q, setQ] = useState('');
+  const [date, setDate] = useState(today());          // the day being viewed
   const [loading, setLoading] = useState(true);
   const groupKey = groupTenants.map((t) => t.id).join(',');
+  const isToday = date === today();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -209,28 +260,28 @@ export default function Cash() {
       if (isGroup) {
         // Combined deposits across the member workspaces (read + review/validate).
         const parts = await Promise.all(groupTenants.map(async (t) => {
-          try { const r = await api(`/cash?tenant=${t.id}`); return (r.rows || []).map((row) => ({ ...row, tenant_name: t.name })); }
+          try { const r = await api(`/cash?tenant=${t.id}&from=${date}&to=${date}`); return (r.rows || []).map((row) => ({ ...row, tenant_name: t.name })); }
           catch { return []; }
         }));
         const rows2 = parts.flat().sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
         setData({ rows: rows2, total: rows2.reduce((a, r) => a + Number(r.amount || 0), 0) });
       } else {
-        setData(await api(scoped('/cash')));
+        setData(await api(scoped(`/cash?from=${date}&to=${date}`)));
       }
     } catch { setData({ rows: [], total: 0 }); }
     setLoading(false);
-  }, [tenant, isGroup, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tenant, isGroup, groupKey, date]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     if (isGroup) return;   // recording + per-site reconcile happen inside a workspace
     api(scoped('/bank-accounts')).then((a) => setAccounts(Array.isArray(a) ? a.map((x) => x.label).filter(Boolean) : [])).catch(() => {});
     if (isAdminish) {
-      const t = today();
-      api(scoped(`/pos/range?from=${t}&to=${t}`)).then((r) => setCashSales(r?.totals?.cash ?? null)).catch(() => setCashSales(null));
+      // Reconcile against the SAME day being viewed, so the variance always matches.
+      api(scoped(`/pos/range?from=${date}&to=${date}`)).then((r) => setCashSales(r?.totals?.cash ?? null)).catch(() => setCashSales(null));
     }
-  }, [tenant, isAdminish, isGroup]);
+  }, [tenant, isAdminish, isGroup, date]);
 
-  const openForm = () => openModal(<CashForm sites={sites} accounts={accounts} onSave={load} onClose={closeModal} />, { guard: true });
+  const openForm = () => openModal(<CashForm sites={sites} accounts={accounts} date={date} onSave={load} onClose={closeModal} />, { guard: true });
   const openDetail = (row) => openModal(<CashDetail id={row.id} tenantId={row.tenant_id} onChanged={load} onClose={closeModal} />);
 
   const rows = (data.rows || []).filter((r) => {
@@ -249,8 +300,33 @@ export default function Cash() {
         </div>
       )}
 
+      {/* Day picker — pick any past day to see that day's deposits. */}
+      <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', marginBottom: 12 }}>
+        <button className="btn btn-ghost" style={{ width: 'auto', padding: '6px 10px' }} onClick={() => setDate((d) => shiftDay(d, -1))} title="Previous day">‹</button>
+        <input
+          type="date"
+          className="input"
+          value={date}
+          max={today()}
+          onChange={(e) => setDate(e.target.value || today())}
+          style={{ flex: 1, margin: 0, textAlign: 'center' }}
+        />
+        <button
+          className="btn btn-ghost"
+          style={{ width: 'auto', padding: '6px 10px', opacity: isToday ? 0.4 : 1 }}
+          disabled={isToday}
+          onClick={() => setDate((d) => shiftDay(d, 1))}
+          title="Next day"
+        >›</button>
+        {!isToday && (
+          <button className="btn btn-ghost" style={{ width: 'auto', padding: '6px 10px', fontSize: 12 }} onClick={() => setDate(today())}>Today</button>
+        )}
+      </div>
+
       <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
-        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{isGroup ? 'Cash deposited (all sites)' : 'Cash deposited today'}</span>
+        <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+          {isGroup ? `Cash deposited ${prettyDay(date)} (all sites)` : `Cash deposited ${prettyDay(date)}`}
+        </span>
         <span style={{ fontWeight: 800, fontSize: 20 }}>{ngn(data.total)}</span>
       </div>
 
@@ -270,7 +346,7 @@ export default function Cash() {
       {loading ? (
         <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : rows.length === 0 ? (
-        <div className="empty"><div className="ic">💵</div><p>No cash entries today</p></div>
+        <div className="empty"><div className="ic">💵</div><p>No cash entries {isToday ? 'today' : `on ${prettyDay(date)}`}</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {rows.map((r) => {

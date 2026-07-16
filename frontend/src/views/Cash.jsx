@@ -115,10 +115,18 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
   }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
-  const act = async (path2, body, ok) => {
+  // closeAfter: validating is the terminal action — drop back to the list rather
+  // than leaving a now-read-only modal open. (Return early: onClose() unmounts us,
+  // so touching state afterwards would warn.)
+  const act = async (path2, body, ok, closeAfter = false) => {
     setBusy(true);
-    try { await api(ts(`/cash/${id}/${path2}`), { method: 'POST', body }); toast(ok, 'ok'); load(); onChanged && onChanged(); }
-    catch (e) { toast(e.message || 'Failed', 'err'); }
+    try {
+      await api(ts(`/cash/${id}/${path2}`), { method: 'POST', body });
+      toast(ok, 'ok');
+      onChanged && onChanged();
+      if (closeAfter) { onClose(); return; }
+      load();
+    } catch (e) { toast(e.message || 'Failed', 'err'); }
     setBusy(false);
   };
   const addReceipt = async () => {
@@ -171,7 +179,7 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
               : <button className="btn btn-ghost" style={{ flex: 1 }} disabled={busy} onClick={() => act('seen', { seen: true }, 'Marked seen ✓')}>✓ Mark seen</button>
           )}
           {canValidate && d.status !== 'VALIDATED' && (
-            <button className="btn" style={{ flex: 1 }} disabled={busy} onClick={() => act('validate', {}, 'Validated ✓')}>✓ Validate</button>
+            <button className="btn" style={{ flex: 1 }} disabled={busy} onClick={() => act('validate', {}, 'Validated ✓', true)}>✓ Validate</button>
           )}
         </div>
       )}

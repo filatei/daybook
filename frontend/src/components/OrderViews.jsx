@@ -153,12 +153,43 @@ export function BankBreakdownModal({ title, query, tenants, onClose, onPick }) {
   );
 }
 
+// One order line. Module-level (stable identity → no remount/flicker).
+function OrderRow({ o, onPick }) {
+  return (
+    <button onClick={() => onPick(o)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 700 }}>{o.order_no ? `#${o.order_no}` : '—'} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer || 'Walk-in'}</span></div>
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o.entry_by ? ` · ${o.entry_by}` : ''}{o.at ? ` · ${fmt(o.at)}` : (o.sale_date ? ` · ${fmtDate(o.at, o.sale_date)}` : ' · no timestamp')}</div>
+      </div>
+      <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.amount)}</div>
+      <span style={{ color: 'var(--muted)' }}>›</span>
+    </button>
+  );
+}
+
+// Group orders by site (and by workspace in the Group view, so two tenants with a
+// same-named site never merge). Biggest site first.
+function groupBySite(list) {
+  const m = new Map();
+  for (const o of list) {
+    const site = o.site || 'Unspecified site';
+    const key = o._tenant ? `${site} · ${o._tenant}` : site;
+    if (!m.has(key)) m.set(key, { key, site, tenant: o._tenant || null, orders: [], amount: 0 });
+    const g = m.get(key);
+    g.orders.push(o);
+    g.amount += Number(o.amount) || 0;
+  }
+  return [...m.values()].sort((a, b) => b.amount - a.amount);
+}
+
 // Orders list for a filter (site/method/date range) → click a row for detail.
+// Orders are folded by site (FAQ-style): tap a site to expand its orders.
 export function OrdersListModal({ title, query, tenants, onClose }) {
   const [rows, setRows] = useState(null);
   const [sel, setSel] = useState(null);
   const [q, setQ] = useState('');
   const [showUndated, setShowUndated] = useState(false);   // hide timestamp-less orders by default
+  const [openSites, setOpenSites] = useState({});          // site fold state (FAQ-style)
   // Group view → fetch each member workspace's orders and merge (tag the tenant).
   const tkey = Array.isArray(tenants) ? tenants.map((t) => t.id).join(',') : '';
   useEffect(() => {
@@ -182,6 +213,11 @@ export function OrdersListModal({ title, query, tenants, onClose }) {
       || (o.entry_by || '').toLowerCase().includes(needle);
   });
 
+  const groups = groupBySite(shown);
+  // Folded by default. Auto-expand while searching (so matches aren't hidden) and
+  // when there's only one site — nothing to choose between.
+  const isOpen = (g) => !!needle || groups.length === 1 || !!openSites[g.key];
+
   return (
     <>
       <Backdrop onClose={onClose}>
@@ -195,17 +231,36 @@ export function OrdersListModal({ title, query, tenants, onClose }) {
           : all.length === 0 ? <div className="empty"><div className="ic">🧾</div><p>No orders</p></div>
             : (
               <>
-                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>{shown.length} shown</div>
-                {shown.map((o) => (
-                  <button key={o.id} onClick={() => setSel(o)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 700 }}>{o.order_no ? `#${o.order_no}` : '—'} <span style={{ fontWeight: 400, color: 'var(--muted)' }}>{o.customer || 'Walk-in'}</span></div>
-                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{o.payment_method}{o._tenant ? ` · ${o._tenant}` : ''}{o.entry_by ? ` · ${o.entry_by}` : ''}{o.at ? ` · ${fmt(o.at)}` : (o.sale_date ? ` · ${fmtDate(o.at, o.sale_date)}` : ' · no timestamp')}</div>
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+                  {shown.length} shown{groups.length > 1 ? ` · ${groups.length} sites` : ''}
+                </div>
+                {groups.map((g) => {
+                  const opened = isOpen(g);
+                  return (
+                    <div key={g.key}>
+                      <button
+                        onClick={() => setOpenSites((p) => ({ ...p, [g.key]: !opened }))}
+                        aria-expanded={opened}
+                        style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}
+                      >
+                        <span style={{ color: 'var(--muted)', display: 'inline-block', transform: opened ? 'rotate(90deg)' : 'none', transition: 'transform .18s' }}>›</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 800, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {g.site}
+                            {g.tenant ? <span style={{ color: 'var(--muted)', fontSize: 11, fontWeight: 600 }}> · {g.tenant}</span> : null}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--muted)' }}>{g.orders.length} order{g.orders.length > 1 ? 's' : ''}</div>
+                        </div>
+                        <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(g.amount)}</div>
+                      </button>
+                      {opened && (
+                        <div style={{ paddingLeft: 14 }}>
+                          {g.orders.map((o) => <OrderRow key={o.id} o={o} onPick={setSel} />)}
+                        </div>
+                      )}
                     </div>
-                    <div style={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(o.amount)}</div>
-                    <span style={{ color: 'var(--muted)' }}>›</span>
-                  </button>
-                ))}
+                  );
+                })}
                 {shown.length === 0 && <div className="empty"><div className="ic">🔍</div><p>No match</p></div>}
                 {undatedCount > 0 && (
                   <button className="btn btn-ghost btn-sm" style={{ marginTop: 10, width: '100%' }} onClick={() => setShowUndated((v) => !v)}>

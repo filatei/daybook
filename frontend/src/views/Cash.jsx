@@ -176,7 +176,7 @@ function CashDetail({ id, tenantId, onChanged, onClose }) {
           {canReview && d.status !== 'VALIDATED' && (
             d.status === 'SEEN'
               ? <button className="btn btn-ghost" style={{ flex: 1 }} disabled={busy} onClick={() => act('seen', { seen: false }, 'Marked not seen')}>Mark not seen</button>
-              : <button className="btn btn-ghost" style={{ flex: 1 }} disabled={busy} onClick={() => act('seen', { seen: true }, 'Marked seen ✓')}>✓ Mark seen</button>
+              : <button className="btn btn-ghost" style={{ flex: 1 }} disabled={busy} onClick={() => act('seen', { seen: true }, 'Marked seen ✓', true)}>✓ Mark seen</button>
           )}
           {canValidate && d.status !== 'VALIDATED' && (
             <button className="btn" style={{ flex: 1 }} disabled={busy} onClick={() => act('validate', {}, 'Validated ✓', true)}>✓ Validate</button>

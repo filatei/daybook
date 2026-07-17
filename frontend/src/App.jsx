@@ -183,7 +183,9 @@ function Inner() {
         <div className="ptr" style={{ height: ptr, opacity: ptr ? 1 : 0 }}>
           <span className={`ptr-ic ${refreshing || ptr >= 70 ? 'go' : ''}`}>↻</span>
         </div>
-        {isGroup && tab !== 'dashboard' && tab !== 'expenses' && tab !== 'reports' ? (
+        {/* Payroll is deliberately group-capable: it is run once for the whole
+            business (Fido + Fiafia), not per workspace. */}
+        {isGroup && !['dashboard', 'expenses', 'reports', 'payroll'].includes(tab) ? (
           <div className="empty">
             <div className="ic">🏢</div>
             <p>This section works inside a single workspace. You’re viewing the Group roll-up — switch to Fido or Fiafia (top-left) to use it.</p>

@@ -31,12 +31,39 @@ async function audit(tenant_id, user_id, action, entity, entity_id, meta) {
 }
 
 // ── helper ────────────────────────────────────────────────────────────────────
+// The Group roll-up is a SYNTHETIC workspace invented by the frontend
+// (store.jsx GROUP_ID) — there is no such row in `tenants`. Payroll is run for
+// the whole business (Fido + Fiafia together), so it is the one area that must
+// resolve it rather than 403.
+const GROUP_ID = '__group__';
+
+// Every ACTIVE tenant where this user holds minRole (superadmin: all of them).
+// Ordered by name so the anchor tenant is stable across requests — a combined
+// run is recorded against the anchor, and it must not drift between compute and
+// save, or the draft would land in a different workspace than it was previewed in.
+async function groupContexts(user, minRole) {
+  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE' ORDER BY name, id");
+  const out = [];
+  for (const t of rows) {
+    const c = await contextFor(user, t.id);
+    if (c && atLeast(c.role, minRole)) out.push(c);
+  }
+  return out;
+}
+
 // Payroll compute/config/approve is restricted to the finance tier: SNR
 // ACCOUNTANT / GENERAL MANAGER / ADMIN (rank ≥ 7). Operational routes (recording
 // production / advances) pass 'SECRETARY' explicitly to stay open to site staff.
 async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
   const tid = requestedTenant(req) || req.body?.tenant_id;
   if (!tid) { res.status(400).json({ error: 'select a workspace' }); return null; }
+  if (tid === GROUP_ID) {
+    const ctxs = await groupContexts(req.user, minRole);
+    if (!ctxs.length) { res.status(403).json({ error: 'forbidden' }); return null; }
+    // Anchor on the first tenant; `tenant_ids` carries the full payroll scope.
+    // site_id is cleared — a group run is never site-bound.
+    return { ...ctxs[0], site_id: null, group: true, tenant_ids: ctxs.map((x) => x.tenant_id) };
+  }
   const c = await contextFor(req.user, tid);
   if (!c || !atLeast(c.role, minRole)) { res.status(403).json({ error: 'forbidden' }); return null; }
   return c;
@@ -79,13 +106,48 @@ async function getBagRates(kind = 'MONTHEND') {
 // run is gated by role at the route (needCtx SNR_ACCOUNTANT+); the staff pool is
 // company-wide. (A configurable tenant-group can replace this later if Daybook
 // ever hosts unrelated businesses.)
-async function payrollGroup(_user, fallbackTenant) {
+// `ctx` (optional): when the request came from the Group roll-up, needCtx has
+// already resolved exactly which tenants this user may run — prefer that over
+// re-deriving it, so the saved run matches the scope that was previewed.
+async function payrollGroup(_user, fallbackTenant, ctx) {
+  if (ctx && ctx.group && Array.isArray(ctx.tenant_ids) && ctx.tenant_ids.length) return ctx.tenant_ids;
   const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE'");
   const ids = rows.map((r) => r.id);
   return ids.length ? ids : (fallbackTenant ? [fallbackTenant] : []);
 }
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Payroll spans the whole business, so tenant-scoped helpers take EITHER a single
+// tenant id or a list (Fido + Fiafia). Normalise once, here.
+const tenantList = (t) => (Array.isArray(t) ? t : [t]).filter(Boolean);
+
+// The tenants a request may read/write: every tenant in the Group roll-up, or
+// just the one workspace. Use for reads and for ownership checks on rows that
+// carry their own tenant_id — NOT to pick a tenant to write a NEW row into.
+const ctxTenants = (c) => (c && c.group && Array.isArray(c.tenant_ids) && c.tenant_ids.length ? c.tenant_ids : [c.tenant_id]);
+const inScope = (c, tid) => ctxTenants(c).includes(tid);
+// SQL fragment + args for "tenant_id IN (…)" over the request's scope.
+const scopeSql = (c, col = 'tenant_id') => {
+  const ids = ctxTenants(c);
+  return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, args: ids };
+};
+// Creating a row needs ONE tenant to own it. The Group roll-up is synthetic and
+// has no such tenant, so anything that writes new tenant-owned rows must refuse
+// rather than silently file Fiafia's data under Fido.
+function rejectGroupWrite(c, res) {
+  if (!c.group) return false;
+  res.status(400).json({ error: 'switch to a single workspace (Fido or Fiafia) to do this' });
+  return true;
+}
+
+// Fetch a pay run this request is entitled to: its own workspace normally, any
+// workspace in the roll-up under Group. Without this the Group's Saved tab would
+// list a run and then 404 when you opened it.
+async function runFor(c, id) {
+  const ids = ctxTenants(c);
+  return qone(`SELECT * FROM pay_runs WHERE id=? AND tenant_id IN (${ids.map(() => '?').join(',')})`, [id, ...ids]);
+}
 
 // Working days in [from,to] inclusive — Mon–Sat (excludes Sundays). Used as the
 // denominator for MONTHLY salary proration (the operation works Mon–Sat).
@@ -187,7 +249,8 @@ router.get('/imported', requireAuth, async (req, res) => {
 router.get('/imported/summary', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const { year, site } = req.query;
-  const where = ['p.tenant_id=?'], args = [c.tenant_id];
+  const sc = scopeSql(c, 'p.tenant_id');   // Group roll-up: history across workspaces
+  const where = [sc.sql], args = [...sc.args];
   if (year) { where.push('p.year=?'); args.push(String(year)); }
   if (site) { where.push('p.site_id=?'); args.push(site); }
   const W = 'WHERE ' + where.join(' AND ');
@@ -389,7 +452,8 @@ router.get('/runs/:id/export.csv', requireAuth, async (req, res) => {
 // ── Pay configuration (rates) — Snr Accountant+ ────────────────────────────────
 router.get('/pay-config', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const where = ['tenant_id=?', "status='ACTIVE'"], args = [c.tenant_id];
+  const sc = scopeSql(c);   // Group roll-up lists the roster of every workspace
+  const where = [sc.sql, "status='ACTIVE'"], args = [...sc.args];
   if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
   res.json(await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
     FROM staff WHERE ${where.join(' AND ')} ORDER BY full_name`, args));
@@ -397,7 +461,9 @@ router.get('/pay-config', requireAuth, async (req, res) => {
 router.patch('/pay-config/:id', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const st = await qone('SELECT * FROM staff WHERE id=?', [req.params.id]);
-  if (!st || st.tenant_id !== c.tenant_id) return res.status(404).json({ error: 'not found' });
+  // Safe under the Group roll-up: the staff row names its own tenant, so we check
+  // membership of the scope rather than picking one.
+  if (!st || !inScope(c, st.tenant_id)) return res.status(404).json({ error: 'not found' });
   const b = req.body || {};
   const pt = ['DAILY', 'PIECE', 'HOURLY', 'MONTHLY'].includes((b.pay_type || '').toUpperCase()) ? b.pay_type.toUpperCase() : st.pay_type;
   await qrun('UPDATE staff SET pay_type=?, daily_rate=?, rate_loaded=?, rate_bagged=? WHERE id=?',
@@ -553,13 +619,16 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
 // { [staff_id]: [{ site_id, site_name, loaded, bagged }, ...] }, only sites with
 // nonzero bags, ordered by name. Used to show the breakdown behind each total.
 async function siteSplit(tenant_id, from, to) {
+  const ids = tenantList(tenant_id);
+  if (!ids.length) return {};
+  const ph = ids.map(() => '?').join(',');
   const rows = await qall(`SELECT p.staff_id, p.site_id, COALESCE(si.name,'—') site_name,
       COALESCE(SUM(p.bags_loaded),0) loaded, COALESCE(SUM(p.bags_bagged),0) bagged
     FROM production p LEFT JOIN sites si ON si.id = p.site_id
-    WHERE p.tenant_id=? AND p.work_date BETWEEN ? AND ?
+    WHERE p.tenant_id IN (${ph}) AND p.work_date BETWEEN ? AND ?
     GROUP BY p.staff_id, p.site_id, si.name
     HAVING COALESCE(SUM(p.bags_loaded),0) > 0 OR COALESCE(SUM(p.bags_bagged),0) > 0
-    ORDER BY si.name`, [tenant_id, from, to]);
+    ORDER BY si.name`, [...ids, from, to]);
   const by = {};
   for (const r of rows) {
     (by[r.staff_id] = by[r.staff_id] || []).push({
@@ -643,7 +712,7 @@ router.post('/compute2', requireAuth, async (req, res) => {
   // Rate pair must match the run: mid-month = ₦1 incentive, month-end = ₦6 full.
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (combined) {
-    const group = await payrollGroup(req.user, c.tenant_id);
+    const group = await payrollGroup(req.user, c.tenant_id, c);
     const lines = await computeCombinedLines(group, from, to, rates, pieceOnly);
     return res.json({ from, to, combined: true, piece_only: pieceOnly, tenants: group, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
   }
@@ -663,7 +732,7 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   const pieceOnly = req.query.piece_only === '1' || req.query.piece_only === 'true';
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to, rates, pieceOnly)
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
     : await computeLines(c.tenant_id, from, to, null, rates, pieceOnly);
   const ids = lines.map((l) => l.staff_id).filter(Boolean);
   const sBy = {};
@@ -725,6 +794,10 @@ router.get('/staff-template.xlsx', requireAuth, async (req, res) => {
 // BAGGERS/LOADERS → PIECE. LOCATION is matched to an existing site by name.
 router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
+  // Import CREATES staff and resolves LOCATION against one tenant's sites, so it
+  // needs a real workspace to own the rows — under Group it would file every
+  // imported person under the anchor tenant.
+  if (rejectGroupWrite(c, res)) return;
   if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
   let wb;
   try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
@@ -843,7 +916,7 @@ router.post('/runs2', requireAuth, async (req, res) => {
   const pieceOnly = b.piece_only === true;
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to, rates, pieceOnly)
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
     : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly);
   const runId = uuid();
   let tg = 0, td = 0, tn = 0;
@@ -883,12 +956,13 @@ router.post('/runs2', requireAuth, async (req, res) => {
 
 router.get('/runs2', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
+  const sc = scopeSql(c, 'r.tenant_id');   // Group roll-up sees every workspace's runs
   res.json(await qall(`SELECT r.*, s.name site_name FROM pay_runs r LEFT JOIN sites s ON s.id=r.site_id
-    WHERE r.tenant_id=? ORDER BY r.created_at DESC LIMIT 100`, [c.tenant_id]));
+    WHERE ${sc.sql} ORDER BY r.created_at DESC LIMIT 100`, sc.args));
 });
 router.get('/runs2/:id', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   run.lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
   res.json(run);
@@ -897,7 +971,7 @@ router.get('/runs2/:id', requireAuth, async (req, res) => {
 // gross+net, and flag any discrepancy vs the daily-recorded snapshot in `remarks`.
 router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be edited' });
   const line = await qone('SELECT * FROM pay_run_lines WHERE id=? AND run_id=?', [req.params.lineId, run.id]);
@@ -947,7 +1021,7 @@ router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
 router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
-  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be imported into' });
   let wb;
@@ -1027,7 +1101,7 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
 // Approve (Snr Accountant+) → Paid (General Manager+).
 router.post('/runs2/:id/status', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   const next = (req.body && req.body.status || '').toUpperCase();
   if (next === 'APPROVED') {
@@ -1042,7 +1116,7 @@ router.post('/runs2/:id/status', requireAuth, async (req, res) => {
 });
 router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).end();
   const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -1078,7 +1152,7 @@ function splitName(full) {
 router.patch('/staff/:id/eligibility', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+ (default)
   const st = await qone('SELECT * FROM staff WHERE id=?', [req.params.id]);
-  if (!st || st.tenant_id !== c.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (!st || !inScope(c, st.tenant_id)) return res.status(404).json({ error: 'not found' });
   const b = req.body || {};
   const today = new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
 
@@ -1103,7 +1177,8 @@ router.patch('/staff/:id/eligibility', requireAuth, async (req, res) => {
   await qrun(`UPDATE staff SET status=?, exit_date=?, exit_reason=?, payroll_eligible=?,
       eligibility_note=?, eligibility_by=?, eligibility_at=? WHERE id=?`,
     [status, exitDate, exitReason, eligible, b.note ?? b.reason ?? null, req.user.id, Date.now(), st.id]);
-  await audit(c.tenant_id, req.user.id, 'STAFF_PAYROLL_ELIGIBILITY', 'staff', st.id,
+  // Audit against the staff member's OWN tenant, not the roll-up anchor.
+  await audit(st.tenant_id, req.user.id, 'STAFF_PAYROLL_ELIGIBILITY', 'staff', st.id,
     { full_name: st.full_name, status, payroll_eligible: eligible, exit_date: exitDate, note: b.note ?? b.reason ?? null });
   res.json(await qone('SELECT * FROM staff WHERE id=?', [st.id]));
 });
@@ -1112,11 +1187,12 @@ router.patch('/staff/:id/eligibility', requireAuth, async (req, res) => {
 // parked staff member can be found and reinstated rather than lost.
 router.get('/staff/excluded', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
+  const sc = scopeSql(c, 's.tenant_id');   // Group roll-up reviews every workspace
   res.json(await qall(`SELECT s.id, s.full_name, s.role_title, s.staff_type, s.status,
       s.exit_date, s.exit_reason, s.payroll_eligible, s.eligibility_note, s.eligibility_at, si.name site_name
     FROM staff s LEFT JOIN sites si ON si.id=s.site_id
-    WHERE s.tenant_id=? AND NOT (${PAYROLL_ELIGIBLE_S})
-    ORDER BY s.full_name`, [c.tenant_id]));
+    WHERE ${sc.sql} AND NOT (${PAYROLL_ELIGIBLE_S})
+    ORDER BY s.full_name`, sc.args));
 });
 
 // Mid-month cycle: 16th of the PREVIOUS month → 15th of `month`.
@@ -1134,25 +1210,29 @@ function midRange(month) {
 }
 
 // Piece-worker commission lines for a period (baggers & loaders with production).
+// `tenant_id` may be one id or a list — the mid-month run covers Fido + Fiafia.
 async function computePieceLines(tenant_id, from, to, site, rates) {
   // Mid-month pays the GLOBAL ₦1/bag incentive rate. Deliberately ignores the
   // per-staff rate_loaded/rate_bagged columns: they default to 0 (which zeroed
   // every bagger out), and where they ARE set they hold the ₦6 full rate, which
   // would pay 6x here. Rates are global by design — same as month-end.
   rates = rates || await getBagRates('MIDMONTH');
-  const sWhere = ['s.tenant_id=?', "s.status='ACTIVE'",
+  const ids = tenantList(tenant_id);
+  if (!ids.length) return [];
+  const ph = ids.map(() => '?').join(',');
+  const sWhere = [`s.tenant_id IN (${ph})`, "s.status='ACTIVE'",
     // "HIRED BAGGER/LOADER" are casual day-labour placeholders paid cash on the
     // day — never payroll. Mirrors computeLines/computeCombinedLines.
     "UPPER(COALESCE(s.full_name,'')) NOT LIKE '%HIRED%'",
-    PAYROLL_ELIGIBLE_S, PIECE_WORKER_S], sArgs = [tenant_id];
+    PAYROLL_ELIGIBLE_S, PIECE_WORKER_S], sArgs = [...ids];
   if (site) { sWhere.push('s.site_id=?'); sArgs.push(site); }
-  const staff = await qall(`SELECT s.id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
+  const staff = await qall(`SELECT s.id, s.tenant_id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
       s.rate_loaded, s.rate_bagged, s.bank_name, s.bank_account, st.name site_name
     FROM staff s LEFT JOIN sites st ON st.id=s.site_id WHERE ${sWhere.join(' AND ')} ORDER BY st.name, s.full_name`, sArgs);
   const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
-    FROM production WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
+    FROM production WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [...ids, from, to]);
   const by = {}; for (const p of prod) by[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
-  const bySite = await siteSplit(tenant_id, from, to);
+  const bySite = await siteSplit(ids, from, to);
   const lines = [];
   for (const s of staff) {
     const pb = by[s.id] || { l: 0, g: 0 };
@@ -1178,11 +1258,15 @@ router.get('/midmonth/preview', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const { month, from, to } = midRange(req.query.month);
   const site = siteBound(c) ? c.site_id : (req.query.site || null);
-  const lines = await computePieceLines(c.tenant_id, from, to, site);
+  // Payroll is run for the whole business, so mid-month spans Fido + Fiafia by
+  // default — same as the month-end Run tab. Pass combined=0 for one tenant only.
+  const combined = req.query.combined !== '0' && req.query.combined !== 'false';
+  const scope = combined ? await payrollGroup(req.user, c.tenant_id, c) : [c.tenant_id];
+  const lines = await computePieceLines(scope, from, to, site);
   const baggers = lines.filter((l) => l.designation === 'BAGGER');
   const loaders = lines.filter((l) => l.designation === 'LOADER');
   res.json({
-    month, from, to,
+    month, from, to, combined, tenants: scope,
     baggers, loaders,
     total_baggers: r2(baggers.reduce((a, l) => a + l.commission, 0)),
     total_loaders: r2(loaders.reduce((a, l) => a + l.commission, 0)),
@@ -1192,9 +1276,13 @@ router.get('/midmonth/preview', requireAuth, async (req, res) => {
 });
 
 // Generate (or refresh) the mid-month DRAFT run (16th prev → 15th) for piece workers.
+// `tenant_id` is the ANCHOR the run row is filed under; `opts.tenants` is the
+// payroll scope (both tenants, normally). Mirrors how a combined month-end run is
+// stored — one pay_runs row on the anchor, lines from every tenant in scope.
 async function generateMidMonth(tenant_id, month, userId, site = null, opts = {}) {
   const { from, to } = midRange(month);
-  const lines = await computePieceLines(tenant_id, from, to, site);
+  const scope = (opts.tenants && opts.tenants.length) ? opts.tenants : [tenant_id];
+  const lines = await computePieceLines(scope, from, to, site);
   let runId;
   await withTransaction(async () => {
     const existing = await qone("SELECT id FROM pay_runs WHERE tenant_id=? AND kind='MIDMONTH' AND period_from=? AND period_to=? AND status='DRAFT' AND COALESCE(site_id,'')=COALESCE(?, '')", [tenant_id, from, to, site]);
@@ -1211,14 +1299,18 @@ async function generateMidMonth(tenant_id, month, userId, site = null, opts = {}
     await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=0, total_net=? WHERE id=?', [r2(tot), r2(tot), runId]);
   });
   // Email the draft + Fido CSV to Accountants/Snr Accountants/GM/Admin.
-  if (opts.email && lines.length) emailMidMonth(tenant_id, runId).catch(() => {});
+  if (opts.email && lines.length) emailMidMonth(tenant_id, runId, scope).catch(() => {});
   return { runId, count: lines.length };
 }
 router.post('/midmonth/generate', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const { month } = midRange((req.body || {}).month);
-  const site = siteBound(c) ? c.site_id : ((req.body || {}).site || null);
-  const out = await generateMidMonth(c.tenant_id, month, req.user.id, site, { email: (req.body || {}).email !== false });
+  const b = req.body || {};
+  const { month } = midRange(b.month);
+  const site = siteBound(c) ? c.site_id : (b.site || null);
+  // Must match the scope the accountant previewed, or the saved draft would differ.
+  const combined = b.combined !== false;
+  const tenants = combined ? await payrollGroup(req.user, c.tenant_id, c) : [c.tenant_id];
+  const out = await generateMidMonth(c.tenant_id, month, req.user.id, site, { email: b.email !== false, tenants });
   res.status(201).json(out);
 });
 
@@ -1246,7 +1338,7 @@ async function fidoCsv(tenant_id, run) {
 }
 router.get('/runs2/:id/fido.csv', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  const run = await qone('SELECT * FROM pay_runs WHERE id=? AND tenant_id=?', [req.params.id, c.tenant_id]);
+  const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).end();
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="midmonth-payroll-${run.period_from}.csv"`);
@@ -1254,13 +1346,17 @@ router.get('/runs2/:id/fido.csv', requireAuth, async (req, res) => {
 });
 
 // Email the mid-month draft + Fido CSV to Accountants, Snr Accountants, GMs, Admins.
-async function emailMidMonth(tenant_id, runId) {
+// `tenants` = the run's full scope. A combined run must reach the accountants of
+// EVERY tenant it pays, not just the anchor the run row happens to be filed under.
+async function emailMidMonth(tenant_id, runId, tenants) {
   try {
-    const tenant = await qone('SELECT * FROM tenants WHERE id=?', [tenant_id]);
+    const tenant = await qone('SELECT * FROM tenants WHERE id=?', [tenant_id]); // branding = anchor
     const run = await qone('SELECT * FROM pay_runs WHERE id=?', [runId]);
     if (!tenant || !run) return;
+    const ids = tenantList(tenants && tenants.length ? tenants : tenant_id);
+    const ph = ids.map(() => '?').join(',');
     const members = await qall(`SELECT DISTINCT u.email, m.role FROM memberships m JOIN users u ON u.id=m.user_id
-      WHERE m.tenant_id=? AND u.email IS NOT NULL AND u.email<>''`, [tenant_id]);
+      WHERE m.tenant_id IN (${ph}) AND u.email IS NOT NULL AND u.email<>''`, ids);
     const to = [...new Set(members.filter((m) => atLeast(m.role, 'ACCOUNTANT')).map((m) => m.email))];
     if (!to.length) return;
     const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=?', [runId]);

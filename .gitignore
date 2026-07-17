@@ -9,3 +9,7 @@ npm-debug.log*
 
 # CI scratch: previous release's db.js, extracted for the migration upgrade check
 .migrate-base/
+
+# Artifacts left by editing files on a FUSE mount (the deleted inode is kept
+# alive as .fuse_hidden* until every handle closes). Never source.
+.fuse_hidden*

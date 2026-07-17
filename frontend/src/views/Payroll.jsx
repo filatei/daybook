@@ -135,13 +135,16 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
 
 // ── Run: compute + save a payroll ─────────────────────────────────────────────
 function RunTab({ sites, onSaved }) {
-  const { toast, openModal, closeModal } = useStore();
+  const { toast, openModal, closeModal, isGroup } = useStore();
   const now = new Date();
   const fm = fullMonthWindow();
   const [from, setFrom] = useState(fm.from);
   const [to, setTo] = useState(fm.to);
   const [site, setSite] = useState('');
-  const [combined, setCombined] = useState(true); // Fido + Fiafia in one run
+  // In the Group roll-up the run is combined by definition — there is no single
+  // workspace to fall back to, so the toggle is forced on and hidden.
+  const [combinedRaw, setCombined] = useState(true); // Fido + Fiafia in one run
+  const combined = isGroup ? true : combinedRaw;
   const [lines, setLines] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
@@ -218,10 +221,16 @@ function RunTab({ sites, onSaved }) {
         )}
         <button className="btn" style={{ width: 'auto', padding: '8px 16px' }} onClick={run} disabled={busy}>{busy ? <span className="spin" /> : null} Compute</button>
       </div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
-        <input type="checkbox" checked={combined} onChange={(e) => setCombined(e.target.checked)} />
-        Combined payroll (Fido + Fiafia in one run; same person merged)
-      </label>
+      {isGroup ? (
+        <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+          🏢 Group run — every workspace in one payroll; the same person working across both is merged into one payslip.
+        </div>
+      ) : (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+          <input type="checkbox" checked={combined} onChange={(e) => setCombined(e.target.checked)} />
+          Combined payroll (Fido + Fiafia in one run; same person merged)
+        </label>
+      )}
       <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
         onClick={() => downloadFile(scoped(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
         ⬇ Excel template (Regular / Baggers / Loaders)
@@ -481,7 +490,10 @@ function MidMonthTab({ onSaved }) {
         </button>
       </div>
       <p style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 0, marginBottom: 12 }}>
-        Built automatically from bags loaded/bagged × each worker's rate — no Excel upload. Save the draft, then approve & mark paid under <strong>Saved</strong>, and download the Fido-format CSV there.
+        Baggers &amp; loaders across <strong>every workspace</strong> (Fido + Fiafia), paid at the mid-month incentive
+        rate for bags done 16th of last month → 15th of this one. Built automatically from recorded production — no
+        Excel upload. Save the draft, then approve &amp; mark paid under <strong>Saved</strong>, and download the
+        Fido-format CSV there.
       </p>
 
       {loading ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
@@ -502,7 +514,7 @@ function MidMonthTab({ onSaved }) {
 
 // ── Setup: pay rates + advances ───────────────────────────────────────────────
 function SetupTab({ sites }) {
-  const { tenant, toast, openModal, closeModal } = useStore();
+  const { tenant, toast, openModal, closeModal, isGroup } = useStore();
   const [rows, setRows] = useState([]);
   const [site, setSite] = useState('');
   const [q, setQ] = useState('');
@@ -579,18 +591,29 @@ function SetupTab({ sites }) {
         </div>
         <button className="btn" style={{ width: 'auto', padding: '10px 16px', marginTop: 10 }} onClick={saveBag} disabled={bagBusy}>{bagBusy ? <span className="spin" /> : null} Save rates</button>
       </div>
+      {/* Import creates staff in ONE workspace — the Group roll-up has no single
+          workspace to own them, so it is offered only inside Fido or Fiafia. */}
       <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
         <strong style={{ display: 'block', marginBottom: 2 }}>Staff roster</strong>
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Upload an Excel (REGULAR / BAGGERS / LOADERS) to add or update staff in this workspace. Matches by ID; REGULAR base salary is saved.</span>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <button className="btn btn-ghost btn-sm" style={{ flex: 1 }}
-            onClick={() => downloadFile(scoped('/payroll/staff-template.xlsx'), 'staff-template.xlsx').catch((e) => toast(e.message || 'Download failed', 'err'))}>⬇ Template</button>
-          <label className="btn btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
-            {importingStaff ? <span className="spin" /> : '⬆ Import staff'}
-            <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importingStaff}
-              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importStaff(f); }} />
-          </label>
-        </div>
+        {isGroup ? (
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+            Importing staff adds them to a specific workspace — switch to <strong>Fido</strong> or <strong>Fiafia</strong> (top-left) to import.
+            Rates above, and the payroll runs themselves, cover every workspace.
+          </span>
+        ) : (
+          <>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>Upload an Excel (REGULAR / BAGGERS / LOADERS) to add or update staff in this workspace. Matches by ID; REGULAR base salary is saved.</span>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button className="btn btn-ghost btn-sm" style={{ flex: 1 }}
+                onClick={() => downloadFile(scoped('/payroll/staff-template.xlsx'), 'staff-template.xlsx').catch((e) => toast(e.message || 'Download failed', 'err'))}>⬇ Template</button>
+              <label className="btn btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
+                {importingStaff ? <span className="spin" /> : '⬆ Import staff'}
+                <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importingStaff}
+                  onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importStaff(f); }} />
+              </label>
+            </div>
+          </>
+        )}
       </div>
       {sites.length > 1 && (
         <SearchSelect style={{ marginBottom: 12 }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />

@@ -1676,6 +1676,7 @@ router.post('/ai/analyse', requireAuth, needTenant('ADMIN'), async (req, res) =>
 // Staff list columns — exclude the bulky face_descriptor; expose face_enrolled flag.
 const STAFF_COLS = `id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,
   bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,badge_code,ext_people_id,status,created_at,
+  payroll_eligible,exit_date,exit_reason,eligibility_note,
   (face_descriptor IS NOT NULL) AS face_enrolled, face_enrolled_at, (photo IS NOT NULL) AS has_photo`;
 const newBadgeCode = () => 'B' + Math.random().toString(36).slice(2, 9).toUpperCase();
 const STAFF_TYPES = ['REGULAR', 'BAGGER', 'LOADER'];
@@ -1793,6 +1794,12 @@ router.patch('/staff/:id', requireAuth, needTenant('SECRETARY'), async (req, res
   const f = req.body || {};
   const staff_type = f.staff_type != null ? (STAFF_TYPES.includes(String(f.staff_type).toUpperCase()) ? String(f.staff_type).toUpperCase() : st.staff_type) : st.staff_type;
   const pay_type = f.staff_type != null || f.pay_type != null ? payTypeFor(staff_type, f.pay_type ?? st.pay_type) : st.pay_type;
+  // 'LEFT' takes someone off payroll, so it is SNR_ACCOUNTANT+ only and belongs to
+  // PATCH /payroll/staff/:id/eligibility — this general edit must not be a way round
+  // that gate, in either direction.
+  if (f.status != null && (String(f.status).toUpperCase() === 'LEFT' || st.status === 'LEFT')) {
+    return res.status(403).json({ error: 'use payroll eligibility to change LEFT status' });
+  }
   await qrun(`UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,staff_type=?,department=?,bank_name=?,bank_account=?,
       daily_rate=?,rate_loaded=?,rate_bagged=?,status=?,site_id=? WHERE id=?`,
     [f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, pay_type, staff_type,

@@ -677,6 +677,20 @@ async function migrate() {
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS rate_bagged DOUBLE PRECISION DEFAULT 0;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS staff_type  TEXT DEFAULT 'REGULAR';
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS department  TEXT;
+    -- Payroll eligibility (SNR_ACCOUNTANT+ only). Two SEPARATE ideas:
+    --   status='LEFT' + exit_date  → the person has left the company.
+    --   payroll_eligible=false     → still staff, but must not be paid this cycle
+    --                                (suspended, unresolved query, duplicate record…).
+    -- Every payroll compute honours both. Kept as its own column, not folded into
+    -- status, so an accountant can park someone out of payroll without having to
+    -- pretend they resigned.
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS payroll_eligible BOOLEAN DEFAULT TRUE;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS exit_date   TEXT;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS exit_reason TEXT;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS eligibility_note TEXT;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS eligibility_by   TEXT;
+    ALTER TABLE staff ADD COLUMN IF NOT EXISTS eligibility_at   BIGINT;
+    UPDATE staff SET payroll_eligible = TRUE WHERE payroll_eligible IS NULL;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_name   TEXT;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_account TEXT;
     -- Passport-style staff photo (small JPEG data URL) for the ID badge.
@@ -701,15 +715,25 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_production_td ON production(tenant_id, work_date);
 
-    -- Global payroll settings (shared across tenants). Holds the single per-bag
-    -- rates (rate_loaded, rate_bagged) applied to ALL loaders/baggers across the
-    -- combined Fido+Fiafia payroll. GLOBAL on purpose — not tenant-scoped.
+    -- Global payroll settings (shared across tenants). Holds the per-bag rates
+    -- applied to ALL loaders/baggers across the combined Fido+Fiafia payroll.
+    -- GLOBAL on purpose — not tenant-scoped.
+    --
+    -- TWO pairs, one per payment. The two cycles overlap by design:
+    --   rate_loaded     / rate_bagged      ₦6/bag — full commission, 28th prev → 27th
+    --   rate_loaded_mid / rate_bagged_mid  ₦1/bag — mid-month incentive, 16th prev → 15th
     CREATE TABLE IF NOT EXISTS payroll_settings (
       key        TEXT PRIMARY KEY,
       value      DOUBLE PRECISION NOT NULL DEFAULT 0,
       updated_at BIGINT,
       updated_by TEXT
     );
+    -- Seed the agreed rates ONLY where the key is absent. DO NOTHING means a rate
+    -- the accountant has already set is never overwritten on deploy.
+    INSERT INTO payroll_settings (key, value) VALUES
+      ('rate_loaded', 6), ('rate_bagged', 6),
+      ('rate_loaded_mid', 1), ('rate_bagged_mid', 1)
+      ON CONFLICT (key) DO NOTHING;
 
     -- Advances / deductions given to a worker; settled (run_id set) at payroll time.
     CREATE TABLE IF NOT EXISTS staff_advances (

@@ -8,6 +8,68 @@ import SwipeRow from '../components/SwipeRow.jsx';
 import PhotoCapture from '../components/PhotoCapture.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
 
+// ── Payroll eligibility (SNR_ACCOUNTANT+) ─────────────────────────────────────
+// Takes someone out of payroll without deleting them: the roster carries ex-staff
+// and duplicate records that must stop being paid while their history stays
+// intact for past runs and audit.
+function EligibilityModal({ staff, onSaved, onClose }) {
+  const { toast } = useStore();
+  const [busy, setBusy] = useState(false);
+  const excluded = staff.payroll_eligible === false || staff.status === 'LEFT';
+  const [choice, setChoice] = useState(staff.status === 'LEFT' ? 'left' : (excluded ? 'park' : 'active'));
+  const [exitDate, setExitDate] = useState(staff.exit_date || today());
+  const [note, setNote] = useState(staff.eligibility_note || staff.exit_reason || '');
+
+  const save = async () => {
+    setBusy(true);
+    const body = choice === 'left' ? { left: true, exit_date: exitDate, reason: note }
+      : choice === 'park' ? { eligible: false, note }
+        : { left: false, eligible: true, note };
+    try {
+      await api(scoped(`/payroll/staff/${staff.id}/eligibility`), { method: 'PATCH', body });
+      toast(choice === 'active' ? 'Back on payroll ✓' : 'Removed from payroll ✓', 'ok');
+      onSaved && onSaved(); onClose();
+    } catch (e) { toast(e.message || 'Failed', 'err'); setBusy(false); }
+  };
+
+  const opt = (val, title, sub) => (
+    <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 12px', marginBottom: 8,
+      border: `1px solid ${choice === val ? 'var(--brand, #16a34a)' : 'var(--border, #e5e7eb)'}`, borderRadius: 8, cursor: 'pointer' }}>
+      <input type="radio" name="elig" checked={choice === val} onChange={() => setChoice(val)} style={{ marginTop: 3 }} />
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 14 }}>{title}</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{sub}</div>
+      </div>
+    </label>
+  );
+
+  return (
+    <div>
+      <h3 style={{ margin: '0 0 2px' }}>Payroll status</h3>
+      <p className="sub" style={{ marginTop: 0 }}>{staff.full_name}</p>
+      {opt('active', 'On payroll', 'Included in payroll runs as normal.')}
+      {opt('park', 'Not eligible for payroll', 'Still staff, but skipped in every run — suspended, duplicate record, or an unresolved query.')}
+      {opt('left', 'Has left the company', 'Marked LEFT from the exit date and never paid again. Past payslips are kept.')}
+      {choice === 'left' && (
+        <label style={{ display: 'block', marginBottom: 8 }}>
+          <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>Exit date</span>
+          <input type="date" className="input" value={exitDate} max={today()} onChange={(e) => setExitDate(e.target.value)} />
+        </label>
+      )}
+      {choice !== 'active' && (
+        <label style={{ display: 'block', marginBottom: 8 }}>
+          <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>Reason {choice === 'left' ? '(optional)' : ''}</span>
+          <input className="input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. resigned, duplicate record, suspended" />
+        </label>
+      )}
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button className="btn btn-ghost" style={{ flex: 1 }} onClick={onClose} disabled={busy}>Cancel</button>
+        <button className="btn" style={{ flex: 1 }} onClick={save} disabled={busy}>{busy ? <span className="spin" /> : null} Save</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Badge clock-in/out — scan a staff badge to toggle attendance ──────────────
 function BadgeClock() {
   const { toast, go } = useStore();
@@ -536,6 +598,8 @@ export default function Staff() {
   const [editStaff, setEditStaff] = useState(null);
   const role = useRole();
   const canManage = role && atLeast(role, 'SECRETARY');
+  // Payroll eligibility moves money — SNR_ACCOUNTANT+ only, matching the route.
+  const canPayroll = role && atLeast(role, 'SNR_ACCOUNTANT');
   const siteBound = role && !atLeast(role, 'SNR_ACCOUNTANT');
 
   const load = useCallback(async () => {
@@ -631,7 +695,11 @@ export default function Staff() {
                     <div className="av">{s.full_name?.[0]?.toUpperCase() || '?'}</div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 700 }}>{s.full_name} {s.face_enrolled ? <span title="Face enrolled" style={{ fontSize: 12 }}>🙂</span> : <span title="No face on file" style={{ fontSize: 12, opacity: .5 }}>📷</span>}</div>
-                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>{s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}</div>
+                      <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                        {s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}
+                        {s.status === 'LEFT' && <span title={s.exit_reason || 'Has left the company'} style={{ marginLeft: 6, color: '#b91c1c', fontWeight: 700 }}>· left{s.exit_date ? ` ${s.exit_date}` : ''}</span>}
+                        {s.status !== 'LEFT' && s.payroll_eligible === false && <span title={s.eligibility_note || 'Not eligible for payroll'} style={{ marginLeft: 6, color: '#b45309', fontWeight: 700 }}>· off payroll</span>}
+                      </div>
                     </div>
                   </button>
                   <button onClick={() => openClock(s)} title="Clock in / out" style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: st.color, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
@@ -651,6 +719,11 @@ export default function Staff() {
                   {s.badge_code && (
                     <button onClick={() => printBadge(s)} title="Print this staff's badge"
                       style={{ border: 'none', background: '#eff6ff', color: '#1e40af', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>🪪</button>
+                  )}
+                  {canPayroll && (
+                    <button onClick={() => openModal(<EligibilityModal staff={s} onSaved={load} onClose={closeModal} />)}
+                      title="Payroll status — left / not eligible"
+                      style={{ border: 'none', background: (s.status === 'LEFT' || s.payroll_eligible === false) ? '#fee2e2' : '#f1f5f9', color: (s.status === 'LEFT' || s.payroll_eligible === false) ? '#b91c1c' : 'var(--muted)', borderRadius: 8, padding: '6px 9px', fontSize: 13, cursor: 'pointer' }}>💰</button>
                   )}
                 </> : null}
               />

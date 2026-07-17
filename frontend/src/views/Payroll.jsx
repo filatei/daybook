@@ -12,15 +12,25 @@ const siteSplitLabel = (bySite) => (bySite || []).map((s) => {
   return `${s.site_name} ${parts.join('/')}`;
 }).join(' · ');
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-// Payroll cycle = 28th of previous month → 27th of current month. The "current"
-// completed cycle ends on the 27th of this month once we're past the 27th,
-// otherwise last month's 27th.
+// Full-month commission cycle: 28th of the previous month → 27th of this one. The
+// "current" completed cycle ends on the 27th of this month once we're past the
+// 27th, otherwise last month's 27th.
 const fullMonthWindow = () => {
   const n = new Date();
   let ey = n.getFullYear(), em = n.getMonth(); // 0-based month
   if (n.getDate() <= 27) { em -= 1; if (em < 0) { em = 11; ey -= 1; } }
   const to = new Date(ey, em, 27);
   const from = new Date(ey, em - 1, 28);
+  return { from: ymd(from), to: ymd(to) };
+};
+// Mid-month incentive cycle: 16th of the previous month → 15th of this one.
+// Overlaps the full-month window on purpose — two payments, not one split cycle.
+const midMonthWindow = () => {
+  const n = new Date();
+  let ey = n.getFullYear(), em = n.getMonth(); // 0-based month
+  if (n.getDate() <= 15) { em -= 1; if (em < 0) { em = 11; ey -= 1; } }
+  const to = new Date(ey, em, 15);
+  const from = new Date(ey, em - 1, 16);
   return { from: ymd(from), to: ymd(to) };
 };
 const dl = async (path, name) => {
@@ -136,15 +146,20 @@ function RunTab({ sites, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
   const [q, setQ] = useState('');
+  // Mid-month pays per-bag commission only, so it lists baggers/loaders and
+  // nothing else. Regular staff are on monthly salary and are paid at month-end.
+  const [pieceOnly, setPieceOnly] = useState(false);
 
   const preset = (kind) => {
-    const y = now.getFullYear(), m = now.getMonth() + 1, mm = String(m).padStart(2, '0');
-    if (kind === 'mid') { setFrom(`${y}-${mm}-01`); setTo(`${y}-${mm}-15`); } // mid-month bonus (loaders/baggers)
-    else { const w = fullMonthWindow(); setFrom(w.from); setTo(w.to); } // full cycle = 28th→27th
+    // mid  = 16th prev → 15th, piece workers only, ₦1/bag incentive
+    // month = 28th prev → 27th, everyone, ₦6/bag full commission
+    const w = kind === 'mid' ? midMonthWindow() : fullMonthWindow();
+    setFrom(w.from); setTo(w.to); setPieceOnly(kind === 'mid');
+    setLines(null); // stale result would still show the old staff mix and rate
   };
   const run = async () => {
     setBusy(true);
-    try { const r = await api(scoped('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined } });
+    try { const r = await api(scoped('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 }))); }
     catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -158,7 +173,7 @@ function RunTab({ sites, onSaved }) {
     if ((l.pay_type || '').toUpperCase() === 'PIECE') {
       const bags = `${l.bags_loaded} loaded · ${l.bags_bagged} bagged`;
       if (!l.bags_loaded && !l.bags_bagged) return 'no bags this period';
-      return bags + (zero ? ' · set per-bag rate' : '');
+      return bags + (zero ? ' · set the per-bag rate in Setup' : '');
     }
     if (!l.days_present) return 'no clock-ins this period';
     return `${l.days_present} day${l.days_present === 1 ? '' : 's'}${zero ? ' · set monthly salary' : ''}`;
@@ -171,7 +186,7 @@ function RunTab({ sites, onSaved }) {
     setBusy(true);
     try {
       const deductions = {}; lines.forEach((l) => { deductions[l.staff_id] = +l.deduction || 0; });
-      await api(scoped('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined } });
+      await api(scoped('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly } });
       toast('Payroll saved as draft ✓', 'ok'); setLines(null); onSaved && onSaved();
     } catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -180,9 +195,21 @@ function RunTab({ sites, onSaved }) {
   return (
     <div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('mid')}>1–15 (mid-month bonus)</button>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('mid')}>Mid-month incentive (16→15)</button>
         <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('month')}>Full month (28→27)</button>
       </div>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+        <input type="checkbox" checked={pieceOnly} onChange={(e) => { setPieceOnly(e.target.checked); setLines(null); }} />
+        Mid-month incentive — baggers &amp; loaders only, at the mid-month per-bag rate
+      </label>
+      {pieceOnly && (
+        <div style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-soft, #f4f6f8)', fontSize: 12, color: 'var(--muted)' }}>
+          Pays the <b>mid-month incentive rate</b> for bags done 16th of last month → 15th of this one.
+          Regular staff are excluded — they are on monthly salary and are paid in the month-end run; for one who needs
+          money now, record a <b>salary advance</b> instead. The full ₦/bag commission is paid separately in the
+          month-end run (28→27), which covers these bags again — that overlap is intended.
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={from} onChange={(e) => setFrom(e.target.value)} />
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={to} max={today()} onChange={(e) => setTo(e.target.value)} />
@@ -196,7 +223,7 @@ function RunTab({ sites, onSaved }) {
         Combined payroll (Fido + Fiafia in one run; same person merged)
       </label>
       <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
-        onClick={() => downloadFile(scoped(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}`), `payroll-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+        onClick={() => downloadFile(scoped(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
         ⬇ Excel template (Regular / Baggers / Loaders)
       </button>
 
@@ -391,7 +418,7 @@ function LineEditor({ line, onClose, onSave }) {
   );
 }
 
-// ── Mid-month: auto piece-worker payroll (1st–15th) from production ───────────
+// ── Mid-month: auto piece-worker incentive (16th prev → 15th) from production ──
 const thisMonth = () => today().slice(0, 7);
 // Module-level (stable identity → no remount/flicker).
 function PayrollSection({ title, rows, qtyLabel }) {
@@ -446,7 +473,7 @@ function MidMonthTab({ onSaved }) {
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12 }}>
         <div style={{ flex: 1 }}>
-          <label className="fl">Month (pays 1st–15th)</label>
+          <label className="fl">Month (pays 16th prev → 15th)</label>
           <input type="month" className="input" value={month} max={thisMonth()} onChange={(e) => setMonth(e.target.value)} />
         </div>
         <button className="btn" style={{ width: 'auto', padding: '10px 16px' }} onClick={generate} disabled={busy || loading || !data || !data.count}>
@@ -482,12 +509,21 @@ function SetupTab({ sites }) {
   const [loading, setLoading] = useState(true);
 
   // Shared per-bag rates (global, apply to ALL loaders/baggers across Fido+Fiafia).
+  // TWO pairs: the full month-end commission and the smaller mid-month incentive.
   const [bag, setBag] = useState({ loaded: 0, bagged: 0 });
+  const [bagMid, setBagMid] = useState({ loaded: 0, bagged: 0 });
   const [bagBusy, setBagBusy] = useState(false);
-  useEffect(() => { api(scoped('/payroll/bag-rates')).then(setBag).catch(() => {}); }, [tenant]);
+  const applyRates = (r) => { setBag(r.monthend || r); setBagMid(r.midmonth || { loaded: 0, bagged: 0 }); };
+  useEffect(() => { api(scoped('/payroll/bag-rates')).then(applyRates).catch(() => {}); }, [tenant]);
   const saveBag = async () => {
     setBagBusy(true);
-    try { setBag(await api(scoped('/payroll/bag-rates'), { method: 'PUT', body: { rate_loaded: +bag.loaded || 0, rate_bagged: +bag.bagged || 0 } })); toast('Per-bag rates saved ✓', 'ok'); }
+    try {
+      applyRates(await api(scoped('/payroll/bag-rates'), { method: 'PUT', body: {
+        rate_loaded: +bag.loaded || 0, rate_bagged: +bag.bagged || 0,
+        rate_loaded_mid: +bagMid.loaded || 0, rate_bagged_mid: +bagMid.bagged || 0,
+      } }));
+      toast('Per-bag rates saved ✓', 'ok');
+    }
     catch (e) { toast(e.message, 'err'); }
     setBagBusy(false);
   };
@@ -524,12 +560,24 @@ function SetupTab({ sites }) {
     <div>
       <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
         <strong style={{ display: 'block', marginBottom: 2 }}>Per-bag rates (loaders & baggers)</strong>
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Shared across Fido + Fiafia. Every loader/bagger is paid bags × this rate.</span>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'flex-end' }}>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Shared across Fido + Fiafia. Every loader/bagger is paid bags × these rates.</span>
+
+        <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Full month — 28th prev → 27th</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
           <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bag.loaded ?? 0} onChange={(e) => setBag((b) => ({ ...b, loaded: e.target.value }))} /></div>
           <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bag.bagged ?? 0} onChange={(e) => setBag((b) => ({ ...b, bagged: e.target.value }))} /></div>
-          <button className="btn" style={{ width: 'auto', padding: '10px 16px' }} onClick={saveBag} disabled={bagBusy}>{bagBusy ? <span className="spin" /> : null} Save</button>
         </div>
+
+        <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Mid-month incentive — 16th prev → 15th</div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bagMid.loaded ?? 0} onChange={(e) => setBagMid((b) => ({ ...b, loaded: e.target.value }))} /></div>
+          <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bagMid.bagged ?? 0} onChange={(e) => setBagMid((b) => ({ ...b, bagged: e.target.value }))} /></div>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+          The mid-month incentive is paid <b>in addition to</b> the full month-end commission — the two cycles cover
+          the same bags on purpose.
+        </div>
+        <button className="btn" style={{ width: 'auto', padding: '10px 16px', marginTop: 10 }} onClick={saveBag} disabled={bagBusy}>{bagBusy ? <span className="spin" /> : null} Save rates</button>
       </div>
       <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
         <strong style={{ display: 'block', marginBottom: 2 }}>Staff roster</strong>

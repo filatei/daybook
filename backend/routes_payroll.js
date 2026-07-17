@@ -23,6 +23,13 @@ const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require
 const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
 
+// Local copy of routes.js's audit() — that module exports only its router, and
+// requiring it here would be circular.
+async function audit(tenant_id, user_id, action, entity, entity_id, meta) {
+  await qrun('INSERT INTO audit_log (id,tenant_id,user_id,action,entity,entity_id,meta) VALUES (?,?,?,?,?,?,?)',
+    [uuid(), tenant_id || null, user_id || null, action, entity, entity_id || null, meta ? JSON.stringify(meta) : null]);
+}
+
 // ── helper ────────────────────────────────────────────────────────────────────
 // Payroll compute/config/approve is restricted to the finance tier: SNR
 // ACCOUNTANT / GENERAL MANAGER / ADMIN (rank ≥ 7). Operational routes (recording
@@ -35,12 +42,36 @@ async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
   return c;
 }
 
+// ── Shared payroll predicates ─────────────────────────────────────────────────
+// Defined once so every compute path filters identically. Past bugs came from
+// one path quietly missing a guard the others had.
+//
+// PAYROLL_ELIGIBLE: an accountant has parked this person out of payroll
+// (payroll_eligible=false) or marked them as having left (status='LEFT').
+// COALESCE covers rows created before the column existed.
+const PAYROLL_ELIGIBLE = "COALESCE(payroll_eligible, TRUE) = TRUE AND COALESCE(status,'') <> 'LEFT'";
+// PIECE_WORKER: baggers/loaders paid per bag — the only people in a mid-month run.
+const PIECE_WORKER = "(UPPER(COALESCE(staff_type,'')) IN ('BAGGER','LOADER') OR UPPER(COALESCE(pay_type,'')) = 'PIECE')";
+// Same two predicates, aliased for queries that alias the staff table as `s`.
+const PAYROLL_ELIGIBLE_S = PAYROLL_ELIGIBLE.replace(/\b(payroll_eligible|status)\b/g, 's.$1');
+const PIECE_WORKER_S = PIECE_WORKER.replace(/\b(staff_type|pay_type)\b/g, 's.$1');
+
 // Global, SHARED per-bag rates (one for loading, one for bagging) applied to every
 // loader/bagger across the combined payroll. Stored tenant-independently.
-async function getBagRates() {
-  const rows = await qall("SELECT key, value FROM payroll_settings WHERE key IN ('rate_loaded','rate_bagged')");
+//
+// TWO rate pairs, because there are two different payments:
+//   MONTHEND (rate_loaded / rate_bagged)         — full commission, ₦6/bag
+//   MIDMONTH (rate_loaded_mid / rate_bagged_mid) — incentive for the lifting, ₦1/bag
+// Passing the wrong kind pays 6x or 1/6th, so callers name it explicitly.
+const RATE_KEYS = {
+  MONTHEND: { loaded: 'rate_loaded', bagged: 'rate_bagged' },
+  MIDMONTH: { loaded: 'rate_loaded_mid', bagged: 'rate_bagged_mid' },
+};
+async function getBagRates(kind = 'MONTHEND') {
+  const k = RATE_KEYS[String(kind).toUpperCase()] || RATE_KEYS.MONTHEND;
+  const rows = await qall('SELECT key, value FROM payroll_settings WHERE key IN (?,?)', [k.loaded, k.bagged]);
   const m = {}; for (const r of rows) m[r.key] = Number(r.value) || 0;
-  return { loaded: m.rate_loaded || 0, bagged: m.rate_bagged || 0 };
+  return { kind: RATE_KEYS[String(kind).toUpperCase()] ? String(kind).toUpperCase() : 'MONTHEND', loaded: m[k.loaded] || 0, bagged: m[k.bagged] || 0 };
 }
 
 // Payroll covers the WHOLE business — every staff member across ALL active
@@ -377,7 +408,10 @@ router.patch('/pay-config/:id', requireAuth, async (req, res) => {
 // ── Shared per-bag rates (global) — Snr Accountant / GM / Admin only ───────────
 router.get('/bag-rates', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
-  res.json(await getBagRates());
+  // Both pairs, so the settings screen can show the ₦6 full rate and the ₦1
+  // mid-month incentive side by side.
+  const [monthend, midmonth] = await Promise.all([getBagRates('MONTHEND'), getBagRates('MIDMONTH')]);
+  res.json({ ...monthend, monthend, midmonth });
 });
 router.put('/bag-rates', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+ via default
@@ -388,7 +422,11 @@ router.put('/bag-rates', requireAuth, async (req, res) => {
     [k, Math.max(0, +v || 0), nowS(), req.user.id]);
   if (b.rate_loaded != null) await set('rate_loaded', b.rate_loaded);
   if (b.rate_bagged != null) await set('rate_bagged', b.rate_bagged);
-  res.json(await getBagRates());
+  if (b.rate_loaded_mid != null) await set('rate_loaded_mid', b.rate_loaded_mid);
+  if (b.rate_bagged_mid != null) await set('rate_bagged_mid', b.rate_bagged_mid);
+  const [monthend, midmonth] = await Promise.all([getBagRates('MONTHEND'), getBagRates('MIDMONTH')]);
+  await audit(c.tenant_id, req.user.id, 'PAYROLL_BAG_RATES', 'payroll_settings', null, { monthend, midmonth });
+  res.json({ ...monthend, monthend, midmonth });
 });
 
 // ── Daily production entry (bags loaded / bagged) — Supervisor (Site Manager+) ──
@@ -467,9 +505,14 @@ router.post('/production', requireAuth, async (req, res) => {
 });
 
 // Shared: compute gross-pay lines for a period (+ outstanding advance per staff).
-async function computeLines(tenant_id, from, to, site, rates) {
-  rates = rates || await getBagRates();
-  const sWhere = ['tenant_id=?', "status='ACTIVE'", "UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'"], sArgs = [tenant_id];
+// `pieceOnly` drops monthly/daily (REGULAR) staff — used by the mid-month run,
+// which pays per-bag commission only.
+async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false) {
+  // Default follows the run kind: a piece-only run is a mid-month run.
+  rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const sWhere = ['tenant_id=?', "status='ACTIVE'", "UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'",
+    PAYROLL_ELIGIBLE], sArgs = [tenant_id];
+  if (pieceOnly) sWhere.push(PIECE_WORKER);
   if (site) { sWhere.push('site_id=?'); sArgs.push(site); }
   const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
     FROM staff WHERE ${sWhere.join(' AND ')} ORDER BY full_name`, sArgs);
@@ -530,13 +573,15 @@ async function siteSplit(tenant_id, from, to) {
 // person into one payslip. Identity = normalized name + bank account (name-only
 // when no account on file). Piece pay uses the shared per-bag rates; monthly pay
 // is prorated by DISTINCT days clocked-in across all the person's tenants.
-async function computeCombinedLines(tenantIds, from, to, rates) {
-  rates = rates || await getBagRates();
+async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = false) {
+  rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (!tenantIds.length) return [];
   const ph = tenantIds.map(() => '?').join(',');
   const staff = await qall(`SELECT id, tenant_id, full_name, role_title, site_id, pay_type, daily_rate, bank_name, bank_account
     FROM staff WHERE tenant_id IN (${ph}) AND status='ACTIVE'
-      AND UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'`, tenantIds);
+      AND UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'
+      AND ${PAYROLL_ELIGIBLE}
+      ${pieceOnly ? `AND ${PIECE_WORKER}` : ''}`, tenantIds);
   const att = await qall(`SELECT DISTINCT staff_id, work_date FROM attendance
     WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [...tenantIds, from, to]);
   const daysByStaff = {};
@@ -592,14 +637,18 @@ router.post('/compute2', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const { from, to, site, combined } = req.body || {};
   if (!from || !to) return res.status(400).json({ error: 'from and to required' });
-  const rates = await getBagRates();
+  // Mid-month pays per-bag commission only — REGULAR (monthly-salary) staff have
+  // nothing to earn in it and must not appear. They are paid at month-end.
+  const pieceOnly = (req.body || {}).piece_only === true;
+  // Rate pair must match the run: mid-month = ₦1 incentive, month-end = ₦6 full.
+  const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (combined) {
     const group = await payrollGroup(req.user, c.tenant_id);
-    const lines = await computeCombinedLines(group, from, to, rates);
-    return res.json({ from, to, combined: true, tenants: group, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+    const lines = await computeCombinedLines(group, from, to, rates, pieceOnly);
+    return res.json({ from, to, combined: true, piece_only: pieceOnly, tenants: group, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
   }
-  const lines = await computeLines(c.tenant_id, from, to, site || null, rates);
-  res.json({ from, to, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+  const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly);
+  res.json({ from, to, piece_only: pieceOnly, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
 });
 
 // ── Excel template download (Fido-shaped: REGULAR / BAGGERS / LOADERS) ─────────
@@ -610,10 +659,12 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   const { from, to } = req.query;
   if (!from || !to) return res.status(400).end();
   const combined = req.query.combined === '1' || req.query.combined === 'true';
-  const rates = await getBagRates();
+  // Mid-month: piece workers only, so the REGULAR sheet is omitted entirely.
+  const pieceOnly = req.query.piece_only === '1' || req.query.piece_only === 'true';
+  const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to, rates)
-    : await computeLines(c.tenant_id, from, to, null, rates);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to, rates, pieceOnly)
+    : await computeLines(c.tenant_id, from, to, null, rates, pieceOnly);
   const ids = lines.map((l) => l.staff_id).filter(Boolean);
   const sBy = {};
   if (ids.length) {
@@ -629,22 +680,29 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
     const nm = splitName(l.full_name);
     const acct = [s.bank_name, s.bank_account].filter(Boolean).join('-') || (s.bank_account || '');
     const pt = (l.pay_type || '').toUpperCase();
-    const isLoader = s.staff_type === 'LOADER' || (pt === 'PIECE' && Number(l.bags_loaded) > Number(l.bags_bagged));
-    if (pt === 'PIECE' && !isLoader) {
+    // Sheet bucketing must agree with the PIECE_WORKER filter: staff_type is
+    // authoritative, pay_type is the fallback. Testing pay_type alone dropped
+    // baggers/loaders whose pay_type was never set into the REGULAR sheet.
+    const isPiece = pt === 'PIECE' || s.staff_type === 'BAGGER' || s.staff_type === 'LOADER';
+    const isLoader = s.staff_type === 'LOADER'
+      || (isPiece && s.staff_type !== 'BAGGER' && Number(l.bags_loaded) > Number(l.bags_bagged));
+    if (isPiece && !isLoader) {
       bag.push({ 'S/N': bag.length + 1, ID: s.ext_people_id || '', 'FIRST NAME': nm.first, 'MIDDLE NAME': nm.middle, 'LAST NAME': nm.last, LOCATION: s.site_name || '', QTY: l.bags_bagged, 'ACCOUNT NUMBER': acct, DEDUCTION: l.advance || 0, REMARKS: '', COMMISSION: l.gross });
-    } else if (pt === 'PIECE') {
+    } else if (isPiece) {
       load.push({ 'S/N': load.length + 1, ID: s.ext_people_id || '', 'FIRST NAME': nm.first, 'MIDDLE NAME': nm.middle, 'LAST NAME': nm.last, LOCATION: s.site_name || '', 'ACCOUNT NUMBER': acct, 'BAGS LOADED': l.bags_loaded, DEDUCTION: l.advance || 0, REMARKS: '', 'NET PAY (COMMISSION)': l.gross });
     } else {
       reg.push({ 'S/N': reg.length + 1, ID: s.ext_people_id || '', 'FIRST NAME': nm.first, 'MIDDLE NAME': nm.middle, 'LAST NAME': nm.last, DESIGNATION: s.role_title || '', LOCATION: s.site_name || '', 'ACCOUNT NUMBER': acct, 'DAYS WORKED': l.days_present, 'BASE SALARY': '', DEDUCTION: l.advance || 0, REMARKS: '', 'NET SALARY': l.gross });
     }
   }
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reg, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'DESIGNATION', 'LOCATION', 'ACCOUNT NUMBER', 'DAYS WORKED', 'BASE SALARY', 'DEDUCTION', 'REMARKS', 'NET SALARY'] }), 'REGULAR');
+  // Mid-month has no REGULAR sheet at all — matches MID-MONTH PAYROLL <MONTH>.xls,
+  // which ships BAGGERS + LOADERS only.
+  if (!pieceOnly) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reg, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'DESIGNATION', 'LOCATION', 'ACCOUNT NUMBER', 'DAYS WORKED', 'BASE SALARY', 'DEDUCTION', 'REMARKS', 'NET SALARY'] }), 'REGULAR');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bag, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'QTY', 'ACCOUNT NUMBER', 'DEDUCTION', 'REMARKS', 'COMMISSION'] }), 'BAGGERS');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(load, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'ACCOUNT NUMBER', 'BAGS LOADED', 'DEDUCTION', 'REMARKS', 'NET PAY (COMMISSION)'] }), 'LOADERS');
   const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="payroll-${from}_${to}.xlsx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx"`);
   res.send(buf);
 });
 
@@ -780,14 +838,21 @@ router.post('/runs2', requireAuth, async (req, res) => {
   if (!from || !to) return res.status(400).json({ error: 'from and to required' });
   const ded = b.deductions || {};   // { staff_id: amount }
   const combined = !!b.combined;
+  // Must mirror the compute2 call the accountant previewed, or the saved draft
+  // would quietly differ from what they approved on screen.
+  const pieceOnly = b.piece_only === true;
+  const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to)
-    : await computeLines(c.tenant_id, from, to, site);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id), from, to, rates, pieceOnly)
+    : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly);
   const runId = uuid();
   let tg = 0, td = 0, tn = 0;
   await withTransaction(async () => {
-    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?)`,
-      [runId, c.tenant_id, combined ? null : site, from, to, req.user.id]);
+    // Persist WHICH run this is. Without it the draft looks REGULAR, and any later
+    // line edit or Excel re-import would recompute a ₦1 mid-month run at the ₦6
+    // full rate — a silent 6x overpay.
+    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?, ?)`,
+      [runId, c.tenant_id, combined ? null : site, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR', req.user.id]);
     for (const l of lines) {
       if (l.gross <= 0) continue; // never save a zero payslip line
       const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
@@ -845,8 +910,9 @@ router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
   const bagged = num(b.bags_bagged, Number(line.bags_bagged) || 0);
   const deduction = Math.max(0, num(b.deductions, Number(line.deductions) || 0));
 
-  // Recompute gross from the (possibly edited) quantities.
-  const rates = await getBagRates();
+  // Recompute gross from the (possibly edited) quantities, at the rate pair this
+  // run was created with — never the default.
+  const rates = await getBagRates(run.kind === 'MIDMONTH' ? 'MIDMONTH' : 'MONTHEND');
   const pt = (line.pay_type || '').toUpperCase();
   const st = await qone('SELECT daily_rate FROM staff WHERE id=?', [line.staff_id]);
   const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
@@ -887,7 +953,8 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
   let wb;
   try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
 
-  const rates = await getBagRates();
+  // Same rule as the single-line edit: honour the run's own kind, not the default.
+  const rates = await getBagRates(run.kind === 'MIDMONTH' ? 'MIDMONTH' : 'MONTHEND');
   const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
   const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=?', [run.id]);
   const lineByStaff = {}; for (const l of lines) lineByStaff[l.staff_id] = l;
@@ -987,7 +1054,7 @@ router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// MID-MONTH PAYROLL — piece-worker (bagger/loader) commission for the 1st–15th.
+// MID-MONTH PAYROLL — bagger/loader incentive for the 16th prev → 15th cycle.
 // Auto-generated from production × rate, replacing the manual Fido Excel upload.
 // ═══════════════════════════════════════════════════════════════════════════════
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -999,22 +1066,85 @@ function splitName(full) {
   if (parts.length === 2) return { first: parts[0], middle: '', last: parts[1] };
   return { first: parts[0], last: parts[parts.length - 1], middle: parts.slice(1, -1).join(' ') };
 }
+// ── Payroll eligibility (SNR_ACCOUNTANT+) ─────────────────────────────────────
+// Lets the accountant take someone out of payroll WITHOUT deleting them — the
+// roster carries ex-staff and duplicate records that must stop being paid while
+// their history stays intact for past runs and audit.
+//
+//   PATCH /payroll/staff/:id/eligibility
+//     { eligible: false, note: 'duplicate record' }        → parked, still staff
+//     { left: true, exit_date: '2026-06-30', reason: '…' } → status LEFT + parked
+//     { left: false, eligible: true }                      → reinstated
+router.patch('/staff/:id/eligibility', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+ (default)
+  const st = await qone('SELECT * FROM staff WHERE id=?', [req.params.id]);
+  if (!st || st.tenant_id !== c.tenant_id) return res.status(404).json({ error: 'not found' });
+  const b = req.body || {};
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' });
+
+  let status = st.status, exitDate = st.exit_date, exitReason = st.exit_reason, eligible;
+  if (b.left === true) {
+    // Left the company: never pay again, and stamp the exit for the record.
+    status = 'LEFT';
+    exitDate = String(b.exit_date || today).slice(0, 10);
+    exitReason = b.reason ?? b.note ?? st.exit_reason ?? null;
+    eligible = false;
+  } else if (b.left === false) {
+    // Reinstated: back to ACTIVE. Eligibility must be granted explicitly.
+    status = 'ACTIVE';
+    exitDate = null; exitReason = null;
+    eligible = b.eligible !== false;
+  } else if (b.eligible != null) {
+    eligible = !!b.eligible;
+  } else {
+    return res.status(400).json({ error: 'eligible or left required' });
+  }
+
+  await qrun(`UPDATE staff SET status=?, exit_date=?, exit_reason=?, payroll_eligible=?,
+      eligibility_note=?, eligibility_by=?, eligibility_at=? WHERE id=?`,
+    [status, exitDate, exitReason, eligible, b.note ?? b.reason ?? null, req.user.id, Date.now(), st.id]);
+  await audit(c.tenant_id, req.user.id, 'STAFF_PAYROLL_ELIGIBILITY', 'staff', st.id,
+    { full_name: st.full_name, status, payroll_eligible: eligible, exit_date: exitDate, note: b.note ?? b.reason ?? null });
+  res.json(await qone('SELECT * FROM staff WHERE id=?', [st.id]));
+});
+
+// Everyone currently excluded from payroll — the accountant's review list, so a
+// parked staff member can be found and reinstated rather than lost.
+router.get('/staff/excluded', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  res.json(await qall(`SELECT s.id, s.full_name, s.role_title, s.staff_type, s.status,
+      s.exit_date, s.exit_reason, s.payroll_eligible, s.eligibility_note, s.eligibility_at, si.name site_name
+    FROM staff s LEFT JOIN sites si ON si.id=s.site_id
+    WHERE s.tenant_id=? AND NOT (${PAYROLL_ELIGIBLE_S})
+    ORDER BY s.full_name`, [c.tenant_id]));
+});
+
+// Mid-month cycle: 16th of the PREVIOUS month → 15th of `month`.
+// It deliberately overlaps the month-end cycle (28th prev → 27th current) because
+// they are two different payments over the same bags, not one split cycle:
+//   mid-month  = ₦1/bag incentive for the lifting, paid on the 15th-ish
+//   month-end  = ₦6/bag full commission
+// Computed on the date string, not a Date object, to stay timezone-proof.
 function midRange(month) {
   const m = /^\d{4}-\d{2}$/.test(month || '') ? month : new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' }).slice(0, 7);
-  return { month: m, from: `${m}-01`, to: `${m}-15` };
+  const [y, mo] = m.split('-').map(Number);
+  const py = mo === 1 ? y - 1 : y;          // January rolls back to December
+  const pm = mo === 1 ? 12 : mo - 1;
+  return { month: m, from: `${py}-${String(pm).padStart(2, '0')}-16`, to: `${m}-15` };
 }
 
 // Piece-worker commission lines for a period (baggers & loaders with production).
 async function computePieceLines(tenant_id, from, to, site, rates) {
-  // Per-bag rates are GLOBAL (payroll_settings), the same source month-end uses.
-  // The per-staff rate_loaded/rate_bagged columns are an OPTIONAL override and
-  // default to 0 — reading them alone zeroed every real bagger/loader out.
-  rates = rates || await getBagRates();
+  // Mid-month pays the GLOBAL ₦1/bag incentive rate. Deliberately ignores the
+  // per-staff rate_loaded/rate_bagged columns: they default to 0 (which zeroed
+  // every bagger out), and where they ARE set they hold the ₦6 full rate, which
+  // would pay 6x here. Rates are global by design — same as month-end.
+  rates = rates || await getBagRates('MIDMONTH');
   const sWhere = ['s.tenant_id=?', "s.status='ACTIVE'",
     // "HIRED BAGGER/LOADER" are casual day-labour placeholders paid cash on the
     // day — never payroll. Mirrors computeLines/computeCombinedLines.
     "UPPER(COALESCE(s.full_name,'')) NOT LIKE '%HIRED%'",
-    "(UPPER(COALESCE(s.staff_type,'')) IN ('BAGGER','LOADER') OR UPPER(COALESCE(s.pay_type,''))='PIECE')"], sArgs = [tenant_id];
+    PAYROLL_ELIGIBLE_S, PIECE_WORKER_S], sArgs = [tenant_id];
   if (site) { sWhere.push('s.site_id=?'); sArgs.push(site); }
   const staff = await qall(`SELECT s.id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
       s.rate_loaded, s.rate_bagged, s.bank_name, s.bank_account, st.name site_name
@@ -1026,8 +1156,8 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
   const lines = [];
   for (const s of staff) {
     const pb = by[s.id] || { l: 0, g: 0 };
-    const loadComm = pb.l * (s.rate_loaded || rates.loaded || 0);
-    const bagComm = pb.g * (s.rate_bagged || rates.bagged || 0);
+    const loadComm = pb.l * (rates.loaded || 0);
+    const bagComm = pb.g * (rates.bagged || 0);
     const commission = r2(loadComm + bagComm);
     if (commission <= 0) continue;
     // Designation: explicit staff_type, else whichever production dominates.
@@ -1061,7 +1191,7 @@ router.get('/midmonth/preview', requireAuth, async (req, res) => {
   });
 });
 
-// Generate (or refresh) the mid-month DRAFT run for the 1st–15th piece workers.
+// Generate (or refresh) the mid-month DRAFT run (16th prev → 15th) for piece workers.
 async function generateMidMonth(tenant_id, month, userId, site = null, opts = {}) {
   const { from, to } = midRange(month);
   const lines = await computePieceLines(tenant_id, from, to, site);

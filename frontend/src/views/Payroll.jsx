@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { api, scoped, ngn, today, getToken, downloadFile } from '../api.js';
+import { api, scopedAny, ngn, today, getToken, downloadFile, isNetErr } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
 
@@ -49,7 +49,7 @@ function AdvanceForm({ staff, onSaved, onClose }) {
   const save = async () => {
     if (!(+amount > 0)) return toast('Enter an amount', 'err');
     setSaving(true);
-    try { await api(scoped('/payroll/advances'), { method: 'POST', body: { staff_id: staff.id, amount: +amount, reason, date } }); toast('Advance recorded ✓', 'ok'); onSaved && onSaved(); onClose(); }
+    try { await api(scopedAny('/payroll/advances'), { method: 'POST', body: { staff_id: staff.id, amount: +amount, reason, date } }); toast('Advance recorded ✓', 'ok'); onSaved && onSaved(); onClose(); }
     catch (e) { toast(e.message, 'err'); }
     setSaving(false);
   };
@@ -79,7 +79,7 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
   const ids = (line.member_ids && line.member_ids.length ? line.member_ids : [line.staff_id]).join(',');
   const piece = (line.pay_type || '').toUpperCase() === 'PIECE';
   useEffect(() => {
-    api(scoped(`/payroll/staff-detail?ids=${encodeURIComponent(ids)}&from=${from}&to=${to}`))
+    api(scopedAny(`/payroll/staff-detail?ids=${encodeURIComponent(ids)}&from=${from}&to=${to}`))
       .then(setBd).catch(() => setBd({ days: [], production: [] }));
   }, []);
   const net = Math.max(0, (line.gross || 0) - (+ded || 0));
@@ -159,11 +159,21 @@ function RunTab({ sites, onSaved }) {
     setFrom(w.from); setTo(w.to); setPieceOnly(kind === 'mid');
     setLines(null); // stale result would still show the old staff mix and rate
   };
+  // `err` is kept on screen. A toast alone is missed: a failed compute answers in
+  // ~40ms, so the spinner never registers and the page looks like nothing happened.
+  const [err, setErr] = useState(null);
   const run = async () => {
-    setBusy(true);
-    try { const r = await api(scoped('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly } });
-      setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 }))); }
-    catch (e) { toast(e.message, 'err'); }
+    if (!from || !to) return toast('Pick both dates first', 'err');
+    if (from > to) return toast('“From” is after “To”', 'err');
+    setBusy(true); setErr(null); setLines(null);
+    try {
+      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly } });
+      setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 })));
+      if (!r.lines.length) toast('No one to pay for this period', 'err');
+    } catch (e) {
+      const msg = isNetErr(e) ? 'No connection — check your network and try again.' : (e.message || 'Compute failed');
+      setErr(msg); toast(msg, 'err');
+    }
     setBusy(false);
   };
   const setDedById = (id, v) => setLines((p) => p.map((l) => (l.staff_id === id ? { ...l, deduction: v } : l)));
@@ -188,7 +198,7 @@ function RunTab({ sites, onSaved }) {
     setBusy(true);
     try {
       const deductions = {}; lines.forEach((l) => { deductions[l.staff_id] = +l.deduction || 0; });
-      await api(scoped('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly } });
+      await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly } });
       toast('Payroll saved as draft ✓', 'ok'); setLines(null); onSaved && onSaved();
     } catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -218,8 +228,18 @@ function RunTab({ sites, onSaved }) {
         {!combined && sites.length > 1 && (
           <SearchSelect style={{ flex: '1 1 120px' }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
-        <button className="btn" style={{ width: 'auto', padding: '8px 16px' }} onClick={run} disabled={busy}>{busy ? <span className="spin" /> : null} Compute</button>
+        <button className="btn" style={{ width: 'auto', padding: '8px 16px', minWidth: 116 }} onClick={run} disabled={busy}>
+          {busy ? <><span className="spin" /> Computing…</> : 'Compute'}
+        </button>
       </div>
+      {/* Failures must stay on screen — a toast is gone before you look up. */}
+      {err && (
+        <div style={{ marginBottom: 10, padding: '10px 12px', borderRadius: 8, background: '#fee2e2', color: '#991b1b', fontSize: 13 }}>
+          <strong>Couldn’t compute payroll.</strong> {err}
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px', marginLeft: 8 }} onClick={run}>Retry</button>
+        </div>
+      )}
+      {busy && <div className="skel" style={{ marginBottom: 10 }} />}
       {isGroup ? (
         <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
           🏢 Group run — every workspace in one payroll; the same person working across both is merged into one payslip.
@@ -231,7 +251,7 @@ function RunTab({ sites, onSaved }) {
         </label>
       )}
       <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
-        onClick={() => downloadFile(scoped(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
         ⬇ Excel template (Regular / Baggers / Loaders)
       </button>
 
@@ -297,8 +317,8 @@ function RunsTab() {
     setImporting(true);
     try {
       const fd = new FormData(); fd.append('file', file);
-      const r = await api(scoped(`/payroll/runs2/${open.id}/import`), { method: 'POST', form: fd });
-      const fresh = await api(scoped(`/payroll/runs2/${open.id}`)); setOpen(fresh); load();
+      const r = await api(scopedAny(`/payroll/runs2/${open.id}/import`), { method: 'POST', form: fd });
+      const fresh = await api(scopedAny(`/payroll/runs2/${open.id}`)); setOpen(fresh); load();
       toast(`Imported: ${r.updated} updated${r.unmatched?.length ? `, ${r.unmatched.length} unmatched ID(s)` : ''}`, 'ok');
     } catch (e) { toast(e.message, 'err'); }
     setImporting(false);
@@ -306,22 +326,22 @@ function RunsTab() {
 
   const saveLine = async (patch) => {
     try {
-      await api(scoped(`/payroll/runs2/${open.id}/lines/${editLine.id}`), { method: 'PATCH', body: patch });
-      const fresh = await api(scoped(`/payroll/runs2/${open.id}`));
+      await api(scopedAny(`/payroll/runs2/${open.id}/lines/${editLine.id}`), { method: 'PATCH', body: patch });
+      const fresh = await api(scopedAny(`/payroll/runs2/${open.id}`));
       setOpen(fresh); setEditLine(null); toast('Line updated ✓', 'ok'); load();
     } catch (e) { toast(e.message, 'err'); }
   };
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setRuns(await api(scoped('/payroll/runs2'))); } catch { setRuns([]); }
+    try { setRuns(await api(scopedAny('/payroll/runs2'))); } catch { setRuns([]); }
     setLoading(false);
   }, [tenant]);
   useEffect(() => { load(); }, [load]);
 
-  const view = async (id) => { try { setOpen(await api(scoped(`/payroll/runs2/${id}`))); } catch (e) { toast(e.message, 'err'); } };
+  const view = async (id) => { try { setOpen(await api(scopedAny(`/payroll/runs2/${id}`))); } catch (e) { toast(e.message, 'err'); } };
   const setStatus = async (status) => {
-    try { const r = await api(scoped(`/payroll/runs2/${open.id}/status`), { method: 'POST', body: { status } }); setOpen((o) => ({ ...o, ...r })); toast(`Marked ${status.toLowerCase()} ✓`, 'ok'); load(); }
+    try { const r = await api(scopedAny(`/payroll/runs2/${open.id}/status`), { method: 'POST', body: { status } }); setOpen((o) => ({ ...o, ...r })); toast(`Marked ${status.toLowerCase()} ✓`, 'ok'); load(); }
     catch (e) { toast(e.message, 'err'); }
   };
   const badge = { DRAFT: '#f1f5f9', APPROVED: '#dbeafe', PAID: '#dcfce7' };
@@ -464,7 +484,7 @@ function MidMonthTab({ onSaved }) {
 
   const preview = useCallback(async () => {
     setLoading(true); setData(null);
-    try { setData(await api(scoped(`/payroll/midmonth/preview?month=${month}`))); }
+    try { setData(await api(scopedAny(`/payroll/midmonth/preview?month=${month}`))); }
     catch (e) { toast(e.message || 'Could not preview', 'err'); }
     setLoading(false);
   }, [tenant, month]);
@@ -472,7 +492,7 @@ function MidMonthTab({ onSaved }) {
 
   const generate = async () => {
     setBusy(true);
-    try { const r = await api(scoped('/payroll/midmonth/generate'), { method: 'POST', body: { month } }); toast(`Mid-month draft saved (${r.count} staff) ✓`, 'ok'); onSaved && onSaved(); }
+    try { const r = await api(scopedAny('/payroll/midmonth/generate'), { method: 'POST', body: { month } }); toast(`Mid-month draft saved (${r.count} staff) ✓`, 'ok'); onSaved && onSaved(); }
     catch (e) { toast(e.message || 'Generate failed', 'err'); }
     setBusy(false);
   };
@@ -525,11 +545,11 @@ function SetupTab({ sites }) {
   const [bagMid, setBagMid] = useState({ loaded: 0, bagged: 0 });
   const [bagBusy, setBagBusy] = useState(false);
   const applyRates = (r) => { setBag(r.monthend || r); setBagMid(r.midmonth || { loaded: 0, bagged: 0 }); };
-  useEffect(() => { api(scoped('/payroll/bag-rates')).then(applyRates).catch(() => {}); }, [tenant]);
+  useEffect(() => { api(scopedAny('/payroll/bag-rates')).then(applyRates).catch(() => {}); }, [tenant]);
   const saveBag = async () => {
     setBagBusy(true);
     try {
-      applyRates(await api(scoped('/payroll/bag-rates'), { method: 'PUT', body: {
+      applyRates(await api(scopedAny('/payroll/bag-rates'), { method: 'PUT', body: {
         rate_loaded: +bag.loaded || 0, rate_bagged: +bag.bagged || 0,
         rate_loaded_mid: +bagMid.loaded || 0, rate_bagged_mid: +bagMid.bagged || 0,
       } }));
@@ -545,7 +565,7 @@ function SetupTab({ sites }) {
     setImportingStaff(true);
     try {
       const fd = new FormData(); fd.append('file', file);
-      const r = await api(scoped('/payroll/staff-import'), { method: 'POST', form: fd });
+      const r = await api(scopedAny('/payroll/staff-import'), { method: 'POST', form: fd });
       toast(`Staff: ${r.created} added, ${r.updated} updated${r.sites_unmatched?.length ? ` · location(s) not matched: ${r.sites_unmatched.join(', ')}` : ''}`, 'ok');
       load();
     } catch (e) { toast(e.message, 'err'); }
@@ -554,7 +574,7 @@ function SetupTab({ sites }) {
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { const p = new URLSearchParams(); if (site) p.set('site', site); setRows(await api(scoped(`/payroll/pay-config?${p}`))); }
+    try { const p = new URLSearchParams(); if (site) p.set('site', site); setRows(await api(scopedAny(`/payroll/pay-config?${p}`))); }
     catch { setRows([]); }
     setLoading(false);
   }, [tenant, site]);
@@ -562,7 +582,7 @@ function SetupTab({ sites }) {
 
   const setVal = (i, k, v) => setRows((p) => p.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
   const save = async (r) => {
-    try { await api(scoped(`/payroll/pay-config/${r.id}`), { method: 'PATCH', body: { pay_type: r.pay_type, daily_rate: +r.daily_rate || 0, rate_loaded: +r.rate_loaded || 0, rate_bagged: +r.rate_bagged || 0 } }); toast(`${r.full_name} saved ✓`, 'ok'); }
+    try { await api(scopedAny(`/payroll/pay-config/${r.id}`), { method: 'PATCH', body: { pay_type: r.pay_type, daily_rate: +r.daily_rate || 0, rate_loaded: +r.rate_loaded || 0, rate_bagged: +r.rate_bagged || 0 } }); toast(`${r.full_name} saved ✓`, 'ok'); }
     catch (e) { toast(e.message, 'err'); }
   };
 
@@ -573,13 +593,13 @@ function SetupTab({ sites }) {
         <strong style={{ display: 'block', marginBottom: 2 }}>Per-bag rates (loaders & baggers)</strong>
         <span style={{ fontSize: 12, color: 'var(--muted)' }}>Shared across Fido + Fiafia. Every loader/bagger is paid bags × these rates.</span>
 
-        <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Full month — 28th prev → 27th</div>
+        <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Full month — 28th prev → 27th <span style={{ fontWeight: 500 }}>· standard ₦6/bag</span></div>
         <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
           <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bag.loaded ?? 0} onChange={(e) => setBag((b) => ({ ...b, loaded: e.target.value }))} /></div>
           <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bag.bagged ?? 0} onChange={(e) => setBag((b) => ({ ...b, bagged: e.target.value }))} /></div>
         </div>
 
-        <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Mid-month incentive — 16th prev → 15th</div>
+        <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Mid-month incentive — 16th prev → 15th <span style={{ fontWeight: 500 }}>· standard ₦1/bag</span></div>
         <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
           <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bagMid.loaded ?? 0} onChange={(e) => setBagMid((b) => ({ ...b, loaded: e.target.value }))} /></div>
           <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bagMid.bagged ?? 0} onChange={(e) => setBagMid((b) => ({ ...b, bagged: e.target.value }))} /></div>
@@ -604,7 +624,7 @@ function SetupTab({ sites }) {
             <span style={{ fontSize: 12, color: 'var(--muted)' }}>Upload an Excel (REGULAR / BAGGERS / LOADERS) to add or update staff in this workspace. Matches by ID; REGULAR base salary is saved.</span>
             <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
               <button className="btn btn-ghost btn-sm" style={{ flex: 1 }}
-                onClick={() => downloadFile(scoped('/payroll/staff-template.xlsx'), 'staff-template.xlsx').catch((e) => toast(e.message || 'Download failed', 'err'))}>⬇ Template</button>
+                onClick={() => downloadFile(scopedAny('/payroll/staff-template.xlsx'), 'staff-template.xlsx').catch((e) => toast(e.message || 'Download failed', 'err'))}>⬇ Template</button>
               <label className="btn btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
                 {importingStaff ? <span className="spin" /> : '⬆ Import staff'}
                 <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importingStaff}
@@ -654,7 +674,7 @@ export default function Payroll() {
   const [tab, setTab] = useState('run');
   const [summary, setSummary] = useState(null);
 
-  useEffect(() => { if (allowed && tab === 'history') api(scoped('/payroll/imported/summary')).then(setSummary).catch(() => {}); }, [allowed, tab]);
+  useEffect(() => { if (allowed && tab === 'history') api(scopedAny('/payroll/imported/summary')).then(setSummary).catch(() => {}); }, [allowed, tab]);
 
   if (!allowed) return <div className="empty"><div className="ic">🔒</div><p>Payroll is restricted to Senior Accountant, General Manager and Admin.</p></div>;
 

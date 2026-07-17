@@ -728,12 +728,18 @@ async function migrate() {
       updated_at BIGINT,
       updated_by TEXT
     );
-    -- Seed the agreed rates ONLY where the key is absent. DO NOTHING means a rate
-    -- the accountant has already set is never overwritten on deploy.
+    -- Seed the standard rates: ₦6/bag full month, ₦1/bag mid-month incentive, for
+    -- baggers and loaders alike. DO NOTHING so a rate the accountant has set is
+    -- never overwritten on deploy.
     INSERT INTO payroll_settings (key, value) VALUES
       ('rate_loaded', 6), ('rate_bagged', 6),
       ('rate_loaded_mid', 1), ('rate_bagged_mid', 1)
       ON CONFLICT (key) DO NOTHING;
+    -- A rate sitting at 0 pays nobody and silently drops every worker from the run
+    -- (commission <= 0 is skipped). That is never a deliberate setting, so treat 0
+    -- as "unset" and bring it up to the standard rate.
+    UPDATE payroll_settings SET value = 6 WHERE key IN ('rate_loaded','rate_bagged')         AND value = 0;
+    UPDATE payroll_settings SET value = 1 WHERE key IN ('rate_loaded_mid','rate_bagged_mid') AND value = 0;
 
     -- Advances / deductions given to a worker; settled (run_id set) at payroll time.
     CREATE TABLE IF NOT EXISTS staff_advances (

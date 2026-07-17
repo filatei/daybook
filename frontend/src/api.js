@@ -16,6 +16,16 @@ export function scoped(path) {
   return path + (path.includes('?') ? '&' : '?') + 'tenant=' + _tenant;
 }
 
+/** Like scoped(), but DOES send the Group id. Payroll is the one area that runs
+ *  against the group itself — the server resolves __group__ into every workspace
+ *  the user may run and returns one merged payroll — rather than fanning out
+ *  per tenant on the client the way the dashboard does. Using scoped() here sends
+ *  no tenant at all, and every payroll route answers 400 "select a workspace". */
+export function scopedAny(path) {
+  if (!_tenant) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'tenant=' + _tenant;
+}
+
 export async function api(path, { method = 'GET', body, form } = {}) {
   const headers = {};
   if (_token) headers['Authorization'] = 'Bearer ' + _token;

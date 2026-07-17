@@ -1005,8 +1005,15 @@ function midRange(month) {
 }
 
 // Piece-worker commission lines for a period (baggers & loaders with production).
-async function computePieceLines(tenant_id, from, to, site) {
+async function computePieceLines(tenant_id, from, to, site, rates) {
+  // Per-bag rates are GLOBAL (payroll_settings), the same source month-end uses.
+  // The per-staff rate_loaded/rate_bagged columns are an OPTIONAL override and
+  // default to 0 — reading them alone zeroed every real bagger/loader out.
+  rates = rates || await getBagRates();
   const sWhere = ['s.tenant_id=?', "s.status='ACTIVE'",
+    // "HIRED BAGGER/LOADER" are casual day-labour placeholders paid cash on the
+    // day — never payroll. Mirrors computeLines/computeCombinedLines.
+    "UPPER(COALESCE(s.full_name,'')) NOT LIKE '%HIRED%'",
     "(UPPER(COALESCE(s.staff_type,'')) IN ('BAGGER','LOADER') OR UPPER(COALESCE(s.pay_type,''))='PIECE')"], sArgs = [tenant_id];
   if (site) { sWhere.push('s.site_id=?'); sArgs.push(site); }
   const staff = await qall(`SELECT s.id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
@@ -1019,8 +1026,8 @@ async function computePieceLines(tenant_id, from, to, site) {
   const lines = [];
   for (const s of staff) {
     const pb = by[s.id] || { l: 0, g: 0 };
-    const loadComm = pb.l * (s.rate_loaded || 0);
-    const bagComm = pb.g * (s.rate_bagged || 0);
+    const loadComm = pb.l * (s.rate_loaded || rates.loaded || 0);
+    const bagComm = pb.g * (s.rate_bagged || rates.bagged || 0);
     const commission = r2(loadComm + bagComm);
     if (commission <= 0) continue;
     // Designation: explicit staff_type, else whichever production dominates.

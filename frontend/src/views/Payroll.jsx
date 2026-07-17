@@ -303,7 +303,7 @@ function RunTab({ sites, onSaved }) {
 
 // ── Runs: saved runs → approve → mark paid ────────────────────────────────────
 function RunsTab() {
-  const { tenant, toast } = useStore();
+  const { tenant, toast, confirm } = useStore();
   const role = useRole();
   const isGM = role && atLeast(role, 'GENERAL_MANAGER');
   const [runs, setRuns] = useState([]);
@@ -343,6 +343,34 @@ function RunsTab() {
   const setStatus = async (status) => {
     try { const r = await api(scopedAny(`/payroll/runs2/${open.id}/status`), { method: 'POST', body: { status } }); setOpen((o) => ({ ...o, ...r })); toast(`Marked ${status.toLowerCase()} ✓`, 'ok'); load(); }
     catch (e) { toast(e.message, 'err'); }
+  };
+
+  // A draft freezes its figures at compute time — it does NOT pick up a later rate
+  // change or staff correction. Recompute rebuilds it in place; delete throws it
+  // away (needed when the PERIOD itself is wrong, which recompute keeps).
+  const [acting, setActing] = useState(false);
+  const recompute = async () => {
+    setActing(true);
+    try {
+      const r = await api(scopedAny(`/payroll/runs2/${open.id}/recompute`), { method: 'POST' });
+      const moved = ngn(r.total_gross - (r.was_gross || 0));
+      toast(`Recomputed at ₦${r.rates?.bagged}/bag — ${r.count} staff, gross ${ngn(r.total_gross)} (${(r.total_gross - (r.was_gross || 0)) >= 0 ? '+' : ''}${moved})`, 'ok');
+      await view(open.id); load();
+    } catch (e) { toast(e.message || 'Recompute failed', 'err'); }
+    setActing(false);
+  };
+  const del = async () => {
+    const ok = await confirm({
+      title: 'Delete this draft?',
+      message: `${open.period_from} → ${open.period_to} · gross ${ngn(open.total_gross)}. Nothing is paid from a draft, so this is safe — rebuild it from the Run or Mid-month tab. Any advances it claimed are released.`,
+      confirmText: 'Delete draft',
+      danger: true,
+    });
+    if (!ok) return;
+    setActing(true);
+    try { await api(scopedAny(`/payroll/runs2/${open.id}`), { method: 'DELETE' }); toast('Draft deleted ✓', 'ok'); setOpen(null); load(); }
+    catch (e) { toast(e.message || 'Delete failed', 'err'); }
+    setActing(false);
   };
   const badge = { DRAFT: '#f1f5f9', APPROVED: '#dbeafe', PAID: '#dcfce7' };
 
@@ -391,12 +419,28 @@ function RunsTab() {
                     onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importFile(f); }} />
                 </label>
               )}
+              {open.status === 'DRAFT' && (
+                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={recompute} disabled={acting}
+                  title="Rebuild this draft from today’s rates and staff — same period">
+                  {acting ? <span className="spin" /> : '↻'} Recompute
+                </button>
+              )}
               {open.status === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={() => setStatus('APPROVED')}>Approve</button>}
               {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/export.csv?tenant=${tenant}`, `payroll_${open.period_from}.csv`)}>⬇ CSV</button>
               {open.kind === 'MIDMONTH' && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/fido.csv?tenant=${tenant}`, `midmonth_${open.period_from}.csv`)}>⬇ Fido format</button>}
+              {open.status === 'DRAFT' && (
+                <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px', color: '#b91c1c' }} onClick={del} disabled={acting}
+                  title="Throw this draft away — use when the period itself is wrong">🗑 Delete</button>
+              )}
               <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px' }} onClick={() => setOpen(null)}>Close</button>
             </div>
+            {open.status === 'DRAFT' && (
+              <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>
+                A draft keeps the figures it was built with — it does not pick up a later rate change or staff correction.
+                <b> Recompute</b> rebuilds it for the same period; <b>Delete</b> it and start again if the period itself is wrong.
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -533,7 +577,7 @@ function MidMonthTab({ onSaved }) {
 
 // ── Setup: pay rates + advances ───────────────────────────────────────────────
 function SetupTab({ sites }) {
-  const { tenant, toast, openModal, closeModal, isGroup } = useStore();
+  const { tenant, toast, openModal, closeModal, isGroup, confirm } = useStore();
   const [rows, setRows] = useState([]);
   const [site, setSite] = useState('');
   const [q, setQ] = useState('');
@@ -544,9 +588,26 @@ function SetupTab({ sites }) {
   const [bag, setBag] = useState({ loaded: 0, bagged: 0 });
   const [bagMid, setBagMid] = useState({ loaded: 0, bagged: 0 });
   const [bagBusy, setBagBusy] = useState(false);
+  // Rates are LOCKED by default. They set what every bagger and loader is paid, so
+  // an open text box invites an accidental keystroke that silently changes payroll
+  // for the whole business — which is exactly what happened (month-end sat at ₦1).
+  // Read-only until Edit is pressed; saving locks them again.
+  const [ratesEdit, setRatesEdit] = useState(false);
+  const [ratesSavedAt, setRatesSavedAt] = useState(null);
   const applyRates = (r) => { setBag(r.monthend || r); setBagMid(r.midmonth || { loaded: 0, bagged: 0 }); };
   useEffect(() => { api(scopedAny('/payroll/bag-rates')).then(applyRates).catch(() => {}); }, [tenant]);
   const saveBag = async () => {
+    const vals = [bag.loaded, bag.bagged, bagMid.loaded, bagMid.bagged].map((v) => +v || 0);
+    if (vals.some((v) => v <= 0)) return toast('A rate of 0 pays nobody — every worker would drop off the run', 'err');
+    if (+bagMid.bagged > +bag.bagged || +bagMid.loaded > +bag.loaded) {
+      return toast('Mid-month incentive is higher than the full month rate — check the fields', 'err');
+    }
+    const ok = await confirm({
+      title: 'Change what every worker is paid?',
+      message: `Full month ₦${+bag.loaded || 0}/bag loaded · ₦${+bag.bagged || 0}/bag bagged\nMid-month ₦${+bagMid.loaded || 0}/bag loaded · ₦${+bagMid.bagged || 0}/bag bagged\n\nApplies to every bagger and loader across Fido + Fiafia. Existing drafts keep their old figures until recomputed.`,
+      confirmText: 'Save rates',
+    });
+    if (!ok) return;
     setBagBusy(true);
     try {
       applyRates(await api(scopedAny('/payroll/bag-rates'), { method: 'PUT', body: {
@@ -554,9 +615,16 @@ function SetupTab({ sites }) {
         rate_loaded_mid: +bagMid.loaded || 0, rate_bagged_mid: +bagMid.bagged || 0,
       } }));
       toast('Per-bag rates saved ✓', 'ok');
+      setRatesEdit(false); setRatesSavedAt(Date.now());
     }
     catch (e) { toast(e.message, 'err'); }
     setBagBusy(false);
+  };
+  // Leaving edit mode without saving must not keep the typed-but-unsaved numbers
+  // on screen — they would look live.
+  const cancelRates = async () => {
+    setRatesEdit(false);
+    try { applyRates(await api(scopedAny('/payroll/bag-rates'))); } catch { /* keep what we have */ }
   };
 
   const [importingStaff, setImportingStaff] = useState(false);
@@ -589,27 +657,62 @@ function SetupTab({ sites }) {
   if (loading) return <>{[...Array(5)].map((_, i) => <div className="skel" key={i} />)}</>;
   return (
     <div>
-      <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
-        <strong style={{ display: 'block', marginBottom: 2 }}>Per-bag rates (loaders & baggers)</strong>
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Shared across Fido + Fiafia. Every loader/bagger is paid bags × these rates.</span>
+      {(() => {
+        // Locked look: greyed, not editable, until Edit is pressed.
+        const ro = !ratesEdit;
+        const inp = (val, on, label) => (
+          <div style={{ flex: 1 }}>
+            <label className="fl">{label}</label>
+            <input type="number" min="0" step="0.01" className="input" value={val ?? 0} readOnly={ro} disabled={ro}
+              onChange={(e) => on(e.target.value)}
+              style={ro ? { background: '#f1f5f9', color: 'var(--muted)', cursor: 'not-allowed' } : undefined} />
+          </div>
+        );
+        return (
+          <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <strong style={{ display: 'block', marginBottom: 2 }}>
+                  Per-bag rates (loaders &amp; baggers) {ro && <span title="Locked — press Edit to change" style={{ fontSize: 12 }}>🔒</span>}
+                </strong>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Shared across Fido + Fiafia. Every loader/bagger is paid bags × these rates.</span>
+              </div>
+              {ro && (
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 14px' }} onClick={() => setRatesEdit(true)}>✏️ Edit</button>
+              )}
+            </div>
 
-        <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Full month — 28th prev → 27th <span style={{ fontWeight: 500 }}>· standard ₦6/bag</span></div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
-          <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bag.loaded ?? 0} onChange={(e) => setBag((b) => ({ ...b, loaded: e.target.value }))} /></div>
-          <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bag.bagged ?? 0} onChange={(e) => setBag((b) => ({ ...b, bagged: e.target.value }))} /></div>
-        </div>
+            <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Full month — 28th prev → 27th <span style={{ fontWeight: 500 }}>· standard ₦6/bag</span></div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
+              {inp(bag.loaded, (v) => setBag((b) => ({ ...b, loaded: v })), '₦ / bag loaded')}
+              {inp(bag.bagged, (v) => setBag((b) => ({ ...b, bagged: v })), '₦ / bag bagged')}
+            </div>
 
-        <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Mid-month incentive — 16th prev → 15th <span style={{ fontWeight: 500 }}>· standard ₦1/bag</span></div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
-          <div style={{ flex: 1 }}><label className="fl">₦ / bag loaded</label><input type="number" className="input" value={bagMid.loaded ?? 0} onChange={(e) => setBagMid((b) => ({ ...b, loaded: e.target.value }))} /></div>
-          <div style={{ flex: 1 }}><label className="fl">₦ / bag bagged</label><input type="number" className="input" value={bagMid.bagged ?? 0} onChange={(e) => setBagMid((b) => ({ ...b, bagged: e.target.value }))} /></div>
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
-          The mid-month incentive is paid <b>in addition to</b> the full month-end commission — the two cycles cover
-          the same bags on purpose.
-        </div>
-        <button className="btn" style={{ width: 'auto', padding: '10px 16px', marginTop: 10 }} onClick={saveBag} disabled={bagBusy}>{bagBusy ? <span className="spin" /> : null} Save rates</button>
-      </div>
+            <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Mid-month incentive — 16th prev → 15th <span style={{ fontWeight: 500 }}>· standard ₦1/bag</span></div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'flex-end' }}>
+              {inp(bagMid.loaded, (v) => setBagMid((b) => ({ ...b, loaded: v })), '₦ / bag loaded')}
+              {inp(bagMid.bagged, (v) => setBagMid((b) => ({ ...b, bagged: v })), '₦ / bag bagged')}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+              The mid-month incentive is paid <b>in addition to</b> the full month-end commission — the two cycles cover
+              the same bags on purpose.
+            </div>
+
+            {ratesEdit ? (
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button className="btn btn-ghost" style={{ width: 'auto', padding: '10px 16px' }} onClick={cancelRates} disabled={bagBusy}>Cancel</button>
+                <button className="btn" style={{ width: 'auto', padding: '10px 16px' }} onClick={saveBag} disabled={bagBusy}>
+                  {bagBusy ? <><span className="spin" /> Saving…</> : 'Save rates'}
+                </button>
+              </div>
+            ) : (
+              <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: '#166534' }}>
+                ✓ Saved{ratesSavedAt ? ' just now' : ''} — these rates are live. Press <b>Edit</b> to change them.
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {/* Import creates staff in ONE workspace — the Group roll-up has no single
           workspace to own them, so it is offered only inside Fido or Fiafia. */}
       <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>

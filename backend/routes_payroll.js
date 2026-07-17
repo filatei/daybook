@@ -1114,6 +1114,69 @@ router.post('/runs2/:id/status', requireAuth, async (req, res) => {
   } else return res.status(400).json({ error: 'invalid status' });
   res.json(await qone('SELECT * FROM pay_runs WHERE id=?', [run.id]));
 });
+// Delete a DRAFT run. Drafts freeze gross at compute time, so one built against a
+// wrong rate or a wrong staff roster stays wrong for ever — it does not pick up a
+// later correction. Deleting and recomputing is the only way to fix it.
+// APPROVED/PAID runs are history and are never deletable.
+router.delete('/runs2/:id', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await runFor(c, req.params.id);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  if (run.status !== 'DRAFT') return res.status(400).json({ error: `a ${String(run.status).toLowerCase()} run cannot be deleted — it is a record of money already committed` });
+  await withTransaction(async () => {
+    // Release any advances this draft had claimed, or they would stay attached to
+    // a run that no longer exists and never be deducted again.
+    await qrun('UPDATE staff_advances SET run_id=NULL WHERE run_id=?', [run.id]);
+    await qrun('DELETE FROM pay_run_lines WHERE run_id=?', [run.id]);
+    await qrun('DELETE FROM pay_runs WHERE id=?', [run.id]);
+  });
+  await audit(run.tenant_id, req.user.id, 'PAYROLL_RUN_DELETE', 'pay_runs', run.id,
+    { period: `${run.period_from}→${run.period_to}`, kind: run.kind, total_gross: run.total_gross });
+  res.json({ ok: true, deleted: run.id });
+});
+
+// Rebuild a DRAFT in place from today's rates + roster, keeping its id, period and
+// kind. The everyday fix after correcting a rate or re-typing staff.
+router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await runFor(c, req.params.id);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be recomputed' });
+  const pieceOnly = run.kind === 'MIDMONTH';
+  const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  // site_id NULL on a saved run means it was combined across the group.
+  const combined = !run.site_id;
+  const lines = combined
+    ? await computeCombinedLines(await payrollGroup(req.user, run.tenant_id, c), run.period_from, run.period_to, rates, pieceOnly)
+    : await computeLines(run.tenant_id, run.period_from, run.period_to, run.site_id, rates, pieceOnly);
+  let tg = 0, td = 0, tn = 0, n = 0;
+  await withTransaction(async () => {
+    await qrun('UPDATE staff_advances SET run_id=NULL WHERE run_id=?', [run.id]);
+    await qrun('DELETE FROM pay_run_lines WHERE run_id=?', [run.id]);
+    for (const l of lines) {
+      if (l.gross <= 0) continue;
+      const d = Math.min(l.gross, Math.max(0, l.advance || 0));
+      const net = round2(l.gross - d);
+      tg += l.gross; td += d; tn += net; n += 1;
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), run.id, run.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged]);
+      if (d > 0) {
+        if (combined && Array.isArray(l.member_ids) && l.member_ids.length) {
+          const ph = l.member_ids.map(() => '?').join(',');
+          await qrun(`UPDATE staff_advances SET run_id=? WHERE staff_id IN (${ph}) AND run_id IS NULL AND adv_date<=?`, [run.id, ...l.member_ids, run.period_to]);
+        } else {
+          await qrun('UPDATE staff_advances SET run_id=? WHERE tenant_id=? AND staff_id=? AND run_id IS NULL AND adv_date<=?', [run.id, run.tenant_id, l.staff_id, run.period_to]);
+        }
+      }
+    }
+    await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?', [round2(tg), round2(td), round2(tn), run.id]);
+  });
+  await audit(run.tenant_id, req.user.id, 'PAYROLL_RUN_RECOMPUTE', 'pay_runs', run.id,
+    { was_gross: run.total_gross, now_gross: round2(tg), lines: n, rates });
+  res.json({ ok: true, count: n, total_gross: round2(tg), total_net: round2(tn), was_gross: run.total_gross, rates });
+});
+
 router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);

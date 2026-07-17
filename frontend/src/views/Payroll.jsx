@@ -136,7 +136,6 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
 // ── Run: compute + save a payroll ─────────────────────────────────────────────
 function RunTab({ sites, onSaved }) {
   const { toast, openModal, closeModal, isGroup } = useStore();
-  const now = new Date();
   const fm = fullMonthWindow();
   const [from, setFrom] = useState(fm.from);
   const [to, setTo] = useState(fm.to);

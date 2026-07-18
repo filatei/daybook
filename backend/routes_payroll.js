@@ -806,7 +806,7 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
   const siteByName = {}; for (const s of sites) siteByName[String(s.name).trim().toLowerCase()] = s.id;
   const norm = (k) => String(k || '').trim().toUpperCase();
   const num = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[, ]/g, '')); return isNaN(n) ? null : n; };
-  let created = 0, updated = 0; const noSite = new Set();
+  let created = 0, updated = 0; const noSite = new Set(); const skippedNoSite = [];
 
   const upsert = async (row, staffType) => {
     const get = (names) => { for (const k of Object.keys(row)) if (names.includes(norm(k))) return row[k]; return undefined; };
@@ -846,6 +846,11 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
           : [full, designation, staffType, payType, bankName, bankAcct, id || null, siteId, existing.id]);
       updated += 1;
     } else {
+      // Never CREATE a staff member without a site — an unsited worker can't be
+      // grouped, reported per-site, or reconciled. (An existing staff keeps their
+      // site via COALESCE above; only brand-new rows are gated.) Skip and report
+      // so the accountant fixes the LOCATION cell and re-imports.
+      if (!siteId) { skippedNoSite.push(full || id); return; }
       await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,staff_type,pay_type,daily_rate,bank_name,bank_account,ext_people_id,status)
         VALUES (?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE')`,
         [uuid(), c.tenant_id, siteId, full, designation, staffType, payType, baseSalary, bankName, bankAcct, id || null]);
@@ -859,7 +864,7 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' });
     for (const r of rows) await upsert(r, staffType);
   }
-  res.json({ created, updated, sites_unmatched: Array.from(noSite) });
+  res.json({ created, updated, sites_unmatched: Array.from(noSite), skipped_no_site: skippedNoSite });
 });
 
 // ── Per-staff payroll breakdown (drill-down) — Snr Accountant+ ─────────────────

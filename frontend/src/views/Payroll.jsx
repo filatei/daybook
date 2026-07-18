@@ -552,9 +552,51 @@ function LineEditor({ line, onClose, onSave }) {
 
 // ── Mid-month: auto piece-worker incentive (16th prev → 15th) from production ──
 const thisMonth = () => today().slice(0, 7);
+
+// Read-only payslip detail for a mid-month line: identity, bank, bags, per-site
+// split, and the day-by-day production behind the total.
+function MidMonthDetail({ line, from, to, onClose }) {
+  const [bd, setBd] = useState(null);
+  useEffect(() => {
+    api(scopedAny(`/payroll/staff-detail?ids=${encodeURIComponent(line.staff_id)}&from=${from}&to=${to}`))
+      .then(setBd).catch(() => setBd({ days: [], production: [] }));
+  }, [line.staff_id]);
+  const row = (k, v) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--line)' }}>
+      <span style={{ color: 'var(--muted)', fontSize: 13 }}>{k}</span><strong style={{ fontSize: 13, textAlign: 'right' }}>{v}</strong>
+    </div>
+  );
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 460, margin: 0, maxHeight: '85vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+          <strong style={{ fontSize: 16 }}>{line.full_name}</strong>
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px' }} onClick={onClose}>✕</button>
+        </div>
+        {row('Designation', (line.designation || '—').toString())}
+        {row('Site', line.location || '—')}
+        {line.ext_id ? row('Staff ID', line.ext_id) : null}
+        {line.account ? row('Bank', line.account) : null}
+        {row('Bags', `${(line.bags_loaded || 0).toLocaleString()} loaded · ${(line.bags_bagged || 0).toLocaleString()} bagged`)}
+        {(line.by_site || []).length > 1 && row('By site', siteSplitLabel(line.by_site))}
+        {row('Commission', ngn(line.commission))}
+
+        <div style={{ marginTop: 12, fontWeight: 700, fontSize: 13 }}>Bags by day</div>
+        {!bd ? <div className="skel" /> : (bd.production || []).length === 0
+          ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>No day-by-day records.</div>
+          : bd.production.map((p, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 0', borderBottom: '1px solid var(--line)' }}>
+              <span>{p.work_date} · {p.site_name}</span><span>L{p.bags_loaded} / B{p.bags_bagged}</span>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
 // Module-level (stable identity → no remount/flicker).
 // `flush` = rendered inside a SiteGroup, so drop the card chrome and shrink the header.
-function PayrollSection({ title, rows, qtyLabel, flush = false }) {
+// `onRow` = open a detail view when a row is clicked.
+function PayrollSection({ title, rows, qtyLabel, flush = false, onRow }) {
   return (
     <div className={flush ? '' : 'card'} style={{ padding: 0, overflow: 'hidden', marginBottom: flush ? 0 : 12 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', padding: flush ? '7px 14px' : '10px 14px', borderBottom: '1px solid var(--line)', background: flush ? '#fbfdff' : '#f8fafc', fontSize: flush ? 12 : undefined, color: flush ? 'var(--muted)' : undefined }}>
@@ -563,7 +605,8 @@ function PayrollSection({ title, rows, qtyLabel, flush = false }) {
       </div>
       {rows.length === 0 ? <div style={{ padding: 14, fontSize: 13, color: 'var(--muted)' }}>None with production this period</div>
         : rows.map((l) => (
-          <div key={l.staff_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+          <button key={l.staff_id} onClick={() => onRow && onRow(l)}
+            style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13, background: 'transparent', border: 'none', textAlign: 'left', cursor: onRow ? 'pointer' : 'default' }}>
             <span style={{ minWidth: 0, paddingRight: 8 }}>
               <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {l.full_name}<span style={{ color: 'var(--muted)' }}> · {(l.designation || '').toLowerCase()} · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
@@ -572,15 +615,15 @@ function PayrollSection({ title, rows, qtyLabel, flush = false }) {
                 <span style={{ display: 'block', fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{siteSplitLabel(l.by_site)}</span>
               )}
             </span>
-            <strong>{ngn(l.commission)}</strong>
-          </div>
+            <strong style={{ whiteSpace: 'nowrap' }}>{ngn(l.commission)}{onRow ? ' ›' : ''}</strong>
+          </button>
         ))}
     </div>
   );
 }
 
 // One collapsible site group: its baggers + loaders with a per-site subtotal.
-function SiteGroup({ site, baggers, loaders, open, onToggle }) {
+function SiteGroup({ site, baggers, loaders, open, onToggle, onRow }) {
   const total = [...baggers, ...loaders].reduce((a, l) => a + l.commission, 0);
   const count = baggers.length + loaders.length;
   return (
@@ -592,8 +635,8 @@ function SiteGroup({ site, baggers, loaders, open, onToggle }) {
       </button>
       {open && (
         <>
-          {baggers.length > 0 && <PayrollSection title="Baggers" rows={baggers} qtyLabel="bagged" flush />}
-          {loaders.length > 0 && <PayrollSection title="Loaders" rows={loaders} qtyLabel="loaded" flush />}
+          {baggers.length > 0 && <PayrollSection title="Baggers" rows={baggers} qtyLabel="bagged" flush onRow={onRow} />}
+          {loaders.length > 0 && <PayrollSection title="Loaders" rows={loaders} qtyLabel="loaded" flush onRow={onRow} />}
         </>
       )}
     </div>
@@ -601,7 +644,7 @@ function SiteGroup({ site, baggers, loaders, open, onToggle }) {
 }
 
 function MidMonthTab({ onSaved }) {
-  const { tenant, toast } = useStore();
+  const { tenant, toast, openModal, closeModal } = useStore();
   useRole();
   const [month, setMonth] = useState(thisMonth());
   const [data, setData] = useState(null);
@@ -618,6 +661,8 @@ function MidMonthTab({ onSaved }) {
     setLoading(false);
   }, [tenant, month]);
   useEffect(() => { preview(); }, [preview]);
+
+  const showDetail = (l) => openModal(<MidMonthDetail line={l} from={data?.from} to={data?.to} onClose={closeModal} />);
 
   const generate = async () => {
     setBusy(true);
@@ -692,12 +737,12 @@ function MidMonthTab({ onSaved }) {
               ) : bySite ? (
                 sites.map((s) => (
                   <SiteGroup key={s} site={s} baggers={forSite(baggers, s)} loaders={forSite(loaders, s)}
-                    open={openSites[s] ?? true} onToggle={() => toggleSite(s)} />
+                    open={openSites[s] ?? true} onToggle={() => toggleSite(s)} onRow={showDetail} />
                 ))
               ) : (
                 <>
-                  <PayrollSection title="Baggers" rows={baggers} qtyLabel="bagged" />
-                  <PayrollSection title="Loaders" rows={loaders} qtyLabel="loaded" />
+                  <PayrollSection title="Baggers" rows={baggers} qtyLabel="bagged" onRow={showDetail} />
+                  <PayrollSection title="Loaders" rows={loaders} qtyLabel="loaded" onRow={showDetail} />
                 </>
               )}
             </>
@@ -765,7 +810,9 @@ function SetupTab({ sites }) {
     try {
       const fd = new FormData(); fd.append('file', file);
       const r = await api(scopedAny('/payroll/staff-import'), { method: 'POST', form: fd });
-      toast(`Staff: ${r.created} added, ${r.updated} updated${r.sites_unmatched?.length ? ` · location(s) not matched: ${r.sites_unmatched.join(', ')}` : ''}`, 'ok');
+      const skipped = r.skipped_no_site?.length
+        ? ` · ⚠ ${r.skipped_no_site.length} skipped (no site — fix LOCATION & re-import)` : '';
+      toast(`Staff: ${r.created} added, ${r.updated} updated${r.sites_unmatched?.length ? ` · location(s) not matched: ${r.sites_unmatched.join(', ')}` : ''}${skipped}`, r.skipped_no_site?.length ? 'err' : 'ok');
       load();
     } catch (e) { toast(e.message, 'err'); }
     setImportingStaff(false);

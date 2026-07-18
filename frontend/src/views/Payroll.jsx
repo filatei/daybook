@@ -275,16 +275,23 @@ function RunTab({ sites, onSaved }) {
         const paid = lines.filter((l) => (l.gross || 0) > 0 && match(l));
         const others = lines.filter((l) => (l.gross || 0) <= 0 && match(l));
 
-        const rowBtn = (l) => (
-          <button key={l.staff_id} onClick={() => openDetail(l)}
-            style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--line)', background: 'transparent', border: 'none', borderBottomStyle: 'solid', textAlign: 'left', cursor: 'pointer' }}>
-            <span style={{ minWidth: 0 }}>
-              <span style={{ display: 'block', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.full_name}</span>
-              <span style={{ display: 'block', fontSize: 11.5, color: 'var(--muted)' }}>{summary(l)}</span>
-            </span>
-            <span style={{ textAlign: 'right', fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(net(l))} ›</span>
-          </button>
-        );
+        const rowBtn = (l) => {
+          // title · site line: the primary production site (or home site fallback).
+          const site = primarySite(l);
+          const title = (l.role_title || l.pay_type || '').toString();
+          const meta = [title, site !== '—' ? site : null].filter(Boolean).join(' · ');
+          return (
+            <button key={l.staff_id} onClick={() => openDetail(l)}
+              style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--line)', background: 'transparent', border: 'none', borderBottomStyle: 'solid', textAlign: 'left', cursor: 'pointer' }}>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: 'block', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.full_name}</span>
+                {meta && <span style={{ display: 'block', fontSize: 11.5, color: 'var(--muted)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{meta}</span>}
+                <span style={{ display: 'block', fontSize: 11.5, color: 'var(--muted)' }}>{summary(l)}</span>
+              </span>
+              <span style={{ textAlign: 'right', fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(net(l))} ›</span>
+            </button>
+          );
+        };
 
         // Sites present among the paid rows (sorted; "—" for no-site last).
         const siteNames = Array.from(new Set(paid.map(primarySite)))
@@ -559,7 +566,7 @@ function PayrollSection({ title, rows, qtyLabel, flush = false }) {
           <div key={l.staff_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
             <span style={{ minWidth: 0, paddingRight: 8 }}>
               <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {l.full_name}<span style={{ color: 'var(--muted)' }}> · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
+                {l.full_name}<span style={{ color: 'var(--muted)' }}> · {(l.designation || '').toLowerCase()} · {l.location} · {qtyLabel} {l.qty.toLocaleString()}</span>
               </span>
               {(l.by_site || []).length > 1 && (
                 <span style={{ display: 'block', fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{siteSplitLabel(l.by_site)}</span>

@@ -148,6 +148,8 @@ function RunTab({ sites, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
   const [q, setQ] = useState('');
+  const [bySiteView, setBySiteView] = useState(false);
+  const [openSites, setOpenSites] = useState({});
   // Mid-month pays per-bag commission only, so it lists baggers/loaders and
   // nothing else. Regular staff are on monthly salary and are paid at month-end.
   const [pieceOnly, setPieceOnly] = useState(false);
@@ -256,11 +258,23 @@ function RunTab({ sites, onSaved }) {
       </button>
 
       {lines && (() => {
+        if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
         const term = q.trim().toLowerCase();
-        const match = (l) => !term || String(l.full_name || '').toLowerCase().includes(term);
+        // A worker's site(s) come from their production split. The one with the most
+        // bags is their primary site; regular staff with no bags group under "—".
+        const sitesOf = (l) => (l.by_site || []).map((s) => s.site_name).filter(Boolean);
+        const primarySite = (l) => {
+          const bs = l.by_site || [];
+          if (!bs.length) return '—';
+          return (bs.reduce((a, b) => ((b.loaded + b.bagged) > (a.loaded + a.bagged) ? b : a)).site_name) || '—';
+        };
+        // Search matches name OR any site the person worked at, so "mbiama" isolates a site.
+        const match = (l) => !term
+          || String(l.full_name || '').toLowerCase().includes(term)
+          || sitesOf(l).join(' ').toLowerCase().includes(term);
         const paid = lines.filter((l) => (l.gross || 0) > 0 && match(l));
         const others = lines.filter((l) => (l.gross || 0) <= 0 && match(l));
-        if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
+
         const rowBtn = (l) => (
           <button key={l.staff_id} onClick={() => openDetail(l)}
             style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--line)', background: 'transparent', border: 'none', borderBottomStyle: 'solid', textAlign: 'left', cursor: 'pointer' }}>
@@ -271,16 +285,55 @@ function RunTab({ sites, onSaved }) {
             <span style={{ textAlign: 'right', fontWeight: 800, whiteSpace: 'nowrap' }}>{ngn(net(l))} ›</span>
           </button>
         );
+
+        // Sites present among the paid rows (sorted; "—" for no-site last).
+        const siteNames = Array.from(new Set(paid.map(primarySite)))
+          .sort((a, b) => (a === '—' ? 1 : b === '—' ? -1 : a.localeCompare(b)));
+        const toggleSite = (s) => setOpenSites((o) => ({ ...o, [s]: !o[s] }));
+
         return (
           <>
             <div className="card" style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{paid.length} paid · Gross {ngn(totGross)}</span>
+              <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+                {paid.length} paid · {siteNames.length} site{siteNames.length === 1 ? '' : 's'} · Gross {ngn(totGross)}
+              </span>
               <span style={{ fontWeight: 800 }}>Net {ngn(totNet)}</span>
             </div>
-            <input className="input" style={{ margin: '8px 0' }} placeholder="Search staff by name…" value={q} onChange={(e) => setQ(e.target.value)} />
+
+            <div style={{ display: 'flex', gap: 8, margin: '8px 0', flexWrap: 'wrap' }}>
+              <input className="input" style={{ flex: '1 1 180px' }} placeholder="Search name or site (e.g. Mbiama)…" value={q} onChange={(e) => setQ(e.target.value)} />
+              <button className={`btn btn-sm ${bySiteView ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '8px 14px' }}
+                onClick={() => { setBySiteView((v) => !v); if (!bySiteView) setOpenSites(Object.fromEntries(siteNames.map((s) => [s, true]))); }}>
+                {bySiteView ? '✓ Grouped by site' : 'Group by site'}
+              </button>
+            </div>
+
+            {bySiteView && paid.length > 0 && (
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setOpenSites(Object.fromEntries(siteNames.map((s) => [s, true])))}>Expand all</button>
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setOpenSites({})}>Collapse all</button>
+              </div>
+            )}
+
             {paid.length === 0
-              ? <div className="empty"><div className="ic">💰</div><p>No one has pay this period. Set rates/salaries under Rates.</p></div>
-              : <div className="card" style={{ padding: 0, overflow: 'hidden' }}>{paid.map(rowBtn)}</div>}
+              ? <div className="empty"><div className="ic">💰</div><p>{term ? `No paid staff match “${q}”.` : 'No one has pay this period. Set rates/salaries under Rates.'}</p></div>
+              : bySiteView
+                ? siteNames.map((s) => {
+                  const rows = paid.filter((l) => primarySite(l) === s);
+                  const subtotal = rows.reduce((a, l) => a + net(l), 0);
+                  const open = openSites[s] ?? true;
+                  return (
+                    <div key={s} className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 10 }}>
+                      <button onClick={() => toggleSite(s)}
+                        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', border: 'none', background: '#f8fafc', padding: '11px 14px', cursor: 'pointer', textAlign: 'left', borderBottom: open ? '1px solid var(--line)' : 'none' }}>
+                        <strong>{open ? '▾' : '▸'} {s === '—' ? 'No production site' : s} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {rows.length}</span></strong>
+                        <strong>{ngn(subtotal)}</strong>
+                      </button>
+                      {open && rows.map(rowBtn)}
+                    </div>
+                  );
+                })
+                : <div className="card" style={{ padding: 0, overflow: 'hidden' }}>{paid.map(rowBtn)}</div>}
 
             {others.length > 0 && (
               <div style={{ marginTop: 10 }}>

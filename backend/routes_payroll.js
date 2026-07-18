@@ -830,7 +830,14 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
 
     // Match an existing staff by ext id (preferred) or by name within the tenant.
     let existing = id ? await qone('SELECT id FROM staff WHERE tenant_id=? AND ext_people_id=?', [c.tenant_id, id]) : null;
-    if (!existing && full) existing = await qone('SELECT id FROM staff WHERE tenant_id=? AND LOWER(full_name)=?', [c.tenant_id, full.toLowerCase()]);
+    // Name match must be whitespace-insensitive, or "BLESSING  FELIX" (double space)
+    // imports as a NEW row alongside "BLESSING FELIX" — which is how the roster grew
+    // ~80 duplicate people. Collapse runs of whitespace on BOTH sides before compare.
+    if (!existing && full) {
+      existing = await qone(
+        "SELECT id FROM staff WHERE tenant_id=? AND LOWER(REGEXP_REPLACE(TRIM(full_name), '\\s+', ' ', 'g')) = ?",
+        [c.tenant_id, full.toLowerCase().replace(/\s+/g, ' ')]);
+    }
     if (existing) {
       await qrun(`UPDATE staff SET full_name=?, role_title=?, staff_type=?, pay_type=?, bank_name=COALESCE(?,bank_name), bank_account=COALESCE(?,bank_account),
         ${baseSalary > 0 ? 'daily_rate=?,' : ''} ext_people_id=COALESCE(?,ext_people_id), site_id=COALESCE(?,site_id), status='ACTIVE' WHERE id=?`,

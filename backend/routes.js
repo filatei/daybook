@@ -1949,11 +1949,16 @@ router.get('/attendance', requireAuth, async (req, res) => {
   }
   if (siteBound(s.ctx)) { where.push('a.site_id=?'); args.push(s.ctx.site_id); }
   else if (req.query.site) { where.push('a.site_id=?'); args.push(req.query.site); }
-  const rows = await qall(`SELECT a.*, st.full_name, si.name site_name FROM attendance a
+  const rows = await qall(`SELECT a.*, st.full_name, st.role_title, st.staff_type, st.phone, st.bank_name, st.bank_account,
+      si.name site_name FROM attendance a
     LEFT JOIN staff st ON st.id=a.staff_id LEFT JOIN sites si ON si.id=a.site_id
     WHERE ${where.join(' AND ')} ORDER BY a.work_date DESC, a.clock_in DESC, st.full_name LIMIT 500`, args);
   res.json(rows.map((r) => ({
-    id: r.id, staff_id: r.staff_id, staff: r.full_name, site_id: r.site_id, site: r.site_name, work_date: r.work_date,
+    id: r.id, staff_id: r.staff_id, staff: r.full_name,
+    // Human title for the row: role_title, else the piece designation (bagger/loader).
+    title: r.role_title || (r.staff_type && r.staff_type !== 'REGULAR' ? r.staff_type.charAt(0) + r.staff_type.slice(1).toLowerCase() : null),
+    staff_type: r.staff_type, phone: r.phone, bank: [r.bank_name, r.bank_account].filter(Boolean).join('-') || null,
+    site_id: r.site_id, site: r.site_name, work_date: r.work_date,
     clock_in: r.clock_in, clock_out: r.clock_out, has_photo_in: !!r.photo_in, has_photo_out: !!r.photo_out, has_signature: !!r.signature,
     source: r.source, match_score: r.match_score, in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
   })));

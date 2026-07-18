@@ -90,7 +90,9 @@ UPDATE attendance SET staff_id = m.to_id FROM _map m WHERE attendance.staff_id =
 UPDATE staff_advances SET staff_id = m.to_id FROM _map m WHERE staff_advances.staff_id = m.from_id;
 
 -- 7. Retire the folded records (kept, not deleted — preserves history & ids).
-UPDATE staff SET status='LEFT', payroll_eligible=FALSE,
+--    INACTIVE, not LEFT: a merged duplicate did not "leave the company", and
+--    INACTIVE is accepted by staff_status_check regardless of migration order.
+UPDATE staff SET status='INACTIVE', payroll_eligible=FALSE,
   exit_reason = 'Merged into canonical ' || m.to_id, eligibility_at = EXTRACT(EPOCH FROM NOW())::BIGINT
 FROM _map m WHERE staff.id = m.from_id;
 

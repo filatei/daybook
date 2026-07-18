@@ -691,6 +691,12 @@ async function migrate() {
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS eligibility_by   TEXT;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS eligibility_at   BIGINT;
     UPDATE staff SET payroll_eligible = TRUE WHERE payroll_eligible IS NULL;
+    -- The original staff.status CHECK only allowed ('ACTIVE','INACTIVE'), so the
+    -- eligibility feature's status='LEFT' (and the dup-merge) were rejected at the
+    -- DB. Widen it. LEFT = departed the company; INACTIVE = retired/merged record.
+    ALTER TABLE staff DROP CONSTRAINT IF EXISTS staff_status_check;
+    ALTER TABLE staff ADD CONSTRAINT staff_status_check
+      CHECK (status IN ('ACTIVE','INACTIVE','SUSPENDED','LEFT'));
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_name   TEXT;
     ALTER TABLE staff ADD COLUMN IF NOT EXISTS bank_account TEXT;
     -- Passport-style staff photo (small JPEG data URL) for the ID badge.

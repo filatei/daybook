@@ -400,8 +400,49 @@ function ClockModal({ staff, todayRecord, onDone, onClose, enroll = false }) {
 // ── Attendance report (date range) ───────────────────────────────────────────
 const clockTime = (s) => s ? new Date(s * 1000).toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }) : '—';
 
+// Detail for one attendance record — identity, title, site, times, match, photos.
+function AttendanceDetail({ rec, onViewPhoto, onClose }) {
+  const row = (k, v) => v == null || v === '' ? null : (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid var(--line)' }}>
+      <span style={{ color: 'var(--muted)', fontSize: 13 }}>{k}</span><strong style={{ fontSize: 13, textAlign: 'right' }}>{v}</strong>
+    </div>
+  );
+  const dur = (() => {
+    if (!rec.clock_in || !rec.clock_out) return null;
+    const secs = Number(rec.clock_out) - Number(rec.clock_in); // stored as unix seconds
+    if (!(secs > 0)) return null;
+    const h = Math.floor(secs / 3600), m = Math.round((secs % 3600) / 60);
+    return `${h}h ${m}m`;
+  })();
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+      <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 440, margin: 0, maxHeight: '85vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+          <strong style={{ fontSize: 16 }}>{rec.staff || 'Staff'}</strong>
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px' }} onClick={onClose}>✕</button>
+        </div>
+        {row('Title', rec.title || '—')}
+        {row('Site', rec.site || '—')}
+        {row('Date', rec.work_date)}
+        {row('Clock in', clockTime(rec.clock_in))}
+        {row('Clock out', clockTime(rec.clock_out))}
+        {row('On site', dur)}
+        {row('Verification', rec.match_score != null ? `${Number(rec.match_score).toFixed(2)} ${rec.match_score <= 0.55 ? '✓ matched' : '⚠ low'}` : (rec.source === 'PRODUCTION' ? 'from production' : rec.source || '—'))}
+        {row('Phone', rec.phone)}
+        {row('Bank', rec.bank)}
+        {(rec.has_photo_in || rec.has_photo_out) && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            {rec.has_photo_in && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => onViewPhoto(rec.id, 'in')}>📷 Clock-in photo</button>}
+            {rec.has_photo_out && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => onViewPhoto(rec.id, 'out')}>📷 Clock-out photo</button>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AttendanceReport({ siteFilter }) {
-  const { tenant, toast } = useStore();
+  const { tenant, toast, openModal, closeModal } = useStore();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [from, setFrom] = useState(today());
@@ -441,13 +482,17 @@ function AttendanceReport({ siteFilter }) {
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {rows.map((r) => (
             <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{r.staff || 'Staff'}</div>
+              <button onClick={() => openModal(<AttendanceDetail rec={r} onViewPhoto={viewPhoto} onClose={closeModal} />)}
+                style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
+                <div style={{ fontWeight: 700 }}>
+                  {r.staff || 'Staff'}
+                  {r.title ? <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}> · {r.title}</span> : null}
+                </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                   {r.work_date} · {r.site || '—'} · in {clockTime(r.clock_in)} · out {clockTime(r.clock_out)}
                   {r.match_score != null ? ` · match ${Number(r.match_score).toFixed(2)}${r.match_score <= 0.55 ? ' ✓' : ' ⚠'}` : ''}
                 </div>
-              </div>
+              </button>
               {r.has_photo_in && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 8px' }} onClick={() => viewPhoto(r.id, 'in')}>📷 In</button>}
               {r.has_photo_out && <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 8px' }} onClick={() => viewPhoto(r.id, 'out')}>📷 Out</button>}
             </div>

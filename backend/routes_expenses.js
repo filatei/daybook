@@ -659,25 +659,36 @@ router.get('/:id/payments', requireAuth, async (req, res) => {
 });
 
 // Record a (partial) payment against an expense ticket — Secretary/Manager+.
-router.post('/:id/payments', requireAuth, async (req, res) => {
+// A payment MUST carry a receipt (bank slip / voucher). The file rides in the same
+// multipart request so the payment and its proof are stored together — no payment
+// can exist without evidence, and a client can't drop the second call. The receipt
+// is pinned to the payment id it evidences.
+const cleanupUpload = (req) => { if (req.file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename)); } catch { /* ignore */ } } };
+router.post('/:id/payments', requireAuth, upload.single('file'), async (req, res) => {
   const a = await expenseAccess(req, req.params.id);
-  if (!a) return res.status(404).json({ error: 'not found' });
-  if (!atLeast(a.ctx.role, 'SECRETARY')) return res.status(403).json({ error: 'forbidden' });
+  if (!a) { cleanupUpload(req); return res.status(404).json({ error: 'not found' }); }
+  if (!atLeast(a.ctx.role, 'SECRETARY')) { cleanupUpload(req); return res.status(403).json({ error: 'forbidden' }); }
+  // Enforce the receipt. Reject (and discard any partial upload) if none.
+  if (!req.file) return res.status(400).json({ error: 'a receipt is required to record a payment' });
   const b = req.body || {};
   const amount = Math.round((+b.amount || 0) * 100) / 100;
-  if (!(amount > 0)) return res.status(400).json({ error: 'amount required' });
+  if (!(amount > 0)) { cleanupUpload(req); return res.status(400).json({ error: 'amount required' }); }
   const total = +a.expense.amount || 0;
   const already = +a.expense.amount_paid || 0;
   const remaining = Math.max(0, Math.round((total - already) * 100) / 100);
-  if (amount > remaining + 0.01) return res.status(400).json({ error: `exceeds balance — ₦${remaining.toLocaleString()} left to pay` });
+  if (amount > remaining + 0.01) { cleanupUpload(req); return res.status(400).json({ error: `exceeds balance — ₦${remaining.toLocaleString()} left to pay` }); }
   const id = uuid();
   const pay_date = (b.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   await qrun('INSERT INTO expense_payments (id,tenant_id,expense_id,pay_date,amount,method,bank,memo,paid_by) VALUES (?,?,?,?,?,?,?,?,?)',
     [id, a.expense.tenant_id, a.expense.id, pay_date, amount, b.method || null, (b.bank || '').toUpperCase() || null, b.memo || null, req.user.id]);
+  // Store the receipt, pinned to this payment.
+  await qrun('INSERT INTO expense_attachments (id,tenant_id,expense_id,payment_id,note,file_name,stored_name,mime,size,uploaded_by) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [uuid(), a.expense.tenant_id, a.expense.id, id, (b.memo ? String(b.memo).trim() : null) || null,
+      req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, req.user.id]);
   const paid = Math.round((already + amount) * 100) / 100;
   const status = payStatus(total, paid);
   await qrun('UPDATE expenses SET amount_paid=?, status=? WHERE id=?', [paid, status, a.expense.id]);
-  res.status(201).json({ id, amount_paid: paid, balance: Math.max(0, Math.round((total - paid) * 100) / 100), status });
+  res.status(201).json({ id, amount_paid: paid, balance: Math.max(0, Math.round((total - paid) * 100) / 100), status, receipt: true });
 });
 
 // Reverse a single payment line — Manager+. If removing it drops a fully-paid

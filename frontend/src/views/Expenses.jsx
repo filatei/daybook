@@ -88,9 +88,18 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
   const recordPayment = async () => {
     const amt = +payForm.amount || 0;
     if (!(amt > 0)) return toast('Enter an amount', 'err');
+    if (!payForm.file) return toast('Attach the receipt / bank slip to record this payment', 'err');
     setPaying(true);
     try {
-      const r = await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, date: payForm.date, method: payForm.method || null, bank: payForm.bank || null, memo: payForm.memo || null } });
+      // Payment + receipt together — the server rejects a payment without proof.
+      const fd = new FormData();
+      fd.append('amount', String(amt));
+      if (payForm.date) fd.append('date', payForm.date);
+      if (payForm.method) fd.append('method', payForm.method);
+      if (payForm.bank) fd.append('bank', payForm.bank);
+      if (payForm.memo) fd.append('memo', payForm.memo);
+      fd.append('file', payForm.file);
+      const r = await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', form: fd });
       setPaid(r.amount_paid); setPayForm(null); loadPayments(); onSave && onSave();
       toast(r.status === 'PAID' ? 'Fully paid ✓' : 'Payment recorded ✓', 'ok');
     } catch (e) { toast(e.message || 'Payment failed', 'err'); }
@@ -174,9 +183,13 @@ function ExpenseForm({ expense, sites, onSave, onClose }) {
                 <div><label className="fl">Bank (optional)</label><input className="input" value={payForm.bank} onChange={(e) => setPayForm((p) => ({ ...p, bank: e.target.value }))} placeholder="e.g. GTB" /></div>
               </div>
               <input className="input" style={{ marginTop: 6 }} value={payForm.memo} onChange={(e) => setPayForm((p) => ({ ...p, memo: e.target.value }))} placeholder="memo (optional)" />
+              <label className="fl" style={{ marginTop: 6 }}>Receipt / bank slip <span style={{ color: 'var(--err)' }}>(required)</span></label>
+              <input type="file" className="input"
+                accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.heic,.xls,.xlsx,.doc,.docx,.txt,image/*"
+                onChange={(e) => setPayForm((p) => ({ ...p, file: e.target.files?.[0] || null }))} />
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => setPayForm(null)} disabled={paying}>Cancel</button>
-                <button className="btn" style={{ flex: 1 }} onClick={recordPayment} disabled={paying || !((+payForm.amount || 0) > 0)}>{paying ? <span className="spin" /> : 'Record payment'}</button>
+                <button className="btn" style={{ flex: 1 }} onClick={recordPayment} disabled={paying || !((+payForm.amount || 0) > 0) || !payForm.file}>{paying ? <span className="spin" /> : 'Record payment'}</button>
               </div>
             </div>
           ) : (
@@ -622,18 +635,18 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     const amt = Math.round((parseFloat(payAmt) || 0) * 100) / 100;
     if (!(amt > 0)) return toast('Enter an amount', 'err');
     if (amt > balance + 0.01) return toast(`Max ₦${balance.toLocaleString()} — that's the balance`, 'err');
+    if (!payFile) return toast('Attach the receipt / bank slip to record this payment', 'err');
     setBusy(true);
     try {
-      const created = await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', body: { amount: amt, method: payBank ? 'TRANSFER' : 'CASH', bank: payBank || null, memo: payNote.trim() || null } });
-      // Pin the slip to THIS payment, not just the ticket — so a receipt can always
-      // be matched back to the exact transfer that left the bank.
-      if (payFile) {
-        const fd = new FormData();
-        fd.append('file', payFile);
-        if (payNote.trim()) fd.append('note', payNote.trim());
-        if (created && created.id) fd.append('payment_id', created.id);
-        await api(ts(`/expenses/${expense.id}/attachments`), { method: 'POST', form: fd }).catch(() => {});
-      }
+      // Payment + receipt in ONE request so proof is stored with the payment and
+      // can't be skipped. The server rejects a payment with no receipt.
+      const fd = new FormData();
+      fd.append('amount', String(amt));
+      fd.append('method', payBank ? 'TRANSFER' : 'CASH');
+      if (payBank) fd.append('bank', payBank);
+      if (payNote.trim()) fd.append('memo', payNote.trim());
+      fd.append('file', payFile);
+      await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', form: fd });
       const newPaid = Math.round((paid + amt) * 100) / 100;
       const newBal = Math.max(0, Math.round((billed - newPaid) * 100) / 100);
       if (newBal <= 0.01 && wf === 'APPROVED') { try { await api(ts(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action: 'pay' } }); } catch { /* keep going */ } }
@@ -840,13 +853,14 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
             : <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>No bank selected — will record as cash.</div>}
           <label className="fl" style={{ marginTop: 8 }}>Note (optional)</label>
           <input className="input" value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="e.g. transfer ref, teller no." />
-          <label className="fl" style={{ marginTop: 8 }}>Receipt (optional)</label>
+          <label className="fl" style={{ marginTop: 8 }}>Receipt / bank slip <span style={{ color: 'var(--err)' }}>(required)</span></label>
           <input id="exp-pay-file" type="file" className="input"
             accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.heic,.xls,.xlsx,.doc,.docx,.txt,image/*"
             onChange={(e) => setPayFile(e.target.files?.[0] || null)} />
+          {!payFile && <div style={{ fontSize: 12, color: 'var(--err)', margin: '4px 2px 0' }}>A payment cannot be recorded without proof — attach the receipt or bank slip.</div>}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 8, marginTop: 12 }}>
             <button className="btn btn-ghost" disabled={busy} onClick={() => { setPayOpen(false); setPayFile(null); }}>Cancel</button>
-            <button className="btn" disabled={busy || !((parseFloat(payAmt) || 0) > 0) || (parseFloat(payAmt) || 0) > balance + 0.01} onClick={submitPay}>{busy ? <span className="spin" /> : `💵 Pay ${ngn(Math.round((parseFloat(payAmt) || 0) * 100) / 100)}`}</button>
+            <button className="btn" disabled={busy || !((parseFloat(payAmt) || 0) > 0) || (parseFloat(payAmt) || 0) > balance + 0.01 || !payFile} onClick={submitPay}>{busy ? <span className="spin" /> : `💵 Pay ${ngn(Math.round((parseFloat(payAmt) || 0) * 100) / 100)}`}</button>
           </div>
         </div>
       )}

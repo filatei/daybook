@@ -493,10 +493,11 @@ function LineEditor({ line, onClose, onSave }) {
 // ── Mid-month: auto piece-worker incentive (16th prev → 15th) from production ──
 const thisMonth = () => today().slice(0, 7);
 // Module-level (stable identity → no remount/flicker).
-function PayrollSection({ title, rows, qtyLabel }) {
+// `flush` = rendered inside a SiteGroup, so drop the card chrome and shrink the header.
+function PayrollSection({ title, rows, qtyLabel, flush = false }) {
   return (
-    <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid var(--line)', background: '#f8fafc' }}>
+    <div className={flush ? '' : 'card'} style={{ padding: 0, overflow: 'hidden', marginBottom: flush ? 0 : 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', padding: flush ? '7px 14px' : '10px 14px', borderBottom: '1px solid var(--line)', background: flush ? '#fbfdff' : '#f8fafc', fontSize: flush ? 12 : undefined, color: flush ? 'var(--muted)' : undefined }}>
         <strong>{title} ({rows.length})</strong>
         <strong>{ngn(rows.reduce((a, l) => a + l.commission, 0))}</strong>
       </div>
@@ -518,6 +519,27 @@ function PayrollSection({ title, rows, qtyLabel }) {
   );
 }
 
+// One collapsible site group: its baggers + loaders with a per-site subtotal.
+function SiteGroup({ site, baggers, loaders, open, onToggle }) {
+  const total = [...baggers, ...loaders].reduce((a, l) => a + l.commission, 0);
+  const count = baggers.length + loaders.length;
+  return (
+    <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 10 }}>
+      <button onClick={onToggle}
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', border: 'none', background: '#f8fafc', padding: '11px 14px', cursor: 'pointer', textAlign: 'left', borderBottom: open ? '1px solid var(--line)' : 'none' }}>
+        <strong>{open ? '▾' : '▸'} {site} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {count} staff</span></strong>
+        <strong>{ngn(total)}</strong>
+      </button>
+      {open && (
+        <>
+          {baggers.length > 0 && <PayrollSection title="Baggers" rows={baggers} qtyLabel="bagged" flush />}
+          {loaders.length > 0 && <PayrollSection title="Loaders" rows={loaders} qtyLabel="loaded" flush />}
+        </>
+      )}
+    </div>
+  );
+}
+
 function MidMonthTab({ onSaved }) {
   const { tenant, toast } = useStore();
   useRole();
@@ -525,6 +547,9 @@ function MidMonthTab({ onSaved }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [q, setQ] = useState('');
+  const [bySite, setBySite] = useState(false);
+  const [openSites, setOpenSites] = useState({});
 
   const preview = useCallback(async () => {
     setLoading(true); setData(null);
@@ -540,6 +565,19 @@ function MidMonthTab({ onSaved }) {
     catch (e) { toast(e.message || 'Generate failed', 'err'); }
     setBusy(false);
   };
+
+  // Search filters on name OR site, so "mbiama" isolates that site's workers.
+  const needle = q.trim().toLowerCase();
+  const match = (l) => !needle || (l.full_name || '').toLowerCase().includes(needle) || (l.location || '').toLowerCase().includes(needle);
+  const baggers = (data?.baggers || []).filter(match);
+  const loaders = (data?.loaders || []).filter(match);
+  const shownTotal = [...baggers, ...loaders].reduce((a, l) => a + l.commission, 0);
+
+  // Every site present in the result, so grouping shows which sites are captured
+  // — and, by their absence, which are not (e.g. no production logged there).
+  const sites = Array.from(new Set([...baggers, ...loaders].map((l) => l.location || '(no site)'))).sort();
+  const forSite = (rows, s) => rows.filter((l) => (l.location || '(no site)') === s);
+  const toggleSite = (s) => setOpenSites((o) => ({ ...o, [s]: !o[s] }));
 
   return (
     <div>
@@ -563,12 +601,45 @@ function MidMonthTab({ onSaved }) {
         : !data ? null
           : (
             <>
-              <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
-                <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{data.count} staff · {data.from} → {data.to}</span>
-                <span style={{ fontWeight: 800, fontSize: 18 }}>{ngn(data.total)}</span>
+              {/* Search + group toggle */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+                <input className="input" style={{ flex: '1 1 180px' }} value={q} onChange={(e) => setQ(e.target.value)}
+                  placeholder="Search name or site (e.g. Mbiama)…" />
+                <button className={`btn btn-sm ${bySite ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '8px 14px' }}
+                  onClick={() => { setBySite((v) => !v); if (!bySite) setOpenSites(Object.fromEntries(sites.map((s) => [s, true]))); }}>
+                  {bySite ? '✓ Grouped by site' : 'Group by site'}
+                </button>
               </div>
-              <PayrollSection title="Baggers" rows={data.baggers} qtyLabel="bagged" />
-              <PayrollSection title="Loaders" rows={data.loaders} qtyLabel="loaded" />
+
+              <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', marginBottom: 12 }}>
+                <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+                  {baggers.length + loaders.length}{needle ? ` of ${data.count}` : ''} staff · {sites.length} site{sites.length === 1 ? '' : 's'} · {data.from} → {data.to}
+                </span>
+                <span style={{ fontWeight: 800, fontSize: 18 }}>{ngn(shownTotal)}</span>
+              </div>
+
+              {bySite && (
+                <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+                  <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+                    onClick={() => setOpenSites(Object.fromEntries(sites.map((s) => [s, true])))}>Expand all</button>
+                  <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+                    onClick={() => setOpenSites({})}>Collapse all</button>
+                </div>
+              )}
+
+              {baggers.length + loaders.length === 0 ? (
+                <div className="empty"><div className="ic">🔍</div><p>No baggers or loaders match “{q}”.</p></div>
+              ) : bySite ? (
+                sites.map((s) => (
+                  <SiteGroup key={s} site={s} baggers={forSite(baggers, s)} loaders={forSite(loaders, s)}
+                    open={openSites[s] ?? true} onToggle={() => toggleSite(s)} />
+                ))
+              ) : (
+                <>
+                  <PayrollSection title="Baggers" rows={baggers} qtyLabel="bagged" />
+                  <PayrollSection title="Loaders" rows={loaders} qtyLabel="loaded" />
+                </>
+              )}
             </>
           )}
     </div>

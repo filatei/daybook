@@ -40,7 +40,6 @@ function Num({ label, path, value, unclear, money = false, onChange }) {
 // ── Capture: upload a slip, confirm the figures, save ────────────────────────
 function CaptureForm({ sites, day, onSaved, onClose }) {
   const { toast } = useStore();
-  const [file, setFile] = useState(null);
   const [reading, setReading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [f, setF] = useState({ ...BLANK, business_date: day });
@@ -56,7 +55,7 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
   // Upload → AI reads it → prefill the form. Never blocks: on any failure the
   // user just types the numbers.
   const read = async (chosen) => {
-    setFile(chosen); if (!chosen) return;
+    if (!chosen) return;
     setReading(true); setAiNote('');
     try {
       const fd = new FormData(); fd.append('file', chosen);

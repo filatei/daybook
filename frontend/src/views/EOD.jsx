@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
+import { shrinkImage, kb } from '../lib/shrinkImage.js';
 
 // End-of-day POS capture: photograph each terminal's EOD slip, AI reads the
 // figures, the user fixes anything unclear, and the day rolls up per site with
@@ -41,6 +42,7 @@ function Num({ label, path, value, unclear, money = false, onChange }) {
 function CaptureForm({ sites, day, onSaved, onClose }) {
   const { toast } = useStore();
   const [reading, setReading] = useState(false);
+  const [shrunk, setShrunk] = useState(null);   // { from, to } bytes, for reassurance
   const [busy, setBusy] = useState(false);
   const [f, setF] = useState({ ...BLANK, business_date: day });
   const [meta, setMeta] = useState(null);     // { stored_name, file_name, mime }
@@ -70,9 +72,15 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
     if (abortRef.current) abortRef.current.abort();
     const ac = new AbortController(); abortRef.current = ac;
     const timer = setTimeout(() => ac.abort(), READ_TIMEOUT_MS);
-    setReading(true); setAiNote('');
+    setReading(true); setAiNote(''); setShrunk(null);
     try {
-      const fd = new FormData(); fd.append('file', chosen);
+      // Shrink first: a 3 MB phone photo becomes ~200 KB with no loss of
+      // legibility for printed text. Cuts upload time, model latency (the usual
+      // cause of a timeout) and image-token cost. Falls back to the original if
+      // resizing isn't possible.
+      const small = await shrinkImage(chosen);
+      if (small !== chosen) setShrunk({ from: chosen.size, to: small.size });
+      const fd = new FormData(); fd.append('file', small);
       const r = await api(scoped('/eod/extract'), { method: 'POST', form: fd, signal: ac.signal });
       setMeta(r.file || null);
       const x = r.extract || BLANK;
@@ -138,6 +146,11 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
       )}
       {!reading && aiNote && (
         <div style={{ fontSize: 12.5, margin: '6px 2px', color: u.length ? '#b45309' : 'var(--muted)' }}>{aiNote}</div>
+      )}
+      {shrunk && (
+        <div style={{ fontSize: 11.5, color: 'var(--muted)', margin: '2px 2px 0' }}>
+          Photo compressed {kb(shrunk.from)} → {kb(shrunk.to)} before upload.
+        </div>
       )}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>

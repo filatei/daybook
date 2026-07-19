@@ -33,7 +33,8 @@ const userMsg = (t) => ({
 }[t] || 'AI service returned an error. Please try again.');
 
 const retriable = (t) => t === 'overloaded_error' || t === 'rate_limit_error';
-const flatten = (c) => (typeof c === 'string' ? c : c.filter((b) => b.type === 'text').map((b) => b.text).join('\n'));
+// (was `flatten` — replaced by toOpenAIContent() below, which preserves images
+//  instead of discarding them. Kept out to avoid two ways of shaping content.)
 
 async function callAnthropic(url, key, model, system, messages, maxTokens) {
   const res = await fetch(url, {
@@ -51,8 +52,30 @@ async function callAnthropic(url, key, model, system, messages, maxTokens) {
   return (data.content || []).find((b) => b.type === 'text')?.text || '';
 }
 
+// Anthropic content blocks → OpenAI-compatible ones (NVIDIA NIM, Ollama, LM Studio).
+// Images MUST be translated, not flattened away: Anthropic uses
+//   { type:'image', source:{ type:'base64', media_type, data } }
+// OpenAI-compatible APIs use
+//   { type:'image_url', image_url:{ url:'data:<mime>;base64,<data>' } }
+// `flatten()` drops non-text blocks, so a vision call (e.g. reading a POS EOD slip)
+// would silently lose its photo and the model would answer from the prompt alone.
+function toOpenAIContent(c) {
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c)) return '';
+  const parts = c.map((b) => {
+    if (b.type === 'text') return { type: 'text', text: b.text };
+    if (b.type === 'image' && b.source && b.source.type === 'base64') {
+      return { type: 'image_url', image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } };
+    }
+    if (b.type === 'image_url') return b;   // already OpenAI-shaped
+    return null;
+  }).filter(Boolean);
+  // Plain-text-only messages stay strings — widest compatibility with older servers.
+  return parts.every((p) => p.type === 'text') ? parts.map((p) => p.text).join('\n') : parts;
+}
+
 async function callOpenAICompat(url, key, model, system, messages, maxTokens) {
-  const oai = [{ role: 'system', content: system }, ...messages.map((m) => ({ role: m.role, content: flatten(m.content) }))];
+  const oai = [{ role: 'system', content: system }, ...messages.map((m) => ({ role: m.role, content: toOpenAIContent(m.content) }))];
   const headers = { 'Content-Type': 'application/json' };
   if (key) headers.Authorization = `Bearer ${key}`;
   const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ model, max_tokens: maxTokens, messages: oai }) });

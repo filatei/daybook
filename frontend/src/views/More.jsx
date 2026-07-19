@@ -27,6 +27,7 @@ export default function More() {
     { id: 'payroll',    group: 'People', icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isAcct },
 
     { id: 'profit',       group: 'Finance', icon: '📈', label: 'Profit & Loss', desc: 'Revenue − expenses by site & period',      show: isMgr },
+    { id: 'eod',          group: 'Finance', icon: '🧾', label: 'End-of-day POS', desc: 'Photograph each terminal’s EOD slip — totals & variance', show: isSec },
     { id: 'reconcile',    group: 'Finance', icon: '🏦', label: 'Reconcile',  desc: 'Match transfers, POS & cash deposits',    show: isAcct },
     { id: 'consolidated', group: 'Finance', icon: '🧾', label: 'Consolidated report', desc: 'All-sites end-of-day total — auto + manual, email', show: isSnr },
 

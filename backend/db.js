@@ -1374,6 +1374,58 @@ async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_pos_terminals_ext
       ON pos_terminals(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_pos_terminals_tenant ON pos_terminals(tenant_id);
+
+    -- ── End-of-day POS totals, one row per terminal per business day ──────────
+    -- The site photographs the terminal's EOD slip; AI reads the figures and the
+    -- user corrects anything unclear. Mirrors the slip exactly: a PURCHASE (card)
+    -- section and a POS TRANSFER section, each with volumes and amounts.
+    -- Amounts are NAIRA (numeric), matching pos_sales.total, so variance against
+    -- what was keyed into Daybook is a direct subtraction.
+    CREATE TABLE IF NOT EXISTS pos_eod (
+      id             TEXT PRIMARY KEY,
+      tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+      site_id        TEXT REFERENCES sites(id),
+      terminal_id    TEXT,               -- as printed on the slip
+      pos_terminal   TEXT,               -- resolved pos_terminals.id, when matched
+      bank           TEXT,               -- resolved acquirer (Moniepoint, GTB…)
+      business_date  TEXT NOT NULL,      -- the day the slip covers (YYYY-MM-DD)
+
+      -- PURCHASE SUMMARY (card)
+      p_volume       INTEGER DEFAULT 0,
+      p_successful   INTEGER DEFAULT 0,
+      p_failed       INTEGER DEFAULT 0,
+      p_pending      INTEGER DEFAULT 0,
+      p_approved     DOUBLE PRECISION DEFAULT 0,
+      p_pending_amt  DOUBLE PRECISION DEFAULT 0,
+      p_failed_amt   DOUBLE PRECISION DEFAULT 0,
+
+      -- POS TRANSFER SUMMARY
+      t_volume       INTEGER DEFAULT 0,
+      t_approved_n   INTEGER DEFAULT 0,
+      t_rejected     INTEGER DEFAULT 0,
+      t_pending      INTEGER DEFAULT 0,
+      t_approved     DOUBLE PRECISION DEFAULT 0,
+      t_pending_amt  DOUBLE PRECISION DEFAULT 0,
+      t_rejected_amt DOUBLE PRECISION DEFAULT 0,
+
+      slip_time      TEXT,               -- time printed on the slip
+      note           TEXT,
+      -- Evidence + audit of what the AI read vs what the user saved.
+      file_name      TEXT,
+      stored_name    TEXT,
+      mime           TEXT,
+      ai_json        TEXT,               -- raw AI extraction
+      ai_unclear     TEXT,               -- JSON array of fields AI wasn't sure of
+      edited         BOOLEAN DEFAULT FALSE,
+      captured_by    TEXT,
+      created_at     BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
+      updated_at     BIGINT
+    );
+    -- One EOD per terminal per day — re-uploading the same slip updates it.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_eod_day
+      ON pos_eod(tenant_id, COALESCE(terminal_id,''), business_date);
+    CREATE INDEX IF NOT EXISTS idx_pos_eod_td ON pos_eod(tenant_id, business_date);
+    CREATE INDEX IF NOT EXISTS idx_pos_eod_site ON pos_eod(site_id, business_date);
   `);
 
   // ── Phase 7: Site messages (private note from a site user to the admin) ───────

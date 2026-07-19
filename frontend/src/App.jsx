@@ -22,6 +22,7 @@ import Gate from './views/Gate.jsx';
 import Reconcile from './views/Reconcile.jsx';
 import More from './views/More.jsx';
 import Payroll from './views/Payroll.jsx';
+import EOD from './views/EOD.jsx';
 import Generators from './views/Generators.jsx';
 import Diesel from './views/Diesel.jsx';
 import Consolidated from './views/Consolidated.jsx';
@@ -206,6 +207,7 @@ function Inner() {
         {tab === 'reconcile' && <Reconcile />}
         {tab === 'more'       && <More />}
         {tab === 'payroll'    && <Payroll />}
+        {tab === 'eod'        && <EOD />}
         {tab === 'generators' && <Generators />}
         {tab === 'diesel'     && <Diesel />}
         {tab === 'consolidated' && <Consolidated />}

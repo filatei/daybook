@@ -3487,5 +3487,6 @@ router.use('/payroll',   require('./routes_payroll'));
 router.use('/chat',      require('./routes_chat'));
 router.use('/compliance', require('./routes_compliance'));
 router.use('/gl',         require('./routes_gl'));
+router.use('/eod',        require('./routes_eod'));
 
 module.exports = router;

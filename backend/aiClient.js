@@ -36,12 +36,29 @@ const retriable = (t) => t === 'overloaded_error' || t === 'rate_limit_error';
 // (was `flatten` — replaced by toOpenAIContent() below, which preserves images
 //  instead of discarding them. Kept out to avoid two ways of shaping content.)
 
+// Never let a provider stall a request forever — a hung upstream would otherwise
+// hold the HTTP handler (and the user's spinner) open indefinitely. Vision calls
+// on large models are slow, so the default is generous but finite.
+const AI_TIMEOUT_MS = parseInt(process.env.AI_TIMEOUT_MS || '25000', 10);
+function timeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms);
+  const ac = new AbortController(); setTimeout(() => ac.abort(), ms); return ac.signal;   // older Node
+}
+const isAbort = (e) => e && (e.name === 'AbortError' || e.name === 'TimeoutError');
+
 async function callAnthropic(url, key, model, system, messages, maxTokens) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
+      signal: timeoutSignal(AI_TIMEOUT_MS),
+    });
+  } catch (e) {
+    if (isAbort(e)) throw new AIError(`AI timed out after ${Math.round(AI_TIMEOUT_MS / 1000)}s`, 'timeout', 504);
+    throw new AIError('Could not reach the AI service.', 'network', 502);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error) {
     const t = data.error && data.error.type;
@@ -78,7 +95,17 @@ async function callOpenAICompat(url, key, model, system, messages, maxTokens) {
   const oai = [{ role: 'system', content: system }, ...messages.map((m) => ({ role: m.role, content: toOpenAIContent(m.content) }))];
   const headers = { 'Content-Type': 'application/json' };
   if (key) headers.Authorization = `Bearer ${key}`;
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ model, max_tokens: maxTokens, messages: oai }) });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST', headers,
+      body: JSON.stringify({ model, max_tokens: maxTokens, messages: oai }),
+      signal: timeoutSignal(AI_TIMEOUT_MS),
+    });
+  } catch (e) {
+    if (isAbort(e)) throw new AIError(`AI timed out after ${Math.round(AI_TIMEOUT_MS / 1000)}s`, 'timeout', 504);
+    throw new AIError('Could not reach the AI service.', 'network', 502);
+  }
   if (!res.ok) {
     await res.text().catch(() => '');   // drain body
     throw new AIError('AI service returned an error. Please try again.', 'openai_error', res.status);

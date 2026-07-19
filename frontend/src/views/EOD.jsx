@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
@@ -52,14 +52,28 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
   const setP = (k, v) => setF((p) => ({ ...p, purchase: { ...p.purchase, [k]: v } }));
   const setT = (k, v) => setF((p) => ({ ...p, transfer: { ...p.transfer, [k]: v } }));
 
-  // Upload → AI reads it → prefill the form. Never blocks: on any failure the
-  // user just types the numbers.
+  // Upload → AI reads it → prefill the form. Never blocks: the read is abortable
+  // and self-cancels, so a slow or stuck model can't trap the user — they can
+  // always fall back to typing the figures.
+  const READ_TIMEOUT_MS = 30000;
+  const abortRef = useRef(null);
+  const giveUp = (why) => {
+    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; }
+    setReading(false);
+    setAiNote(why || 'Enter the figures manually.');
+  };
+  // Don't leave a request running if the form is closed mid-read.
+  useEffect(() => () => { if (abortRef.current) abortRef.current.abort(); }, []);
+
   const read = async (chosen) => {
     if (!chosen) return;
+    if (abortRef.current) abortRef.current.abort();
+    const ac = new AbortController(); abortRef.current = ac;
+    const timer = setTimeout(() => ac.abort(), READ_TIMEOUT_MS);
     setReading(true); setAiNote('');
     try {
       const fd = new FormData(); fd.append('file', chosen);
-      const r = await api(scoped('/eod/extract'), { method: 'POST', form: fd });
+      const r = await api(scoped('/eod/extract'), { method: 'POST', form: fd, signal: ac.signal });
       setMeta(r.file || null);
       const x = r.extract || BLANK;
       setF({
@@ -75,14 +89,22 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
         ? ((x.unclear || []).length ? `Read it — check the ${x.unclear.length} highlighted field(s).` : 'Read it — please confirm the figures.')
         : (r.reason || 'Enter the figures manually.'));
     } catch (e) {
-      setAiNote(e.message || 'Could not read the slip — enter the figures manually.');
+      const aborted = e && (e.name === 'AbortError' || /abort/i.test(e.message || ''));
+      setAiNote(aborted
+        ? 'Reading took too long — please enter the figures from the slip.'
+        : (e.message || 'Could not read the slip — enter the figures manually.'));
     }
+    clearTimeout(timer);
+    abortRef.current = null;
     setReading(false);
   };
 
   const save = async () => {
     if (!String(f.terminal_id || '').trim()) return toast('Terminal ID is required', 'err');
     if (!siteId && !matched) return toast('Pick the site this terminal belongs to', 'err');
+    // Saving wins over a still-running read, so a late result can't overwrite
+    // what the user just typed.
+    if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; setReading(false); }
     setBusy(true);
     try {
       await api(scoped('/eod'), { method: 'POST', body: {
@@ -107,7 +129,13 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
       <label className="fl">Slip photo</label>
       <input type="file" accept="image/*,.pdf" capture="environment" className="input"
         onChange={(e) => read(e.target.files?.[0] || null)} disabled={reading || busy} />
-      {reading && <div style={{ fontSize: 13, color: 'var(--muted)', margin: '6px 2px' }}><span className="spin" /> Reading the slip…</div>}
+      {reading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '6px 2px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, color: 'var(--muted)' }}><span className="spin" /> Reading the slip… (up to 30s)</span>
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 12px' }}
+            onClick={() => giveUp('Skipped — enter the figures from the slip.')}>Enter manually</button>
+        </div>
+      )}
       {!reading && aiNote && (
         <div style={{ fontSize: 12.5, margin: '6px 2px', color: u.length ? '#b45309' : 'var(--muted)' }}>{aiNote}</div>
       )}
@@ -174,7 +202,8 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
 
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
-        <button className="btn" onClick={save} disabled={busy || reading}>{busy ? <span className="spin" /> : null} Save EOD</button>
+        {/* Never blocked by `reading` — the user can always type and save. */}
+        <button className="btn" onClick={save} disabled={busy}>{busy ? <span className="spin" /> : null} Save EOD</button>
       </div>
     </div>
   );

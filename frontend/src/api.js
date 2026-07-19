@@ -26,7 +26,9 @@ export function scopedAny(path) {
   return path + (path.includes('?') ? '&' : '?') + 'tenant=' + _tenant;
 }
 
-export async function api(path, { method = 'GET', body, form } = {}) {
+/** `signal` lets a caller abort a slow request (e.g. give up on AI extraction and
+ *  fall back to manual entry) — pass an AbortController's signal. */
+export async function api(path, { method = 'GET', body, form, signal } = {}) {
   const headers = {};
   if (_token) headers['Authorization'] = 'Bearer ' + _token;
   let bodyData;
@@ -36,7 +38,7 @@ export async function api(path, { method = 'GET', body, form } = {}) {
     headers['Content-Type'] = 'application/json';
     bodyData = JSON.stringify(body);
   }
-  const res = await fetch('/api' + path, { method, headers, body: bodyData });
+  const res = await fetch('/api' + path, { method, headers, body: bodyData, signal });
   const json = await res.json().catch(() => ({}));
   // Session expired/invalid → tell the app to sign the user out cleanly instead
   // of leaving every action failing with a generic error for the rest of the day.

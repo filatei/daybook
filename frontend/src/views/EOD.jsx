@@ -49,6 +49,7 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
   const [busy, setBusy] = useState(false);
   const [f, setF] = useState({ ...BLANK, business_date: day });
   const [meta, setMeta] = useState(null);     // { stored_name, file_name, mime }
+  const [usageId, setUsageId] = useState(null);   // links the AI spend to this save
   const [aiNote, setAiNote] = useState('');
   const [siteId, setSiteId] = useState('');
   const [matched, setMatched] = useState(null);
@@ -86,6 +87,7 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
       const fd = new FormData(); fd.append('file', small);
       const r = await api(scoped('/eod/extract'), { method: 'POST', form: fd, signal: ac.signal });
       setMeta(r.file || null);
+      setUsageId(r.usage_id || null);
       const x = r.extract || BLANK;
       setF({
         terminal_id: x.terminal_id || '',
@@ -121,6 +123,7 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
       await api(scoped('/eod'), { method: 'POST', body: {
         ...f, site_id: siteId || undefined, note: note.trim() || undefined,
         file_name: meta?.file_name, stored_name: meta?.stored_name, mime: meta?.mime,
+        usage_id: usageId || undefined,   // marks that AI read as actually used
         unclear: f.unclear, edited: true,
       } });
       toast('EOD saved ✓', 'ok'); onSaved && onSaved(); onClose();
@@ -236,10 +239,89 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
 }
 
 // ── Main view ────────────────────────────────────────────────────────────────
+// AI spend, per site and per user, with a waste signal (reads that never became
+// a saved EOD). Accountant+ — it's cost data.
+function AiUsagePanel({ day }) {
+  const { tenant } = useStore();
+  const [d, setD] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [range, setRange] = useState('day');   // day | month
+
+  useEffect(() => {
+    if (!open) return;
+    const from = range === 'month' ? `${day.slice(0, 7)}-01` : day;
+    api(scoped(`/eod/ai-usage?from=${from}&to=${day}`)).then(setD).catch(() => setD(null));
+  }, [open, range, day, tenant]);
+
+  const row = (e) => (
+    <div key={e.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '7px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+      <span style={{ minWidth: 0 }}>
+        {e.label}
+        <span style={{ color: 'var(--muted)', fontSize: 11.5 }}> · {e.reads} read{e.reads === 1 ? '' : 's'}
+          {e.wasted > 0 ? ` · ${e.wasted} unused` : ''}{e.failed > 0 ? ` · ${e.failed} failed` : ''}</span>
+      </span>
+      <span style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+        <strong>₦{e.cost_ngn.toLocaleString()}</strong>
+        {e.waste_pct >= 40 && e.reads >= 4 && (
+          <span style={{ display: 'block', fontSize: 11, color: '#b45309' }}>⚠ {e.waste_pct}% wasted</span>
+        )}
+      </span>
+    </div>
+  );
+
+  return (
+    <div style={{ marginTop: 14 }}>
+      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '5px 12px' }} onClick={() => setOpen((v) => !v)}>
+        {open ? '▾' : '▸'} AI reading cost
+      </button>
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <button className={`btn btn-sm ${range === 'day' ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setRange('day')}>This day</button>
+            <button className={`btn btn-sm ${range === 'month' ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setRange('month')}>Month to date</button>
+          </div>
+          {!d ? <div className="skel" /> : (
+            <>
+              <div className="card" style={{ padding: '10px 14px', marginBottom: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{d.totals.reads} slip read(s)</span>
+                  <strong style={{ fontSize: 17 }}>₦{d.totals.cost_ngn.toLocaleString()}</strong>
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 4 }}>
+                  {d.totals.used} used · {d.totals.wasted} never saved{d.totals.failed ? ` · ${d.totals.failed} failed` : ''}
+                  {' '}· limit {d.limits.per_user_day}/user/day, {d.limits.per_tenant_day}/workspace/day
+                </div>
+                {d.totals.waste_pct >= 40 && d.totals.reads >= 5 && (
+                  <div style={{ fontSize: 11.5, color: '#b45309', marginTop: 4 }}>
+                    ⚠ {d.totals.waste_pct}% of paid reads never became a saved EOD — check who is re-scanning without saving.
+                  </div>
+                )}
+              </div>
+              {d.sites.length > 0 && (
+                <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 10 }}>
+                  <div style={{ padding: '8px 14px', background: '#f8fafc', borderBottom: '1px solid var(--line)', fontSize: 12, fontWeight: 800, color: 'var(--muted)' }}>By site</div>
+                  {d.sites.map(row)}
+                </div>
+              )}
+              {d.users.length > 0 && (
+                <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                  <div style={{ padding: '8px 14px', background: '#f8fafc', borderBottom: '1px solid var(--line)', fontSize: 12, fontWeight: 800, color: 'var(--muted)' }}>By user</div>
+                  {d.users.map(row)}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EOD() {
   const { openModal, closeModal, tenant, sites, toast, confirm, go } = useStore();
   const role = useRole();
   const canDelete = role && atLeast(role, 'ACCOUNTANT');
+  const canSeeCost = role && atLeast(role, 'ACCOUNTANT');
   const [day, setDay] = useState(today());
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -374,6 +456,8 @@ export default function EOD() {
             </div>
           </>
         )}
+
+      {canSeeCost && <AiUsagePanel day={day} />}
     </div>
   );
 }

@@ -44,6 +44,42 @@ const nowS = () => Math.floor(Date.now() / 1000);
 const n2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 const int0 = (v) => Math.max(0, parseInt(v, 10) || 0);
 
+// ── AI spend: pricing, quotas, ledger ────────────────────────────────────────
+// Per-million-token rates so cost can be attributed per user/site. Override with
+// AI_PRICE_IN / AI_PRICE_OUT when the model or provider changes.
+const PRICE_IN = parseFloat(process.env.AI_PRICE_IN || '1');    // $/MTok input  (Haiku 4.5)
+const PRICE_OUT = parseFloat(process.env.AI_PRICE_OUT || '5');  // $/MTok output
+const USD_NGN = parseFloat(process.env.USD_TO_NGN_RATE || '1600');
+const costUsd = (u) => ((u.input_tokens || 0) * PRICE_IN + (u.output_tokens || 0) * PRICE_OUT) / 1e6;
+
+// Daily ceilings — stop a stuck loop or a bored user burning credit. Generous
+// enough that honest use never notices; low enough that abuse is capped.
+const MAX_PER_USER_DAY = parseInt(process.env.AI_MAX_PER_USER_DAY || '40', 10);
+const MAX_PER_TENANT_DAY = parseInt(process.env.AI_MAX_PER_TENANT_DAY || '300', 10);
+
+const dayStart = () => Math.floor(new Date(new Date().toLocaleDateString('en-CA', { timeZone: process.env.SALES_TZ || 'Africa/Lagos' }) + 'T00:00:00Z').getTime() / 1000);
+
+// Returns null when allowed, or a message when the caller is over quota.
+async function quotaBlock(tenant_id, user_id) {
+  const since = dayStart();
+  const [mine, theirs] = await Promise.all([
+    qone('SELECT COUNT(*) c FROM ai_usage WHERE user_id=? AND created_at>=?', [user_id, since]),
+    qone('SELECT COUNT(*) c FROM ai_usage WHERE tenant_id=? AND created_at>=?', [tenant_id, since]),
+  ]);
+  if (Number(mine?.c || 0) >= MAX_PER_USER_DAY) return `You've used the ${MAX_PER_USER_DAY} daily slip reads. Enter the figures manually, or try again tomorrow.`;
+  if (Number(theirs?.c || 0) >= MAX_PER_TENANT_DAY) return `This workspace has reached its ${MAX_PER_TENANT_DAY} daily slip reads. Enter the figures manually.`;
+  return null;
+}
+
+async function logUsage({ tenant_id, site_id, user_id, model, usage, ok }) {
+  const id = uuid();
+  await qrun(`INSERT INTO ai_usage (id,tenant_id,site_id,user_id,feature,model,input_tokens,output_tokens,cost_usd,ok,used,created_at)
+    VALUES (?,?,?,?,'eod_extract',?,?,?,?,?,FALSE,?)`,
+  [id, tenant_id, site_id || null, user_id, model || null,
+    usage?.input_tokens || 0, usage?.output_tokens || 0, costUsd(usage || {}), ok !== false, nowS()]).catch(() => {});
+  return id;
+}
+
 // EOD is site-floor work: secretaries capture, accountants review the summary.
 async function needCtx(req, res, minRole = 'SECRETARY') {
   const tid = requestedTenant(req) || req.body?.tenant_id;
@@ -144,11 +180,16 @@ router.post('/extract', requireAuth, upload.single('file'), async (req, res) => 
     return res.json({ ...base, ai: false, reason: 'Only photos can be read automatically — enter the figures manually', extract: EMPTY_EXTRACT });
   }
 
+  // Quota check BEFORE spending anything.
+  const blocked = await quotaBlock(c.tenant_id, req.user.id);
+  if (blocked) return res.status(429).json({ error: blocked });
+
   try {
     const b64 = fs.readFileSync(path.join(UPLOAD_DIR, stored)).toString('base64');
     const reply = await callAI({
       system: EXTRACT_SYSTEM,
       maxTokens: 900,
+      withUsage: true,
       messages: [{
         role: 'user',
         content: [
@@ -157,8 +198,14 @@ router.post('/extract', requireAuth, upload.single('file'), async (req, res) => 
         ],
       }],
     });
-    const parsed = parseJsonReply(typeof reply === 'string' ? reply : (reply && reply.text) || '');
-    if (!parsed) return res.json({ ...base, ai: false, reason: 'Could not read the slip — enter the figures manually', extract: EMPTY_EXTRACT });
+    // Every paid call is recorded, whether or not it parsed — that's the point of
+    // the ledger. `usage_id` comes back so a later save can mark it as USED.
+    const usageId = await logUsage({
+      tenant_id: c.tenant_id, site_id: siteBound(c) ? c.site_id : null,
+      user_id: req.user.id, model: reply.usage?.model, usage: reply.usage, ok: true,
+    });
+    const parsed = parseJsonReply(reply.text || '');
+    if (!parsed) return res.json({ ...base, ai: false, usage_id: usageId, reason: 'Could not read the slip — enter the figures manually', extract: EMPTY_EXTRACT });
 
     const extract = normalise(parsed);
     // Resolve the terminal to a site/bank we already know about.
@@ -168,7 +215,7 @@ router.post('/extract', requireAuth, upload.single('file'), async (req, res) => 
         'SELECT id, site_id, bank, label FROM pos_terminals WHERE tenant_id=? AND UPPER(COALESCE(terminal_id,\'\'))=? LIMIT 1',
         [c.tenant_id, extract.terminal_id]);
     }
-    res.json({ ...base, ai: true, extract, terminal: match || null, raw: JSON.stringify(parsed).slice(0, 4000) });
+    res.json({ ...base, ai: true, usage_id: usageId, extract, terminal: match || null, raw: JSON.stringify(parsed).slice(0, 4000) });
   } catch (e) {
     const msg = e instanceof AIError ? e.userMessage : 'Could not read the slip automatically';
     res.json({ ...base, ai: false, reason: `${msg} — enter the figures manually`, extract: EMPTY_EXTRACT });
@@ -231,6 +278,13 @@ router.post('/', requireAuth, async (req, res) => {
        mime=COALESCE(EXCLUDED.mime, pos_eod.mime),
        ai_json=EXCLUDED.ai_json, ai_unclear=EXCLUDED.ai_unclear, edited=EXCLUDED.edited,
        captured_by=EXCLUDED.captured_by, updated_at=EXCLUDED.updated_at`, row);
+
+  // Mark the AI call that produced this as USED. Extractions that never reach a
+  // save are the misuse signal — spend with nothing to show for it.
+  if (b.usage_id) {
+    await qrun('UPDATE ai_usage SET used=TRUE, site_id=COALESCE(site_id,?) WHERE id=? AND tenant_id=?',
+      [site_id, String(b.usage_id), c.tenant_id]).catch(() => {});
+  }
 
   const saved = await qone('SELECT * FROM pos_eod WHERE tenant_id=? AND COALESCE(terminal_id,\'\')=? AND business_date=?',
     [c.tenant_id, terminal_id, business_date]);
@@ -297,6 +351,63 @@ router.get('/', requireAuth, async (req, res) => {
   }), { terminals: 0, purchase: 0, transfer: 0, eod_total: 0, recorded_total: 0, variance: 0 });
 
   res.json({ from, to, rows: out, sites, totals });
+});
+
+/**
+ * GET /eod/ai-usage?from=&to=  — Accountant+ only.
+ * What the slip-reading has cost, broken down by site and by user, plus a waste
+ * signal: reads that never became a saved EOD.
+ */
+router.get('/ai-usage', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'ACCOUNTANT'); if (!c) return;
+  const from = String(req.query.from || today()).slice(0, 10);
+  const to = String(req.query.to || from).slice(0, 10);
+  const a = Math.floor(new Date(`${from}T00:00:00Z`).getTime() / 1000);
+  const b = Math.floor(new Date(`${to}T23:59:59Z`).getTime() / 1000);
+
+  const rows = await qall(`SELECT u.*, s.name site_name, us.name user_name, us.email user_email
+    FROM ai_usage u LEFT JOIN sites s ON s.id=u.site_id LEFT JOIN users us ON us.id=u.user_id
+    WHERE u.tenant_id=? AND u.created_at BETWEEN ? AND ?`, [c.tenant_id, a, b]);
+
+  const roll = (keyOf, labelOf) => {
+    const m = {};
+    for (const r of rows) {
+      const k = keyOf(r) || '—';
+      const e = m[k] || (m[k] = { key: k, label: labelOf(r) || '—', reads: 0, used: 0, wasted: 0, failed: 0, cost_usd: 0 });
+      e.reads += 1;
+      if (r.used) e.used += 1; else e.wasted += 1;
+      if (!r.ok) e.failed += 1;
+      e.cost_usd += Number(r.cost_usd || 0);
+    }
+    return Object.values(m)
+      .map((e) => ({
+        ...e,
+        cost_usd: Math.round(e.cost_usd * 10000) / 10000,
+        cost_ngn: Math.round(e.cost_usd * USD_NGN * 100) / 100,
+        // Share of paid reads that produced nothing — the misuse indicator.
+        waste_pct: e.reads ? Math.round((e.wasted / e.reads) * 100) : 0,
+      }))
+      .sort((x, y) => y.cost_usd - x.cost_usd);
+  };
+
+  const bySite = roll((r) => r.site_id, (r) => r.site_name);
+  const byUser = roll((r) => r.user_id, (r) => r.user_name || r.user_email);
+  const totals = rows.reduce((t, r) => ({
+    reads: t.reads + 1,
+    used: t.used + (r.used ? 1 : 0),
+    wasted: t.wasted + (r.used ? 0 : 1),
+    failed: t.failed + (r.ok ? 0 : 1),
+    cost_usd: t.cost_usd + Number(r.cost_usd || 0),
+  }), { reads: 0, used: 0, wasted: 0, failed: 0, cost_usd: 0 });
+  totals.cost_usd = Math.round(totals.cost_usd * 10000) / 10000;
+  totals.cost_ngn = Math.round(totals.cost_usd * USD_NGN * 100) / 100;
+  totals.waste_pct = totals.reads ? Math.round((totals.wasted / totals.reads) * 100) : 0;
+
+  res.json({
+    from, to, totals, sites: bySite, users: byUser,
+    limits: { per_user_day: MAX_PER_USER_DAY, per_tenant_day: MAX_PER_TENANT_DAY },
+    rate_ngn: USD_NGN,
+  });
 });
 
 // Serve the stored slip photo (evidence).

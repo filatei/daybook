@@ -66,7 +66,14 @@ async function callAnthropic(url, key, model, system, messages, maxTokens) {
     err.retriable = retriable(t);
     throw err;
   }
-  return (data.content || []).find((b) => b.type === 'text')?.text || '';
+  return {
+    text: (data.content || []).find((b) => b.type === 'text')?.text || '',
+    usage: {
+      input_tokens: data.usage?.input_tokens || 0,
+      output_tokens: data.usage?.output_tokens || 0,
+      model,
+    },
+  };
 }
 
 // Anthropic content blocks → OpenAI-compatible ones (NVIDIA NIM, Ollama, LM Studio).
@@ -111,35 +118,46 @@ async function callOpenAICompat(url, key, model, system, messages, maxTokens) {
     throw new AIError('AI service returned an error. Please try again.', 'openai_error', res.status);
   }
   const data = await res.json().catch(() => ({}));
-  return data.choices?.[0]?.message?.content || '';
+  return {
+    text: data.choices?.[0]?.message?.content || '',
+    usage: {
+      input_tokens: data.usage?.prompt_tokens || 0,
+      output_tokens: data.usage?.completion_tokens || 0,
+      model,
+    },
+  };
 }
 
 /**
- * callAI({ system, messages, maxTokens, noFallback }) → string
+ * callAI({ system, messages, maxTokens, noFallback, withUsage }) → string
+ * With `withUsage: true` → { text, usage:{ input_tokens, output_tokens, model } }
+ * so a caller can bill/track spend. Default stays a plain string, so existing
+ * callers are unaffected.
  * Throws AIError on failure (httpStatus 503 + code 'no_api_key' if unconfigured).
  */
-async function callAI({ system, messages, maxTokens = 1024, noFallback = false }) {
+async function callAI({ system, messages, maxTokens = 1024, noFallback = false, withUsage = false }) {
   const key = process.env.AI_API_KEY;
   const url = process.env.AI_API_URL || 'https://api.anthropic.com/v1/messages';
   const model = process.env.AI_MODEL || 'claude-haiku-4-5-20251001';
   const fbUrl = process.env.AI_FALLBACK_URL;
   const fbModel = process.env.AI_FALLBACK_MODEL || 'qwen2.5:7b';
+  const out = (r) => (withUsage ? r : r.text);
 
   if (!key && !(url && !url.includes('anthropic.com'))) {
     throw new AIError('AI is not configured yet. Set AI_API_KEY on the server.', 'no_api_key', 503);
   }
   const isAnthropic = url.includes('anthropic.com');
-  if (!isAnthropic) return callOpenAICompat(url, key, model, system, messages, maxTokens);
+  if (!isAnthropic) return out(await callOpenAICompat(url, key, model, system, messages, maxTokens));
 
   try {
-    return await callAnthropic(url, key, model, system, messages, maxTokens);
+    return out(await callAnthropic(url, key, model, system, messages, maxTokens));
   } catch (err) {
     if (err instanceof AIError && err.retriable) {
       await new Promise((r) => setTimeout(r, 3000));
-      try { return await callAnthropic(url, key, model, system, messages, maxTokens); }
+      try { return out(await callAnthropic(url, key, model, system, messages, maxTokens)); }
       catch { /* fall through to fallback */ }
       if (fbUrl && !noFallback) {
-        try { return await callOpenAICompat(fbUrl, undefined, fbModel, system, messages, maxTokens); }
+        try { return out(await callOpenAICompat(fbUrl, undefined, fbModel, system, messages, maxTokens)); }
         catch (e) { /* fall through to throw original */ }
       }
     }

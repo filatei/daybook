@@ -1421,6 +1421,26 @@ async function migrate() {
       created_at     BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT),
       updated_at     BIGINT
     );
+    -- ── AI usage ledger: every paid call, who made it, what it cost ──────────
+    -- Lets an accountant see spend per site and per user, and spot misuse (many
+    -- extractions that never turn into a saved EOD = someone burning credit).
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      id            TEXT PRIMARY KEY,
+      tenant_id     TEXT NOT NULL,
+      site_id       TEXT,
+      user_id       TEXT,
+      feature       TEXT,                       -- 'eod_extract'
+      model         TEXT,
+      input_tokens  INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      cost_usd      DOUBLE PRECISION DEFAULT 0,
+      ok            BOOLEAN DEFAULT TRUE,       -- did the call succeed
+      used          BOOLEAN DEFAULT FALSE,      -- did it end in a saved EOD
+      created_at    BIGINT DEFAULT (EXTRACT(EPOCH FROM now())::BIGINT)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_tc ON ai_usage(tenant_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage(user_id, created_at);
+
     -- One EOD per terminal per day — re-uploading the same slip updates it.
     CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_eod_day
       ON pos_eod(tenant_id, COALESCE(terminal_id,''), business_date);

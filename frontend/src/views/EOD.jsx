@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { api, scoped, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
+import ReceiptCamera from '../components/ReceiptCamera.jsx';
 import { shrinkImage, kb } from '../lib/shrinkImage.js';
 
 // End-of-day POS capture: photograph each terminal's EOD slip, AI reads the
@@ -43,6 +44,8 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
   const { toast } = useStore();
   const [reading, setReading] = useState(false);
   const [shrunk, setShrunk] = useState(null);   // { from, to } bytes, for reassurance
+  const [camOpen, setCamOpen] = useState(false);
+  const [snapped, setSnapped] = useState('');   // label when the photo came from the camera
   const [busy, setBusy] = useState(false);
   const [f, setF] = useState({ ...BLANK, business_date: day });
   const [meta, setMeta] = useState(null);     // { stored_name, file_name, mime }
@@ -135,8 +138,18 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
       <p className="sub" style={{ marginTop: 0 }}>Photograph the terminal’s end-of-day slip — the numbers are read for you.</p>
 
       <label className="fl">Slip photo</label>
-      <input type="file" accept="image/*,.pdf" capture="environment" className="input"
-        onChange={(e) => read(e.target.files?.[0] || null)} disabled={reading || busy} />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'stretch', flexWrap: 'wrap' }}>
+        <button className="btn" style={{ width: 'auto', padding: '10px 16px', whiteSpace: 'nowrap' }}
+          onClick={() => setCamOpen(true)} disabled={reading || busy}>📷 Take photo</button>
+        <input type="file" accept="image/*,.pdf" capture="environment" className="input" style={{ flex: '1 1 180px' }}
+          onChange={(e) => { setSnapped(''); read(e.target.files?.[0] || null); }} disabled={reading || busy} />
+      </div>
+      {snapped && <div style={{ fontSize: 12.5, color: 'var(--muted)', margin: '4px 2px 0' }}>{snapped}</div>}
+      {camOpen && (
+        <ReceiptCamera
+          onCapture={(file) => { setSnapped('📷 Photo taken with the camera.'); read(file); }}
+          onClose={() => setCamOpen(false)} />
+      )}
       {reading && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '6px 2px', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, color: 'var(--muted)' }}><span className="spin" /> Reading the slip… (up to 30s)</span>

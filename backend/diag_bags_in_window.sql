@@ -58,7 +58,7 @@ SELECT t.name tenant, si.name site, s.full_name,
             AND COALESCE(s.payroll_eligible,TRUE) = TRUE
             AND COALESCE(s.status,'') <> 'LEFT' )
  GROUP BY 1,2,3,4,5,6,7
- ORDER BY bagged + loaded DESC;
+ ORDER BY COALESCE(SUM(p.bags_bagged),0) + COALESCE(SUM(p.bags_loaded),0) DESC;
 
 \echo ''
 \echo '=== C. bags per site in the period, with dates covered ==='

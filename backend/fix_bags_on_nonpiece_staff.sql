@@ -27,7 +27,7 @@ SELECT t.name tenant, si.name site, s.full_name,
             OR UPPER(COALESCE(s.pay_type,'')) = 'PIECE')
    AND UPPER(COALESCE(s.full_name,'')) NOT LIKE '%HIRED%'
  GROUP BY 1,2,3,4,5
- ORDER BY bagged + loaded DESC;
+ ORDER BY COALESCE(SUM(p.bags_bagged),0) + COALESCE(SUM(p.bags_loaded),0) DESC;
 
 \echo ''
 \echo 'Set go=1 to zero the bag counts on these rows. The rows themselves are'

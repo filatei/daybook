@@ -318,7 +318,8 @@ function RunTab({ sites, onSaved }) {
             {bySiteView && paid.length > 0 && (
               <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                 <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setOpenSites(Object.fromEntries(siteNames.map((s) => [s, true])))}>Expand all</button>
-                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => setOpenSites({})}>Collapse all</button>
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+                  onClick={() => setOpenSites(Object.fromEntries(siteNames.map((s) => [s, false])))}>Collapse all</button>
               </div>
             )}
 
@@ -328,6 +329,8 @@ function RunTab({ sites, onSaved }) {
                 ? siteNames.map((s) => {
                   const rows = paid.filter((l) => primarySite(l) === s);
                   const subtotal = rows.reduce((a, l) => a + net(l), 0);
+                  // Absent key = open. Collapse all therefore has to write false
+                  // for every site; clearing the object would re-open them all.
                   const open = openSites[s] ?? true;
                   return (
                     <div key={s} className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 10 }}>
@@ -766,7 +769,7 @@ function MidMonthTab({ onSaved }) {
                   <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
                     onClick={() => setOpenSites(Object.fromEntries(sites.map((s) => [s, true])))}>Expand all</button>
                   <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
-                    onClick={() => setOpenSites({})}>Collapse all</button>
+                    onClick={() => setOpenSites(Object.fromEntries(sites.map((s) => [s, false])))}>Collapse all</button>
                 </div>
               )}
 

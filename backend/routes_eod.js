@@ -80,13 +80,57 @@ async function logUsage({ tenant_id, site_id, user_id, model, usage, ok }) {
   return id;
 }
 
+// ── Group roll-up ─────────────────────────────────────────────────────────────
+// The Group workspace is SYNTHETIC — invented by the frontend (store.jsx
+// GROUP_ID), with no row in `tenants`. Same treatment as payroll: resolve it to
+// the set of tenants this user can actually see, rather than 403.
+//
+// Reads roll up across all of them. Writes do not: capturing a slip has to land
+// in one workspace, and "which one" is not something the server should guess.
+const GROUP_ID = '__group__';
+
+async function groupContexts(user, minRole) {
+  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE' ORDER BY name, id");
+  const out = [];
+  for (const t of rows) {
+    const c = await contextFor(user, t.id);
+    if (c && atLeast(c.role, minRole)) out.push(c);
+  }
+  return out;
+}
+
 // EOD is site-floor work: secretaries capture, accountants review the summary.
 async function needCtx(req, res, minRole = 'SECRETARY') {
   const tid = requestedTenant(req) || req.body?.tenant_id;
   if (!tid) { res.status(400).json({ error: 'select a workspace' }); return null; }
+  if (tid === GROUP_ID) {
+    const ctxs = await groupContexts(req.user, minRole);
+    if (!ctxs.length) { res.status(403).json({ error: 'forbidden' }); return null; }
+    // Anchor on the first tenant; tenant_ids carries the real read scope.
+    // site_id is cleared — a group roll-up is never site-bound.
+    return { ...ctxs[0], site_id: null, group: true, tenant_ids: ctxs.map((x) => x.tenant_id) };
+  }
   const c = await contextFor(req.user, tid);
   if (!c || !atLeast(c.role, minRole)) { res.status(403).json({ error: 'forbidden' }); return null; }
   return c;
+}
+
+// Every tenant in scope. Single-tenant contexts return exactly one, so callers
+// need no special case.
+const ctxTenants = (c) => (c && c.group && Array.isArray(c.tenant_ids) && c.tenant_ids.length ? c.tenant_ids : [c.tenant_id]);
+
+// Parameterised IN(...) so a group read never falls back to an unscoped query —
+// that is the failure mode that leaks one tenant's takings into another's view.
+function scopeSql(c, col = 'tenant_id') {
+  const ids = ctxTenants(c);
+  return { sql: `${col} IN (${ids.map(() => '?').join(',')})`, args: ids };
+}
+
+// Capture/delete must name a real workspace.
+function rejectGroupWrite(c, res) {
+  if (!c.group) return false;
+  res.status(400).json({ error: 'Pick a workspace (Fido or Fiafia) before capturing or deleting an EOD slip.' });
+  return true;
 }
 
 // ── AI extraction ─────────────────────────────────────────────────────────────
@@ -166,6 +210,7 @@ function normalise(x) {
  */
 router.post('/extract', requireAuth, upload.single('file'), async (req, res) => {
   const c = await needCtx(req, res); if (!c) { return; }
+  if (rejectGroupWrite(c, res)) return;
   if (!req.file) return res.status(400).json({ error: 'attach a photo of the EOD slip' });
 
   const stored = req.file.filename;
@@ -230,6 +275,7 @@ router.post('/extract', requireAuth, upload.single('file'), async (req, res) => 
  */
 router.post('/', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
+  if (rejectGroupWrite(c, res)) return;
   const b = req.body || {};
   const business_date = String(b.business_date || today()).slice(0, 10);
   const terminal_id = String(b.terminal_id || '').trim().toUpperCase() || null;
@@ -301,26 +347,35 @@ router.get('/', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const from = String(req.query.from || today()).slice(0, 10);
   const to = String(req.query.to || from).slice(0, 10);
-  const where = ['e.tenant_id=?', 'e.business_date BETWEEN ? AND ?'], args = [c.tenant_id, from, to];
+  const sc = scopeSql(c, 'e.tenant_id');
+  const where = [sc.sql, 'e.business_date BETWEEN ? AND ?'], args = [...sc.args, from, to];
   if (siteBound(c)) { where.push('e.site_id=?'); args.push(c.site_id); }
   else if (req.query.site) { where.push('e.site_id=?'); args.push(req.query.site); }
 
-  const rows = await qall(`SELECT e.*, s.name site_name, u.name captured_by_name
-    FROM pos_eod e LEFT JOIN sites s ON s.id=e.site_id LEFT JOIN users u ON u.id=e.captured_by
-    WHERE ${where.join(' AND ')} ORDER BY e.business_date DESC, s.name, e.terminal_id`, args);
+  // t.name comes through so the group roll-up can label which workspace a site
+  // belongs to — two tenants can legitimately have a site with the same name.
+  const rows = await qall(`SELECT e.*, s.name site_name, u.name captured_by_name, t.name tenant_name
+    FROM pos_eod e
+    LEFT JOIN sites s   ON s.id=e.site_id
+    LEFT JOIN users u   ON u.id=e.captured_by
+    LEFT JOIN tenants t ON t.id=e.tenant_id
+    WHERE ${where.join(' AND ')} ORDER BY t.name, s.name, e.business_date DESC, e.terminal_id`, args);
 
   // What Daybook itself recorded on those terminals over the same window. Matching
   // is by terminal text (pos_sales.terminal), which is how sales are tagged today.
-  const recorded = await qall(`SELECT UPPER(COALESCE(terminal,'')) term, sale_date, COALESCE(SUM(total),0) amt, COUNT(*) n
-    FROM pos_sales WHERE tenant_id=? AND sale_date BETWEEN ? AND ?
+  // Keyed by tenant as well as terminal: across a group read, two workspaces
+  // could use the same terminal label and their takings must not be pooled.
+  const rsc = scopeSql(c, 'tenant_id');
+  const recorded = await qall(`SELECT tenant_id, UPPER(COALESCE(terminal,'')) term, sale_date, COALESCE(SUM(total),0) amt, COUNT(*) n
+    FROM pos_sales WHERE ${rsc.sql} AND sale_date BETWEEN ? AND ?
       AND UPPER(COALESCE(payment_method,'')) <> 'CASH'
-    GROUP BY 1,2`, [c.tenant_id, from, to]);
+    GROUP BY 1,2,3`, [...rsc.args, from, to]);
   const recMap = {};
-  for (const r of recorded) recMap[`${r.term}|${r.sale_date}`] = { amount: Number(r.amt), count: Number(r.n) };
+  for (const r of recorded) recMap[`${r.tenant_id}|${r.term}|${r.sale_date}`] = { amount: Number(r.amt), count: Number(r.n) };
 
   const out = rows.map((e) => {
     const eodTotal = n2(Number(e.p_approved || 0) + Number(e.t_approved || 0));
-    const rec = recMap[`${String(e.terminal_id || '').toUpperCase()}|${e.business_date}`] || { amount: 0, count: 0 };
+    const rec = recMap[`${e.tenant_id}|${String(e.terminal_id || '').toUpperCase()}|${e.business_date}`] || { amount: 0, count: 0 };
     return {
       ...e,
       unclear: (() => { try { return JSON.parse(e.ai_unclear || '[]'); } catch { return []; } })(),
@@ -332,25 +387,57 @@ router.get('/', requireAuth, async (req, res) => {
     };
   });
 
-  // Per-site roll-up so the accountant sees the day at a glance.
+  // Per-site roll-up so the accountant sees the day at a glance. Keyed by
+  // tenant AND site: "Kpansia" can exist in both workspaces and merging them
+  // would silently double a site's takings.
+  const ZERO = () => ({ terminals: 0, purchase: 0, transfer: 0, eod_total: 0, recorded_total: 0, variance: 0 });
+  const add = (a, r) => {
+    a.terminals += 1;
+    a.purchase = n2(a.purchase + Number(r.p_approved || 0));
+    a.transfer = n2(a.transfer + Number(r.t_approved || 0));
+    a.eod_total = n2(a.eod_total + r.eod_total);
+    a.recorded_total = n2(a.recorded_total + r.recorded_total);
+    a.variance = n2(a.variance + r.variance);
+    return a;
+  };
+
   const bySite = {};
   for (const r of out) {
-    const k = r.site_id || '—';
-    const s = bySite[k] || (bySite[k] = { site_id: r.site_id, site: r.site_name || '—', terminals: 0, purchase: 0, transfer: 0, eod_total: 0, recorded_total: 0, variance: 0 });
-    s.terminals += 1;
-    s.purchase = n2(s.purchase + Number(r.p_approved || 0));
-    s.transfer = n2(s.transfer + Number(r.t_approved || 0));
-    s.eod_total = n2(s.eod_total + r.eod_total);
-    s.recorded_total = n2(s.recorded_total + r.recorded_total);
-    s.variance = n2(s.variance + r.variance);
+    const k = `${r.tenant_id}|${r.site_id || '—'}`;
+    const s = bySite[k] || (bySite[k] = {
+      key: k, site_id: r.site_id, site: r.site_name || '—',
+      tenant_id: r.tenant_id, tenant: r.tenant_name || '—', ...ZERO(),
+    });
+    add(s, r);
   }
-  const sites = Object.values(bySite).sort((a, b) => String(a.site).localeCompare(String(b.site)));
+  const sites = Object.values(bySite).sort((a, b) =>
+    String(a.tenant).localeCompare(String(b.tenant)) || String(a.site).localeCompare(String(b.site)));
+
+  // Tenant layer. Present even for a single workspace so the client renders one
+  // shape either way, rather than branching on group mode.
+  const byTenant = {};
+  for (const s of sites) {
+    const t = byTenant[s.tenant_id] || (byTenant[s.tenant_id] = {
+      tenant_id: s.tenant_id, tenant: s.tenant, sites: 0, ...ZERO(),
+    });
+    t.sites += 1;
+    t.terminals += s.terminals;
+    t.purchase = n2(t.purchase + s.purchase);
+    t.transfer = n2(t.transfer + s.transfer);
+    t.eod_total = n2(t.eod_total + s.eod_total);
+    t.recorded_total = n2(t.recorded_total + s.recorded_total);
+    t.variance = n2(t.variance + s.variance);
+  }
+  const tenants = Object.values(byTenant).sort((a, b) => String(a.tenant).localeCompare(String(b.tenant)));
+
   const totals = sites.reduce((a, s) => ({
     terminals: a.terminals + s.terminals, purchase: n2(a.purchase + s.purchase), transfer: n2(a.transfer + s.transfer),
     eod_total: n2(a.eod_total + s.eod_total), recorded_total: n2(a.recorded_total + s.recorded_total), variance: n2(a.variance + s.variance),
-  }), { terminals: 0, purchase: 0, transfer: 0, eod_total: 0, recorded_total: 0, variance: 0 });
+  }), ZERO());
+  totals.sites = sites.length;
+  totals.tenants = tenants.length;
 
-  res.json({ from, to, rows: out, sites, totals });
+  res.json({ from, to, group: !!c.group, rows: out, sites, tenants, totals });
 });
 
 /**
@@ -365,9 +452,10 @@ router.get('/ai-usage', requireAuth, async (req, res) => {
   const a = Math.floor(new Date(`${from}T00:00:00Z`).getTime() / 1000);
   const b = Math.floor(new Date(`${to}T23:59:59Z`).getTime() / 1000);
 
+  const usc = scopeSql(c, 'u.tenant_id');
   const rows = await qall(`SELECT u.*, s.name site_name, us.name user_name, us.email user_email
     FROM ai_usage u LEFT JOIN sites s ON s.id=u.site_id LEFT JOIN users us ON us.id=u.user_id
-    WHERE u.tenant_id=? AND u.created_at BETWEEN ? AND ?`, [c.tenant_id, a, b]);
+    WHERE ${usc.sql} AND u.created_at BETWEEN ? AND ?`, [...usc.args, a, b]);
 
   const roll = (keyOf, labelOf) => {
     const m = {};

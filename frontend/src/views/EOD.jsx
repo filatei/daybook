@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { api, scoped, ngn, today, getToken } from '../api.js';
+import { api, scoped, scopedAny, ngn, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
 import ReceiptCamera from '../components/ReceiptCamera.jsx';
@@ -11,8 +11,90 @@ import { shrinkImage, kb } from '../lib/shrinkImage.js';
 
 const shiftDay = (d, n) => { const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
 const prettyDay = (d) => (d === today()
+
   ? 'today'
   : new Date(d + 'T00:00:00').toLocaleDateString('en-NG', { weekday: 'short', day: '2-digit', month: 'short' }));
+
+// Defined at module scope, not inside EOD. A component declared during render is
+// a brand-new type on every render, so React unmounts and remounts the whole
+// subtree — which would throw away the expanded-site state on every tick of the
+// parent. eslint react/no-unstable-nested-components catches exactly this.
+const vColor = (v) => (Math.abs(v) < 1 ? 'var(--muted)' : (v > 0 ? '#b91c1c' : '#b45309'));
+
+function TerminalRow({ r, inset, canDelete, onSlip, onDelete }) {
+  return (
+    <div style={{ padding: inset ? '10px 14px 10px 26px' : '11px 14px', borderTop: '1px solid var(--line)', background: inset ? '#fbfdff' : undefined }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+        <span style={{ minWidth: 0 }}>
+          <strong>{r.terminal_id || '—'}</strong>
+          <span style={{ color: 'var(--muted)', fontSize: 12.5 }}>{r.bank ? ` · ${r.bank}` : ''}</span>
+        </span>
+        <strong style={{ whiteSpace: 'nowrap' }}>{ngn(r.eod_total)}</strong>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>
+        Card {ngn(r.p_approved)} ({r.p_successful}/{r.p_volume}) · Transfer {ngn(r.t_approved)} ({r.t_approved_n}/{r.t_volume})
+      </div>
+      <div style={{ fontSize: 12, marginTop: 3, color: vColor(r.variance) }}>
+        Daybook {ngn(r.recorded_total)} ({r.recorded_count}) · variance {r.variance > 0 ? '+' : ''}{ngn(r.variance)}
+      </div>
+      {(r.captured_by_name || r.slip_time) ? (
+        <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 3 }}>
+          {r.slip_time ? `Slip ${r.slip_time}` : ''}{r.slip_time && r.captured_by_name ? ' · ' : ''}
+          {r.captured_by_name ? `captured by ${r.captured_by_name}` : ''}
+        </div>
+      ) : null}
+      <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+        {r.stored_name ? (
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }} onClick={() => onSlip(r.id)}>🖼 Slip</button>
+        ) : null}
+        {canDelete ? (
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px', color: '#b91c1c' }} onClick={() => onDelete(r)}>Delete</button>
+        ) : null}
+        {(r.unclear || []).length > 0 ? (
+          <span style={{ fontSize: 11.5, color: '#b45309', alignSelf: 'center' }}>⚠ {r.unclear.length} field(s) were unclear</span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+// One site: a summary line that opens to its terminals on tap.
+function SiteBlock({ s, rows, open, onToggle, canDelete, onSlip, onDelete }) {
+  return (
+    <div style={{ borderBottom: '1px solid var(--line)' }}>
+      <div role="button" tabIndex={0} onClick={onToggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
+        style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8,
+                 padding: '10px 14px', fontSize: 13, cursor: 'pointer', userSelect: 'none' }}>
+        <span style={{ minWidth: 0 }}>
+          <span style={{ display: 'inline-block', width: 13, color: 'var(--muted)',
+                         transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>›</span>
+          <strong>{s.site}</strong>
+          <span style={{ color: 'var(--muted)' }}> · {s.terminals} terminal(s)</span>
+        </span>
+        <span style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+          <strong>{ngn(s.eod_total)}</strong>
+          <span style={{ display: 'block', fontSize: 11.5, color: vColor(s.variance) }}>
+            {s.variance > 0 ? '+' : ''}{ngn(s.variance)} vs Daybook
+          </span>
+        </span>
+      </div>
+      {open ? (
+        <>
+          <div style={{ padding: '0 14px 8px 26px', fontSize: 11.5, color: 'var(--muted)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <span>Card {ngn(s.purchase)}</span>
+            <span>Transfer {ngn(s.transfer)}</span>
+            <span>In Daybook {ngn(s.recorded_total)}</span>
+          </div>
+          {rows.map((r) => (
+            <TerminalRow key={r.id} r={r} inset canDelete={canDelete} onSlip={onSlip} onDelete={onDelete} />
+          ))}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 
 const BLANK = {
   terminal_id: '', business_date: '', slip_time: '',
@@ -85,7 +167,7 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
       const small = await shrinkImage(chosen);
       if (small !== chosen) setShrunk({ from: chosen.size, to: small.size });
       const fd = new FormData(); fd.append('file', small);
-      const r = await api(scoped('/eod/extract'), { method: 'POST', form: fd, signal: ac.signal });
+      const r = await api(scopedAny('/eod/extract'), { method: 'POST', form: fd, signal: ac.signal });
       setMeta(r.file || null);
       setUsageId(r.usage_id || null);
       const x = r.extract || BLANK;
@@ -120,7 +202,7 @@ function CaptureForm({ sites, day, onSaved, onClose }) {
     if (abortRef.current) { abortRef.current.abort(); abortRef.current = null; setReading(false); }
     setBusy(true);
     try {
-      await api(scoped('/eod'), { method: 'POST', body: {
+      await api(scopedAny('/eod'), { method: 'POST', body: {
         ...f, site_id: siteId || undefined, note: note.trim() || undefined,
         file_name: meta?.file_name, stored_name: meta?.stored_name, mime: meta?.mime,
         usage_id: usageId || undefined,   // marks that AI read as actually used
@@ -250,7 +332,7 @@ function AiUsagePanel({ day }) {
   useEffect(() => {
     if (!open) return;
     const from = range === 'month' ? `${day.slice(0, 7)}-01` : day;
-    api(scoped(`/eod/ai-usage?from=${from}&to=${day}`)).then(setD).catch(() => setD(null));
+    api(scopedAny(`/eod/ai-usage?from=${from}&to=${day}`)).then(setD).catch(() => setD(null));
   }, [open, range, day, tenant]);
 
   const row = (e) => (
@@ -318,7 +400,7 @@ function AiUsagePanel({ day }) {
 }
 
 export default function EOD() {
-  const { openModal, closeModal, tenant, sites, toast, confirm, go } = useStore();
+  const { openModal, closeModal, tenant, sites, toast, confirm, go, isGroup } = useStore();
   const role = useRole();
   const canDelete = role && atLeast(role, 'ACCOUNTANT');
   const canSeeCost = role && atLeast(role, 'ACCOUNTANT');
@@ -332,7 +414,7 @@ export default function EOD() {
     try {
       const p = new URLSearchParams({ from: day, to: day });
       if (site) p.set('site', site);
-      setData(await api(scoped(`/eod?${p}`)));
+      setData(await api(scopedAny(`/eod?${p}`)));
     } catch { setData(null); }
     setLoading(false);
   }, [tenant, day, site]);
@@ -357,7 +439,19 @@ export default function EOD() {
     catch (e) { toast(e.message || 'Could not delete', 'err'); }
   };
 
-  const vColor = (v) => (Math.abs(v) < 1 ? 'var(--muted)' : (v > 0 ? '#b91c1c' : '#b45309'));
+
+  // Which site rows are expanded, keyed by the backend's tenant|site key. A
+  // single site is open from the start — there is nothing to collapse away.
+  const [open, setOpen] = useState({});
+  const toggle = (k) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  const isOpen = (k) => (data && data.sites.length === 1 ? true : !!open[k]);
+
+  const siteKey = (r) => `${r.tenant_id}|${r.site_id || '—'}`;
+
+  // Label workspaces only when the roll-up actually spans more than one —
+  // inside a single tenant the header would be noise.
+  const multiTenant = !!(data && (data.tenants || []).length > 1);
+
 
   return (
     <div>
@@ -370,12 +464,18 @@ export default function EOD() {
         <input type="date" className="input" style={{ flex: 1 }} value={day} max={today()} onChange={(e) => setDay(e.target.value)} />
         <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} disabled={day >= today()} onClick={() => setDay((d) => shiftDay(d, 1))}>›</button>
       </div>
-      {sites.length > 1 && (
+      {!isGroup && sites.length > 1 && (
         <SearchSelect style={{ marginBottom: 10 }} value={site} onChange={setSite} placeholder="All sites"
           options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} />
       )}
 
-      <button className="btn" style={{ marginBottom: 12 }} onClick={capture}>📸 Capture EOD slip</button>
+      {isGroup ? (
+        <div className="card" style={{ padding: '10px 14px', marginBottom: 12, fontSize: 12.5, color: 'var(--muted)' }}>
+          Viewing every workspace. Switch to Fido Water or Fiafia Water to capture a slip.
+        </div>
+      ) : (
+        <button className="btn" style={{ marginBottom: 12 }} onClick={capture}>📸 Capture EOD slip</button>
+      )}
 
       {loading ? <>{[...Array(3)].map((_, i) => <div className="skel" key={i} />)}</>
         : !data || !data.rows.length ? (
@@ -385,7 +485,10 @@ export default function EOD() {
             {/* Day totals */}
             <div className="card" style={{ padding: '12px 16px', marginBottom: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>{data.totals.terminals} terminal(s) · {prettyDay(day)}</span>
+                <span style={{ fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+                  {data.totals.terminals} terminal(s) · {data.totals.sites} site(s)
+                  {multiTenant ? ` · ${data.totals.tenants} workspaces` : ''} · {prettyDay(day)}
+                </span>
                 <strong style={{ fontSize: 19 }}>{ngn(data.totals.eod_total)}</strong>
               </div>
               <div style={{ display: 'flex', gap: 14, marginTop: 6, fontSize: 12.5, color: 'var(--muted)', flexWrap: 'wrap' }}>
@@ -405,52 +508,30 @@ export default function EOD() {
               )}
             </div>
 
-            {/* Per-site roll-up */}
-            {data.sites.length > 1 && (
-              <div className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 12 }}>
-                <div style={{ padding: '9px 14px', background: '#f8fafc', borderBottom: '1px solid var(--line)', fontSize: 12, fontWeight: 800, color: 'var(--muted)' }}>By site</div>
-                {data.sites.map((s) => (
-                  <div key={s.site_id || s.site} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', padding: '9px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
-                    <span><strong>{s.site}</strong> <span style={{ color: 'var(--muted)' }}>· {s.terminals} terminal(s)</span></span>
-                    <span style={{ textAlign: 'right' }}>
-                      <strong>{ngn(s.eod_total)}</strong>
-                      <span style={{ display: 'block', fontSize: 11.5, color: vColor(s.variance) }}>
-                        {s.variance > 0 ? '+' : ''}{ngn(s.variance)} vs Daybook
-                      </span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Each terminal */}
+            {/* Sites, grouped under their workspace when the Group roll-up
+                is active. Tap a site to open its terminals. */}
             <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-              {data.rows.map((r) => (
-                <div key={r.id} style={{ padding: '11px 14px', borderBottom: '1px solid var(--line)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-                    <span style={{ minWidth: 0 }}>
-                      <strong>{r.terminal_id || '—'}</strong>
-                      <span style={{ color: 'var(--muted)', fontSize: 12.5 }}> · {r.site_name || '—'}{r.bank ? ` · ${r.bank}` : ''}</span>
-                    </span>
-                    <strong style={{ whiteSpace: 'nowrap' }}>{ngn(r.eod_total)}</strong>
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>
-                    Card {ngn(r.p_approved)} ({r.p_successful}/{r.p_volume}) · Transfer {ngn(r.t_approved)} ({r.t_approved_n}/{r.t_volume})
-                  </div>
-                  <div style={{ fontSize: 12, marginTop: 3, color: vColor(r.variance) }}>
-                    Daybook {ngn(r.recorded_total)} ({r.recorded_count}) · variance {r.variance > 0 ? '+' : ''}{ngn(r.variance)}
-                  </div>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
-                    {r.stored_name && (
-                      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }} onClick={() => viewSlip(r.id)}>🖼 Slip</button>
-                    )}
-                    {canDelete && (
-                      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px', color: '#b91c1c' }} onClick={() => del(r)}>Delete</button>
-                    )}
-                    {(r.unclear || []).length > 0 && (
-                      <span style={{ fontSize: 11.5, color: '#b45309', alignSelf: 'center' }}>⚠ {r.unclear.length} field(s) were unclear</span>
-                    )}
-                  </div>
+              {(data.tenants || []).map((t) => (
+                <div key={t.tenant_id}>
+                  {multiTenant && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                                  padding: '9px 14px', background: '#eef4fb', borderBottom: '1px solid var(--line)' }}>
+                      <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: .3, color: '#1e40af' }}>
+                        {(t.tenant || '').toUpperCase()}
+                      </span>
+                      <span style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <strong style={{ fontSize: 13.5 }}>{ngn(t.eod_total)}</strong>
+                        <span style={{ display: 'block', fontSize: 11, color: vColor(t.variance) }}>
+                          {t.sites} site(s) · {t.variance > 0 ? '+' : ''}{ngn(t.variance)} vs Daybook
+                        </span>
+                      </span>
+                    </div>
+                  )}
+                  {data.sites.filter((s) => s.tenant_id === t.tenant_id).map((s) => (
+                    <SiteBlock key={s.key} s={s} rows={data.rows.filter((r) => siteKey(r) === s.key)}
+                      open={isOpen(s.key)} onToggle={() => toggle(s.key)}
+                      canDelete={canDelete} onSlip={viewSlip} onDelete={del} />
+                  ))}
                 </div>
               ))}
             </div>

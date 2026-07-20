@@ -361,31 +361,36 @@ router.get('/', requireAuth, async (req, res) => {
     LEFT JOIN tenants t ON t.id=e.tenant_id
     WHERE ${where.join(' AND ')} ORDER BY t.name, s.name, e.business_date DESC, e.terminal_id`, args);
 
-  // What Daybook itself recorded on those terminals over the same window. Matching
-  // is by terminal text (pos_sales.terminal), which is how sales are tagged today.
-  // Keyed by tenant as well as terminal: across a group read, two workspaces
-  // could use the same terminal label and their takings must not be pooled.
+  // What Daybook itself recorded, matched on SITE + DATE.
+  //
+  // This used to compare pos_eod.terminal_id against pos_sales.terminal, which
+  // could never match: the first is the machine serial printed on the slip
+  // ("2MP1001C"), the second is a display label built as "BANK · LOCATION"
+  // ("MONIEPOINT-FF · OKUTUKUTU", see routes.js termLabel / etl.js). Every
+  // lookup missed, so recorded_total was always 0 and the variance always
+  // reported the entire day's takings as unrecorded.
+  //
+  // site_id is a real foreign key on both tables and cannot drift when someone
+  // renames a bank or a location, so the roll-up is matched on it instead. The
+  // cost is that variance is only meaningful per SITE — Daybook cannot say
+  // which of a site's machines took a given sale.
   const rsc = scopeSql(c, 'tenant_id');
-  const recorded = await qall(`SELECT tenant_id, UPPER(COALESCE(terminal,'')) term, sale_date, COALESCE(SUM(total),0) amt, COUNT(*) n
+  const recorded = await qall(`SELECT tenant_id, COALESCE(site_id,'—') site_id, sale_date,
+           COALESCE(SUM(total),0) amt, COUNT(*) n
     FROM pos_sales WHERE ${rsc.sql} AND sale_date BETWEEN ? AND ?
       AND UPPER(COALESCE(payment_method,'')) <> 'CASH'
     GROUP BY 1,2,3`, [...rsc.args, from, to]);
   const recMap = {};
-  for (const r of recorded) recMap[`${r.tenant_id}|${r.term}|${r.sale_date}`] = { amount: Number(r.amt), count: Number(r.n) };
+  for (const r of recorded) recMap[`${r.tenant_id}|${r.site_id}|${r.sale_date}`] = { amount: Number(r.amt), count: Number(r.n) };
 
-  const out = rows.map((e) => {
-    const eodTotal = n2(Number(e.p_approved || 0) + Number(e.t_approved || 0));
-    const rec = recMap[`${e.tenant_id}|${String(e.terminal_id || '').toUpperCase()}|${e.business_date}`] || { amount: 0, count: 0 };
-    return {
-      ...e,
-      unclear: (() => { try { return JSON.parse(e.ai_unclear || '[]'); } catch { return []; } })(),
-      eod_total: eodTotal,
-      recorded_total: n2(rec.amount),
-      recorded_count: rec.count,
-      // Positive → the machine took more than the books show (likely unrecorded sales).
-      variance: n2(eodTotal - rec.amount),
-    };
-  });
+  // Terminal rows carry their own EOD figures but NO variance — recorded sales
+  // attach to a site, not to a machine, so a per-terminal variance would be
+  // invented. The site roll-up below is where the comparison belongs.
+  const out = rows.map((e) => ({
+    ...e,
+    unclear: (() => { try { return JSON.parse(e.ai_unclear || '[]'); } catch { return []; } })(),
+    eod_total: n2(Number(e.p_approved || 0) + Number(e.t_approved || 0)),
+  }));
 
   // Per-site roll-up so the accountant sees the day at a glance. Keyed by
   // tenant AND site: "Kpansia" can exist in both workspaces and merging them
@@ -396,8 +401,6 @@ router.get('/', requireAuth, async (req, res) => {
     a.purchase = n2(a.purchase + Number(r.p_approved || 0));
     a.transfer = n2(a.transfer + Number(r.t_approved || 0));
     a.eod_total = n2(a.eod_total + r.eod_total);
-    a.recorded_total = n2(a.recorded_total + r.recorded_total);
-    a.variance = n2(a.variance + r.variance);
     return a;
   };
 
@@ -406,10 +409,28 @@ router.get('/', requireAuth, async (req, res) => {
     const k = `${r.tenant_id}|${r.site_id || '—'}`;
     const s = bySite[k] || (bySite[k] = {
       key: k, site_id: r.site_id, site: r.site_name || '—',
-      tenant_id: r.tenant_id, tenant: r.tenant_name || '—', ...ZERO(),
+      tenant_id: r.tenant_id, tenant: r.tenant_name || '—', _days: {}, ...ZERO(),
     });
+    // Remember which days this site actually has a slip for, so recorded sales
+    // are summed over exactly those days. Comparing one day's slip against a
+    // whole week of sales would manufacture a variance out of nothing.
+    s._days[r.business_date] = true;
     add(s, r);
   }
+
+  for (const s of Object.values(bySite)) {
+    for (const day of Object.keys(s._days)) {
+      const rec = recMap[`${s.tenant_id}|${s.site_id || '—'}|${day}`];
+      if (!rec) continue;
+      s.recorded_total = n2(s.recorded_total + rec.amount);
+      s.recorded_count = (s.recorded_count || 0) + rec.count;
+    }
+    // Positive → the terminals took more than the books show, i.e. sales are
+    // likely missing from Daybook.
+    s.variance = n2(s.eod_total - s.recorded_total);
+    delete s._days;
+  }
+
   const sites = Object.values(bySite).sort((a, b) =>
     String(a.tenant).localeCompare(String(b.tenant)) || String(a.site).localeCompare(String(b.site)));
 

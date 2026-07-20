@@ -34,9 +34,6 @@ function TerminalRow({ r, inset, canDelete, onSlip, onDelete }) {
       <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>
         Card {ngn(r.p_approved)} ({r.p_successful}/{r.p_volume}) · Transfer {ngn(r.t_approved)} ({r.t_approved_n}/{r.t_volume})
       </div>
-      <div style={{ fontSize: 12, marginTop: 3, color: vColor(r.variance) }}>
-        Daybook {ngn(r.recorded_total)} ({r.recorded_count}) · variance {r.variance > 0 ? '+' : ''}{ngn(r.variance)}
-      </div>
       {(r.captured_by_name || r.slip_time) ? (
         <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 3 }}>
           {r.slip_time ? `Slip ${r.slip_time}` : ''}{r.slip_time && r.captured_by_name ? ' · ' : ''}
@@ -84,7 +81,7 @@ function SiteBlock({ s, rows, open, onToggle, canDelete, onSlip, onDelete }) {
           <div style={{ padding: '0 14px 8px 26px', fontSize: 11.5, color: 'var(--muted)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             <span>Card {ngn(s.purchase)}</span>
             <span>Transfer {ngn(s.transfer)}</span>
-            <span>In Daybook {ngn(s.recorded_total)}</span>
+            <span>In Daybook {ngn(s.recorded_total)}{s.recorded_count ? ` (${s.recorded_count})` : ''}</span>
           </div>
           {rows.map((r) => (
             <TerminalRow key={r.id} r={r} inset canDelete={canDelete} onSlip={onSlip} onDelete={onDelete} />

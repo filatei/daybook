@@ -527,6 +527,67 @@ router.get('/production', requireAuth, async (req, res) => {
     ORDER BY (s.site_id = ?) DESC, s.full_name`,
     [siteId, date, siteId, c.tenant_id, siteId, siteId]));
 });
+// READ-ONLY production over a date range. The entry sheet above is one day at a
+// time, which makes it impossible to answer "what did this site actually bag
+// this period" without opening thirty pages. This answers that directly, and
+// shows only people who recorded something — a roster of 178 with 6 workers is
+// noise, not information.
+//
+// Group-aware: under the Group roll-up it spans every workspace in scope.
+router.get('/production/summary', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
+  const from = String(req.query.from || new Date().toISOString().slice(0, 10)).slice(0, 10);
+  const to = String(req.query.to || from).slice(0, 10);
+
+  const sc = scopeSql(c, 'p.tenant_id');
+  const where = [sc.sql, 'p.work_date BETWEEN ? AND ?',
+    '(COALESCE(p.bags_bagged,0) > 0 OR COALESCE(p.bags_loaded,0) > 0)'];
+  const args = [...sc.args, from, to];
+
+  // Site-bound users see their own site; everyone else may filter to one.
+  // NOTE: filters on where the work happened (p.site_id), not the worker's
+  // home site — a visitor's bags belong to the site they were credited to.
+  const siteId = siteBound(c) ? c.site_id : (req.query.site || null);
+  if (siteId) { where.push('p.site_id = ?'); args.push(siteId); }
+
+  const rows = await qall(`SELECT s.id staff_id, s.full_name,
+      COALESCE(NULLIF(s.staff_type,''), '') staff_type,
+      COALESCE(NULLIF(s.pay_type,''), '')   pay_type,
+      si.id site_id, si.name site_name, t.name tenant_name,
+      COUNT(*) days,
+      COALESCE(SUM(p.bags_bagged),0) bags_bagged,
+      COALESCE(SUM(p.bags_loaded),0) bags_loaded,
+      MIN(p.work_date) first_day, MAX(p.work_date) last_day
+    FROM production p
+    JOIN staff s   ON s.id  = p.staff_id
+    JOIN sites si  ON si.id = p.site_id
+    JOIN tenants t ON t.id  = p.tenant_id
+    WHERE ${where.join(' AND ')}
+    GROUP BY s.id, s.full_name, s.staff_type, s.pay_type, si.id, si.name, t.name
+    ORDER BY si.name, s.full_name`, args);
+
+  const bySite = {};
+  for (const r of rows) {
+    const k = r.site_id;
+    const g = bySite[k] || (bySite[k] = {
+      site_id: r.site_id, site: r.site_name, tenant: r.tenant_name,
+      staff: 0, bags_bagged: 0, bags_loaded: 0, rows: [],
+    });
+    g.staff += 1;
+    g.bags_bagged = r2(g.bags_bagged + Number(r.bags_bagged));
+    g.bags_loaded = r2(g.bags_loaded + Number(r.bags_loaded));
+    g.rows.push({ ...r, bags_bagged: Number(r.bags_bagged), bags_loaded: Number(r.bags_loaded) });
+  }
+  const sites = Object.values(bySite).sort((a, b) => String(a.site).localeCompare(String(b.site)));
+  const totals = sites.reduce((a, g) => ({
+    staff: a.staff + g.staff,
+    bags_bagged: r2(a.bags_bagged + g.bags_bagged),
+    bags_loaded: r2(a.bags_loaded + g.bags_loaded),
+  }), { staff: 0, bags_bagged: 0, bags_loaded: 0 });
+
+  res.json({ from, to, sites, totals });
+});
+
 // Search active staff (any site) to pull a visiting worker into a site's sheet.
 router.get('/production/staff-search', requireAuth, async (req, res) => {
   const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;

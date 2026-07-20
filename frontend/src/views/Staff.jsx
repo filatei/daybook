@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { api, scoped, today, getToken } from '../api.js';
+import { api, scoped, scopedAny, today, getToken } from '../api.js';
 import { useStore, useRole, atLeast, useActiveTenant } from '../store.jsx';
 import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/useFaceLiveness.js';
 import { brandFor, printBadges } from '../badge.js';
@@ -510,6 +510,122 @@ function AttendanceReport({ siteFilter }) {
 }
 
 // ── Daily production entry (bags loaded / bagged) ─────────────────────────────
+
+// Read-only production over a date range. The entry grid below is one day at a
+// time; this answers "what did this site actually record this period" without
+// paging through thirty days. Shows only people with bags — a 178-name roster
+// where 6 worked is noise.
+function ProductionSummary({ siteFilter, sites = [], siteBound = false, onClose }) {
+  const { tenant } = useStore();
+  const [from, setFrom] = useState(() => { const d = new Date(); d.setDate(d.getDate() - 29); return d.toISOString().slice(0, 10); });
+  const [to, setTo] = useState(today());
+  const [site, setSite] = useState(siteFilter || '');
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const p = new URLSearchParams({ from, to });
+      if (site) p.set('site', site);
+      setData(await api(scopedAny(`/payroll/production/summary?${p}`)));
+    } catch { setData(null); }
+    setLoading(false);
+  }, [tenant, from, to, site]);
+  useEffect(() => { load(); }, [load]);
+
+  const preset = (days) => {
+    const d = new Date(); const t = d.toISOString().slice(0, 10);
+    d.setDate(d.getDate() - (days - 1));
+    setFrom(d.toISOString().slice(0, 10)); setTo(t);
+  };
+  // The pay period everyone actually asks about: 16th prev -> 15th.
+  const midMonth = () => {
+    const n = new Date(); const y = n.getFullYear(), m = n.getMonth();
+    const f = new Date(y, m - 1, 16), t = new Date(y, m, 15);
+    setFrom(f.toISOString().slice(0, 10)); setTo(t.toISOString().slice(0, 10));
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <strong style={{ fontSize: 14 }}>Production over a period</strong>
+        <span style={{ flex: 1 }} />
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={onClose}>Back to daily entry</button>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+        <input type="date" className="input" style={{ flex: 1, minWidth: 130 }} value={from} max={to} onChange={(e) => setFrom(e.target.value)} />
+        <input type="date" className="input" style={{ flex: 1, minWidth: 130 }} value={to} min={from} max={today()} onChange={(e) => setTo(e.target.value)} />
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' }}>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }} onClick={() => preset(7)}>7 days</button>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }} onClick={() => preset(30)}>30 days</button>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }} onClick={midMonth}>Mid-month period</button>
+      </div>
+      {!siteBound && sites.length > 1 ? (
+        <SearchSelect style={{ marginBottom: 10 }} value={site} onChange={setSite} placeholder="All sites"
+          options={[{ value: '', label: 'All sites' }, ...sites.map((x) => ({ value: x.id, label: x.name }))]} />
+      ) : null}
+
+      {loading ? <div className="skel" />
+        : !data || !data.sites.length ? (
+          <div className="empty"><div className="ic">📦</div><p>No bags recorded in this period.</p></div>
+        ) : (
+          <>
+            <div className="card" style={{ padding: '10px 14px', marginBottom: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--muted)', fontWeight: 600 }}>
+                  {data.totals.staff} staff · {data.sites.length} site(s) · {data.from} → {data.to}
+                </span>
+                <strong style={{ fontSize: 15 }}>
+                  {fmtBags(data.totals.bags_bagged)} bagged · {fmtBags(data.totals.bags_loaded)} loaded
+                </strong>
+              </div>
+            </div>
+
+            {data.sites.map((g) => (
+              <div key={g.site_id} className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                              padding: '9px 14px', background: '#f8fafc', borderBottom: '1px solid var(--line)' }}>
+                  <span style={{ fontSize: 13, fontWeight: 800 }}>{g.site}
+                    <span style={{ color: 'var(--muted)', fontWeight: 600 }}> · {g.staff} staff</span>
+                  </span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>
+                    {fmtBags(g.bags_bagged)} B · {fmtBags(g.bags_loaded)} L
+                  </span>
+                </div>
+                {g.rows.map((r) => (
+                  <div key={r.staff_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                                                 gap: 8, padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+                    <span style={{ minWidth: 0 }}>
+                      {r.full_name}
+                      <span style={{ color: 'var(--muted)', fontSize: 11.5 }}>
+                        {r.staff_type ? ` · ${r.staff_type.toLowerCase()}` : ''} · {r.days} day(s) · {r.first_day} → {r.last_day}
+                      </span>
+                    </span>
+                    <span style={{ whiteSpace: 'nowrap', fontWeight: 700 }}>
+                      {r.bags_bagged ? `${fmtBags(r.bags_bagged)} B` : ''}
+                      {r.bags_bagged && r.bags_loaded ? ' · ' : ''}
+                      {r.bags_loaded ? `${fmtBags(r.bags_loaded)} L` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </>
+        )}
+    </div>
+  );
+}
+
+// Bags can be fractional (a loader's share of a split load), so trim the noise
+// but keep a real decimal when there is one.
+const fmtBags = (n) => {
+  const v = Number(n) || 0;
+  return (Math.round(v * 10) / 10).toLocaleString(undefined, { maximumFractionDigits: 1 });
+};
+
 function ProductionGrid({ siteFilter, sites = [], siteBound = false }) {
   const { tenant, toast } = useStore();
   const [date, setDate] = useState(today());
@@ -519,6 +635,7 @@ function ProductionGrid({ siteFilter, sites = [], siteBound = false }) {
   const [showAll, setShowAll] = useState(false);   // default: baggers & loaders only
   const [addQ, setAddQ] = useState('');            // visitor-search box
   const [addResults, setAddResults] = useState([]);
+  const [rangeView, setRangeView] = useState(false);
 
   // HQ/Admin must pick a site before recording (production is now per work-site).
   const needSite = !siteBound && !siteFilter;
@@ -568,11 +685,20 @@ function ProductionGrid({ siteFilter, sites = [], siteBound = false }) {
     );
   }
 
+  if (rangeView) {
+    return <ProductionSummary siteFilter={siteFilter} sites={sites} siteBound={siteBound}
+             onClose={() => setRangeView(false)} />;
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <input type="date" className="input" style={{ flex: '0 1 150px' }} value={date} max={today()} onChange={(e) => setDate(e.target.value)} />
         <span style={{ fontSize: 12, color: 'var(--muted)' }}>Recording at <b>{siteName}</b> · Loaded {totL} · Bagged {totB}</span>
+        <span style={{ flex: 1 }} />
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+          onClick={() => setRangeView(true)}
+          title="Read-only totals per staff over a date range">📊 View a period</button>
       </div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <input className="input" style={{ flex: '1 1 160px' }} placeholder="🔍 Search staff by name" value={q} onChange={(e) => setQ(e.target.value)} />

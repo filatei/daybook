@@ -1411,6 +1411,145 @@ async function fidoCsv(tenant_id, run) {
     (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', [l.bank_name, l.bank_account].filter(Boolean).join('-'), l.bags_loaded, l.gross, ps, pe, 'LOADER']; });
   return rows.map((r) => r.map(q).join(',')).join('\r\n');
 }
+// ═══════════════════════════════════════════════════════════════════════════════
+// BANK PAYMENT FILE — the CSV the accountant uploads to FCMB to actually pay.
+//
+// fidoCsv() above produces the INPUT the accountant used to hand to legacy Fido.
+// This is the OUTPUT side legacy Fido produced from it, and it is the file the
+// bank consumes. Column names and order are copied from the legacy export
+// verbatim because that shape is known to upload successfully — do not "tidy"
+// them without testing against a real FCMB upload first.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Real bank behind the free text. The legacy data carries ~38 spellings of
+// roughly 15 banks ("FCMB"/"Fcmb"/"fcmb", "monie point"/"MONIEPOINT MICROFINANCE
+// BANK", "Opay Digital Services Limited"…) because the old format crammed bank
+// and account into one hyphenated string and split on the hyphen — whatever was
+// typed became the bank name.
+const BANK_ALIASES = [
+  [/^(fcmb|first city monument)/, 'FCMB'],
+  [/^(sterl|sterling)/, 'STERLING'],
+  [/^(uba|united bank)/, 'UBA'],
+  [/^(firstbank|first bank)/, 'FIRSTBANK'],
+  [/^access/, 'ACCESS'],
+  [/^(opay|opay digital)/, 'OPAY'],
+  [/^(moniepoint|monie ?point)/, 'MONIEPOINT'],
+  [/^palmpay/, 'PALMPAY'],
+  [/^(fidelity|fid$)/, 'FIDELITY'],
+  [/^(gtb|gtbank|guaranty)/, 'GTBANK'],
+  [/^zenith/, 'ZENITH'],
+  [/^ecobank/, 'ECOBANK'],
+  [/^keystone/, 'KEYSTONE'],
+  [/^union/, 'UNION'],
+  [/^wema/, 'WEMA'],
+];
+
+function normaliseBank(raw) {
+  const t = String(raw || '').trim().replace(/\s+/g, ' ');
+  if (!t) return '';
+  const low = t.toLowerCase();
+  for (const [re, canon] of BANK_ALIASES) if (re.test(low)) return canon;
+  return t.toUpperCase();
+}
+
+// Nigerian NUBAN account numbers are exactly 10 digits. Anything else will
+// bounce at the bank, so it is worth naming before the file is submitted
+// rather than after a failed batch.
+function bankLineIssues(l) {
+  const out = [];
+  const bank = normaliseBank(l.bank_name);
+  const acct = String(l.bank_account || '').replace(/\D/g, '');
+
+  if (!bank) out.push('no bank');
+  else if (/\d/.test(String(l.bank_name))) out.push(`bank name contains digits ("${l.bank_name}")`);
+  else if (bank === 'OTHERBANK') out.push('bank recorded as OTHERBANK (placeholder)');
+
+  if (!acct) out.push('no account number');
+  else if (acct.length !== 10) out.push(`account number is ${acct.length} digits, expected 10`);
+
+  return out;
+}
+
+async function bankLines(run) {
+  return qall(`SELECT pl.*, s.ext_people_id, s.full_name, s.bank_name, s.bank_account, st.name site_name
+    FROM pay_run_lines pl
+    LEFT JOIN staff s  ON s.id = pl.staff_id
+    LEFT JOIN sites st ON st.id = s.site_id
+    WHERE pl.run_id=? ORDER BY st.name, s.full_name`, [run.id]);
+}
+
+async function bankCsv(run) {
+  const lines = await bankLines(run);
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const payType = String(run.kind || '').toUpperCase() === 'MIDMONTH' ? 'MID-MONTH' : 'MONTH-END';
+  const status = String(run.status || '').toUpperCase() === 'PAID' ? 'PAID' : 'UNPAID';
+
+  const header = ['payeeName', 'payee_id', 'bankAccount', 'bankName', 'accountNo', 'jobName',
+    'grossPay', 'netPay', 'status', 'siteName', 'payType', 'salaryAdvance',
+    'deductions', 'daysAbsent', 'daysWorked', 'totalWorkDaysInMonth'];
+
+  const rows = lines.map((l) => {
+    const bank = normaliseBank(l.bank_name);
+    const acct = String(l.bank_account || '').trim();
+    return [
+      l.full_name || l.staff_name || '',
+      l.ext_people_id || '',
+      [bank, acct].filter(Boolean).join('-'),   // legacy kept the combined form too
+      bank,
+      acct,
+      String(l.pay_type || '').toUpperCase(),
+      r2(l.gross), r2(l.net ?? l.gross),
+      status,
+      (l.site_name || '').toUpperCase(),
+      payType,
+      0, r2(l.deductions), 0, r2(l.days_present || 0), 0,
+    ];
+  });
+
+  return [header, ...rows].map((r) => r.map(q).join(',')).join('\r\n');
+}
+
+// The CSV itself always generates — a payroll must not be blocked by one bad
+// record. The issues ride alongside so the UI can warn before submission.
+router.get('/runs2/:id/bank.csv', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await runFor(c, req.params.id);
+  if (!run) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="bank-payment-${run.period_from}_${run.period_to}.csv"`);
+  res.send(await bankCsv(run));
+});
+
+// Pre-flight: who in this run cannot be paid as recorded.
+router.get('/runs2/:id/bank-check', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await runFor(c, req.params.id);
+  if (!run) return res.status(404).json({ error: 'not found' });
+
+  const lines = await bankLines(run);
+  const problems = [];
+  for (const l of lines) {
+    const issues = bankLineIssues(l);
+    if (issues.length) {
+      problems.push({
+        staff_id: l.staff_id,
+        name: l.full_name || l.staff_name,
+        site: l.site_name || '',
+        amount: r2(l.net ?? l.gross),
+        issues,
+      });
+    }
+  }
+  res.json({
+    run_id: run.id,
+    payees: lines.length,
+    ok: lines.length - problems.length,
+    at_risk: problems.length,
+    at_risk_amount: r2(problems.reduce((a, p) => a + p.amount, 0)),
+    problems,
+  });
+});
+
 router.get('/runs2/:id/fido.csv', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);

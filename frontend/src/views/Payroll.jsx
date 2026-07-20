@@ -368,6 +368,9 @@ function RunsTab() {
   const isGM = role && atLeast(role, 'GENERAL_MANAGER');
   const [runs, setRuns] = useState([]);
   const [open, setOpen] = useState(null);   // run detail
+  // Who in this run cannot be paid as recorded. Fetched alongside the run so
+  // the warning is on screen BEFORE the accountant downloads and submits.
+  const [bankCheck, setBankCheck] = useState(null);
   const [editLine, setEditLine] = useState(null); // line being adjusted
   const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -399,7 +402,13 @@ function RunsTab() {
   }, [tenant]);
   useEffect(() => { load(); }, [load]);
 
-  const view = async (id) => { try { setOpen(await api(scopedAny(`/payroll/runs2/${id}`))); } catch (e) { toast(e.message, 'err'); } };
+  const view = async (id) => {
+    try {
+      setBankCheck(null);
+      setOpen(await api(scopedAny(`/payroll/runs2/${id}`)));
+      api(scopedAny(`/payroll/runs2/${id}/bank-check`)).then(setBankCheck).catch(() => setBankCheck(null));
+    } catch (e) { toast(e.message, 'err'); }
+  };
   const setStatus = async (status) => {
     try { const r = await api(scopedAny(`/payroll/runs2/${open.id}/status`), { method: 'POST', body: { status } }); setOpen((o) => ({ ...o, ...r })); toast(`Marked ${status.toLowerCase()} ✓`, 'ok'); load(); }
     catch (e) { toast(e.message, 'err'); }
@@ -489,6 +498,35 @@ function RunsTab() {
               {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/export.csv?tenant=${tenant}`, `payroll_${open.period_from}.csv`)}>⬇ CSV</button>
               {open.kind === 'MIDMONTH' && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/fido.csv?tenant=${tenant}`, `midmonth_${open.period_from}.csv`)}>⬇ Fido format</button>}
+              <button className="btn btn-ghost" style={{ flex: 1, ...(bankCheck?.at_risk ? { color: '#b45309' } : {}) }}
+                onClick={() => dl(`/payroll/runs2/${open.id}/bank.csv?tenant=${tenant}`, `bank_payment_${open.period_from}.csv`)}
+                title="CSV for upload to the bank — payee, bank, account number and net pay">
+                🏦 Bank file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
+              </button>
+            </div>
+
+            {bankCheck && bankCheck.at_risk > 0 && (
+              <div className="card" style={{ padding: '10px 14px', marginTop: 10, background: '#fffbeb', border: '1px solid #fcd34d' }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#92400e' }}>
+                  ⚠ {bankCheck.at_risk} of {bankCheck.payees} payees may be rejected by the bank
+                  {bankCheck.at_risk_amount ? ` — ${ngn(bankCheck.at_risk_amount)} at risk` : ''}
+                </div>
+                <div style={{ fontSize: 11.5, color: '#92400e', marginTop: 3 }}>
+                  The file still downloads with everyone in it. Fix these records and re-download,
+                  or the bank will bounce those rows.
+                </div>
+                <div style={{ marginTop: 8, maxHeight: 190, overflowY: 'auto' }}>
+                  {bankCheck.problems.map((p) => (
+                    <div key={p.staff_id || p.name} style={{ fontSize: 12, padding: '4px 0', borderTop: '1px solid #fde68a' }}>
+                      <strong>{p.name}</strong>
+                      <span style={{ color: 'var(--muted)' }}>{p.site ? ` · ${p.site}` : ''} · {ngn(p.amount)}</span>
+                      <div style={{ color: '#b45309' }}>{p.issues.join(' · ')}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
               {open.status === 'DRAFT' && (
                 <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px', color: '#b91c1c' }} onClick={del} disabled={acting}
                   title="Throw this draft away — use when the period itself is wrong">🗑 Delete</button>

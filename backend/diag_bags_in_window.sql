@@ -1,7 +1,7 @@
 -- Who has bags recorded in a pay period, and whether payroll will pay them.
--- Predicates copied verbatim from routes_payroll.js (PIECE_WORKER /
--- PAYROLL_ELIGIBLE) so section A's "included" count should equal what a real
--- compute produces. If it does not, the compute has a bug.
+-- Mirrors computePieceLines(): paid if you bagged or loaded, WHATEVER your job
+-- title, unless you are a %HIRED% day-labour placeholder or parked/LEFT.
+-- Section A's "included" count should equal what a real compute produces.
 --
 -- Change the period here. Mid-month = 16th prev -> 15th; month-end = 28th -> 27th.
 \set pfrom '2026-06-16'
@@ -17,8 +17,7 @@
 WITH w AS (
   SELECT s.id,
          COALESCE(SUM(p.bags_bagged),0) bagged, COALESCE(SUM(p.bags_loaded),0) loaded,
-         (UPPER(COALESCE(s.staff_type,'')) IN ('BAGGER','LOADER')
-            OR UPPER(COALESCE(s.pay_type,'')) = 'PIECE')  AS is_piece,
+         (UPPER(COALESCE(s.full_name,'')) NOT LIKE '%HIRED%') AS not_hired,
          (COALESCE(s.payroll_eligible,TRUE) = TRUE
             AND COALESCE(s.status,'') <> 'LEFT')          AS is_eligible
     FROM production p
@@ -27,14 +26,14 @@ WITH w AS (
      AND (COALESCE(p.bags_bagged,0) > 0 OR COALESCE(p.bags_loaded,0) > 0)
    GROUP BY s.id, s.staff_type, s.pay_type, s.payroll_eligible, s.status
 )
-SELECT CASE WHEN NOT is_piece    THEN 'MISSED - not typed bagger/loader'
+SELECT CASE WHEN NOT not_hired   THEN 'excluded - HIRED day labour (paid cash)'
             WHEN NOT is_eligible THEN 'MISSED - parked or marked LEFT'
             ELSE 'included in payroll' END AS outcome,
        COUNT(*) staff, SUM(bagged) bagged, SUM(loaded) loaded
   FROM w GROUP BY 1 ORDER BY 1;
 
 \echo ''
-\echo '=== B. ACTIONABLE — has bags but payroll SKIPS them (with dates worked) ==='
+\echo '=== B. has bags but payroll SKIPS them — expect only HIRED placeholders ==='
 SELECT t.name tenant, si.name site, s.full_name,
        COALESCE(NULLIF(s.staff_type,''),'(none)') staff_type,
        COALESCE(NULLIF(s.pay_type,''),'(none)')   pay_type,
@@ -48,8 +47,7 @@ SELECT t.name tenant, si.name site, s.full_name,
   JOIN tenants t ON t.id  = si.tenant_id
  WHERE p.work_date BETWEEN :'pfrom' AND :'pto'
    AND (COALESCE(p.bags_bagged,0) > 0 OR COALESCE(p.bags_loaded,0) > 0)
-   AND NOT ( (UPPER(COALESCE(s.staff_type,'')) IN ('BAGGER','LOADER')
-              OR UPPER(COALESCE(s.pay_type,'')) = 'PIECE')
+   AND NOT ( UPPER(COALESCE(s.full_name,'')) NOT LIKE '%HIRED%'
             AND COALESCE(s.payroll_eligible,TRUE) = TRUE
             AND COALESCE(s.status,'') <> 'LEFT' )
  GROUP BY 1,2,3,4,5,6,7

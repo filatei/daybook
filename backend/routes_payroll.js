@@ -77,11 +77,12 @@ async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
 // (payroll_eligible=false) or marked them as having left (status='LEFT').
 // COALESCE covers rows created before the column existed.
 const PAYROLL_ELIGIBLE = "COALESCE(payroll_eligible, TRUE) = TRUE AND COALESCE(status,'') <> 'LEFT'";
-// PIECE_WORKER: baggers/loaders paid per bag — the only people in a mid-month run.
+// PIECE_WORKER: baggers/loaders paid per bag. NOTE: the mid-month run no longer
+// gates on this — it pays whoever did the work (see computePieceLines). This is
+// now only used by the explicit `pieceOnly` export filter.
 const PIECE_WORKER = "(UPPER(COALESCE(staff_type,'')) IN ('BAGGER','LOADER') OR UPPER(COALESCE(pay_type,'')) = 'PIECE')";
-// Same two predicates, aliased for queries that alias the staff table as `s`.
+// Aliased for queries that alias the staff table as `s`.
 const PAYROLL_ELIGIBLE_S = PAYROLL_ELIGIBLE.replace(/\b(payroll_eligible|status)\b/g, 's.$1');
-const PIECE_WORKER_S = PIECE_WORKER.replace(/\b(staff_type|pay_type)\b/g, 's.$1');
 
 // Global, SHARED per-bag rates (one for loading, one for bagging) applied to every
 // loader/bagger across the combined payroll. Stored tenant-independently.
@@ -1295,11 +1296,26 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
   const ids = tenantList(tenant_id);
   if (!ids.length) return [];
   const ph = ids.map(() => '?').join(',');
+  // WHO GETS PAID: anyone who actually bagged or loaded in the period, whatever
+  // their job title. Deliberately NOT gated on PIECE_WORKER (staff_type
+  // BAGGER/LOADER or pay_type PIECE) — that gate silently dropped real people
+  // who did the work but were typed REGULAR/DAILY/MONTHLY: 8 of them in the
+  // 2026-06-16..07-15 period alone, including 2,200 bags by one person over six
+  // days. The work is the entitlement, not the title.
+  //
+  // Two exclusions remain, and both are deliberate:
+  //   • %HIRED% — "SWALI HIRED BAGGER" and friends are casual day-labour
+  //     placeholders paid cash on the day, never through payroll.
+  //   • PAYROLL_ELIGIBLE — parked records and staff marked LEFT.
   const sWhere = [`s.tenant_id IN (${ph})`, "s.status='ACTIVE'",
-    // "HIRED BAGGER/LOADER" are casual day-labour placeholders paid cash on the
-    // day — never payroll. Mirrors computeLines/computeCombinedLines.
     "UPPER(COALESCE(s.full_name,'')) NOT LIKE '%HIRED%'",
-    PAYROLL_ELIGIBLE_S, PIECE_WORKER_S], sArgs = [...ids];
+    PAYROLL_ELIGIBLE_S,
+    // Restricting to people with production keeps this a small fetch instead of
+    // pulling the whole roster and discarding it on commission <= 0 below.
+    `s.id IN (SELECT staff_id FROM production
+               WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ?
+                 AND (COALESCE(bags_bagged,0) > 0 OR COALESCE(bags_loaded,0) > 0))`],
+  sArgs = [...ids, ...ids, from, to];
   if (site) { sWhere.push('s.site_id=?'); sArgs.push(site); }
   const staff = await qall(`SELECT s.id, s.tenant_id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
       s.rate_loaded, s.rate_bagged, s.bank_name, s.bank_account, st.name site_name

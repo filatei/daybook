@@ -184,11 +184,12 @@ function Inner() {
         <div className="ptr" style={{ height: ptr, opacity: ptr ? 1 : 0 }}>
           <span className={`ptr-ic ${refreshing || ptr >= 70 ? 'go' : ''}`}>↻</span>
         </div>
-        {/* Payroll is deliberately group-capable: it is run once for the whole
-            business (Fido + Fiafia), not per workspace. 'more' is the launcher
+        {/* Group-capable tabs. Payroll is run once for the whole business
+            (Fido + Fiafia), not per workspace; EOD rolls the day up across both
+            and blocks capture inside its own view. 'more' is the launcher
             itself — it must always render so its links stay reachable (each
             destination shows the switch-workspace note if it is site-specific). */}
-        {isGroup && !['dashboard', 'expenses', 'reports', 'payroll', 'more'].includes(tab) ? (
+        {isGroup && !['dashboard', 'expenses', 'reports', 'payroll', 'eod', 'more'].includes(tab) ? (
           <div className="empty">
             <div className="ic">🏢</div>
             <p>This section works inside a single workspace. You’re viewing the Group roll-up — switch to Fido or Fiafia (top-left) to use it.</p>

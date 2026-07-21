@@ -809,6 +809,14 @@ async function migrate() {
       source_row  TEXT,
       UNIQUE(batch_id, staff_id)
     );
+    -- What the sheet said about this person's bank details, and what we did with
+    -- it. Filling a BLANK is safe and useful; changing an existing account is
+    -- redirecting somebody's wages, so that is recorded and left for a human.
+    ALTER TABLE production_override ADD COLUMN IF NOT EXISTS sheet_bank    TEXT;
+    ALTER TABLE production_override ADD COLUMN IF NOT EXISTS sheet_account TEXT;
+    ALTER TABLE production_override ADD COLUMN IF NOT EXISTS bank_note     TEXT;
+    ALTER TABLE production_override_batch ADD COLUMN IF NOT EXISTS bank_filled    INTEGER DEFAULT 0;
+    ALTER TABLE production_override_batch ADD COLUMN IF NOT EXISTS bank_conflicts INTEGER DEFAULT 0;
     CREATE INDEX IF NOT EXISTS idx_prodovr_batch ON production_override(batch_id);
     CREATE INDEX IF NOT EXISTS idx_prodovr_staff ON production_override(tenant_id, staff_id);
     CREATE INDEX IF NOT EXISTS idx_prodovr_period ON production_override_batch(period_from, period_to);

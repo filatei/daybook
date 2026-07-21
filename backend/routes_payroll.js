@@ -1422,10 +1422,20 @@ router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).end();
-  const lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
+  // Joined to staff so the export carries WHO to pay AND WHERE. Without the bank
+  // columns this file cannot be checked against a payment, which is most of what
+  // anyone opens it for.
+  const lines = await qall(`SELECT pl.*, s.ext_people_id, s.bank_name, s.bank_account, st.name site_name
+    FROM pay_run_lines pl LEFT JOIN staff s ON s.id=pl.staff_id LEFT JOIN sites st ON st.id=s.site_id
+    WHERE pl.run_id=? ORDER BY s.full_name, pl.staff_name`, [run.id]);
   const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const out = [['Staff', 'Pay type', 'Days', 'Bags loaded', 'Bags bagged', 'Gross', 'Deductions', 'Net'].join(','),
-    ...lines.map((l) => [l.staff_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, l.deductions, l.net].map(q).join(','))];
+  const out = [['Staff', 'ID', 'Site', 'Pay type', 'Days', 'Bags loaded', 'Bags bagged',
+    'Bank', 'Account number', 'Gross', 'Deductions', 'Net', 'Bags from'].join(','),
+  ...lines.map((l) => [l.staff_name, l.ext_people_id || '', l.site_name || '', l.pay_type,
+    l.days_present, l.bags_loaded, l.bags_bagged,
+    normaliseBank(l.bank_name), String(l.bank_account || '').trim(),
+    l.gross, l.deductions, l.net,
+    l.bags_source === 'SHEET' ? "accountant's sheet" : 'recorded production'].map(q).join(','))];
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="payroll-${run.period_from}_${run.period_to}.csv"`);
   res.send(out.join('\r\n'));
@@ -1708,7 +1718,7 @@ const BANK_ALIASES = [
   [/^(fidelity|fid$)/, 'FIDELITY'],
   [/^(gtb|gtbank|guaranty)/, 'GTBANK'],
   [/^zenith/, 'ZENITH'],
-  [/^ecobank/, 'ECOBANK'],
+  [/^eco ?bank/, 'ECOBANK'],
   [/^keystone/, 'KEYSTONE'],
   [/^union/, 'UNION'],
   [/^wema/, 'WEMA'],
@@ -1951,7 +1961,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
   if (!tenants.length) return res.status(400).json({ error: 'no active workspaces' });
   const ph = tenants.map(() => '?').join(',');
   const staff = await qall(`SELECT s.id, s.tenant_id, s.site_id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
-      s.payroll_eligible, s.status FROM staff s WHERE s.tenant_id IN (${ph})`, tenants);
+      s.payroll_eligible, s.status, s.bank_name, s.bank_account FROM staff s WHERE s.tenant_id IN (${ph})`, tenants);
   // An ambiguous match is NOT a match. `null` marks a key that two staff records
   // claim; the row is reported unmatched so a human decides, because paying the
   // wrong Blessing is worse than paying nobody and saying so.
@@ -2029,9 +2039,11 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
       if (st.payroll_eligible === false) { note(`${st.full_name} is parked out of payroll`); continue; }
       if (/HIRED/i.test(st.full_name || '')) { note(`${st.full_name} is a day-labour placeholder, paid cash`); continue; }
 
-      const cur = matched.get(st.id) || { staff: st, loaded: 0, bagged: 0, rows: [] };
+      const cur = matched.get(st.id) || { staff: st, loaded: 0, bagged: 0, rows: [], acct: '' };
       if (kind === 'LOADERS') cur.loaded += qty; else cur.bagged += qty;
       cur.rows.push(`${sheetName}:${ext || full}`);
+      // "FCMB-6689114019" — the same BANK-ACCOUNT form the staff importer reads.
+      cur.acct = cur.acct || String(get(['ACCOUNT NUMBER', 'ACCOUNT']) ?? '').trim();
       matched.set(st.id, cur);
     }
   };
@@ -2062,21 +2074,48 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
   }
   const kind = sheetKind || asked || 'MIDMONTH';
 
-  const rows = [...matched.values()];
-  const totals = rows.reduce((a, r) => ({ bagged: a.bagged + r.bagged, loaded: a.loaded + r.loaded }), { bagged: 0, loaded: 0 });
+  const rows0 = [...matched.values()];
+  const totals = rows0.reduce((a, r) => ({ bagged: a.bagged + r.bagged, loaded: a.loaded + r.loaded }), { bagged: 0, loaded: 0 });
 
   // Show the MONEY, not just the bag counts. The accountant is checking this
   // against their own workbook total, and bags at ₦1 vs ₦6 is the single most
   // consequential thing to get wrong — so price it at the rate this batch's kind
   // will actually be paid at, and say which rate that is.
+  // BANK DETAILS FROM THE SHEET.
+  //
+  // The bank file is only as good as the account numbers behind it, and the
+  // accountant's workbook is where those are actually maintained. So: fill a
+  // BLANK on the roster, and never overwrite one that differs — that is
+  // redirecting somebody's wages, and it needs a person to decide, not an
+  // upload. Differences are recorded and shown.
+  const digits = (x) => String(x || '').replace(/\D/g, '');
+  for (const r of rows0) {
+    const raw = String(r.acct || '').trim();
+    const dash = raw.indexOf('-');
+    r.sheetBank = dash > 0 ? raw.slice(0, dash).trim() : '';
+    r.sheetAcct = (dash > 0 ? raw.slice(dash + 1) : raw).trim();
+    const have = digits(r.staff.bank_account);
+    const want = digits(r.sheetAcct);
+    if (!want) { r.bankNote = have ? null : 'no account on the sheet or the roster'; r.bankAction = 'NONE'; }
+    else if (!have) { r.bankNote = `filled from sheet: ${r.sheetBank}-${r.sheetAcct}`; r.bankAction = 'FILL'; }
+    else if (have !== want) { r.bankNote = `sheet says ${r.sheetBank}-${r.sheetAcct}, roster has ${r.staff.bank_name || '?'}-${r.staff.bank_account} — NOT changed`; r.bankAction = 'CONFLICT'; }
+    else { r.bankNote = null; r.bankAction = 'SAME'; }
+  }
+  const bankFilled = rows0.filter((r) => r.bankAction === 'FILL').length;
+  const bankConflicts = rows0.filter((r) => r.bankAction === 'CONFLICT').length;
+  const bankMissing = rows0.filter((r) => r.bankAction === 'NONE' && r.bankNote).length;
+
   const pRates = await getBagRates(kind);
   const sites = await qall('SELECT id, name FROM sites');
   const siteName = {}; for (const st of sites) siteName[st.id] = st.name;
+  const rows = rows0;
   const priced = rows.map((r) => ({
     staff_id: r.staff.id,
     full_name: r.staff.full_name,
     ext_id: r.staff.ext_people_id || '',
     site_name: siteName[r.staff.site_id] || '—',
+    account: [r.sheetBank || r.staff.bank_name, r.sheetAcct || r.staff.bank_account].filter(Boolean).join('-'),
+    bank_note: r.bankNote || null,
     designation: r.loaded >= r.bagged ? 'LOADER' : 'BAGGER',
     bags_loaded: r2(r.loaded), bags_bagged: r2(r.bagged),
     amount: r2(r.loaded * (pRates.loaded || 0) + r.bagged * (pRates.bagged || 0)),
@@ -2088,6 +2127,8 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
     total_bagged: r2(totals.bagged), total_loaded: r2(totals.loaded),
     rates: pRates,
     total_amount: r2(priced.reduce((a, x) => a + x.amount, 0)),
+    bank_filled: bankFilled, bank_conflicts: bankConflicts, bank_missing: bankMissing,
+    bank_notes: rows.filter((r) => r.bankNote).map((r) => ({ full_name: r.staff.full_name, note: r.bankNote })).slice(0, 200),
     // Everyone the sheet will pay, and everyone it will not. Both lists matter:
     // the second is people who worked and would otherwise vanish from the run.
     rows: priced,
@@ -2118,15 +2159,24 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
       for (const b of old) await tx.qrun('DELETE FROM production_override_batch WHERE id=?', [b.id]);
 
       await tx.qrun(`INSERT INTO production_override_batch
-        (id,period_from,period_to,kind,file_name,note,matched,unmatched,total_bagged,total_loaded,created_by,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        (id,period_from,period_to,kind,file_name,note,matched,unmatched,total_bagged,total_loaded,bank_filled,bank_conflicts,created_by,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [batchId, pFrom, pTo, kind, req.file.originalname || null, req.body?.note || null,
-        rows.length, unmatched.length, r2(totals.bagged), r2(totals.loaded), req.user.id, nowS()]);
+        rows.length, unmatched.length, r2(totals.bagged), r2(totals.loaded),
+        bankFilled, bankConflicts, req.user.id, nowS()]);
 
       for (const r of rows) {
-        await tx.qrun(`INSERT INTO production_override (id,batch_id,tenant_id,staff_id,site_id,bags_loaded,bags_bagged,source_row)
-          VALUES (?,?,?,?,?,?,?,?)`,
-        [uuid(), batchId, r.staff.tenant_id, r.staff.id, r.staff.site_id || null, r2(r.loaded), r2(r.bagged), r.rows.join(', ')]);
+        await tx.qrun(`INSERT INTO production_override (id,batch_id,tenant_id,staff_id,site_id,bags_loaded,bags_bagged,source_row,sheet_bank,sheet_account,bank_note)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), batchId, r.staff.tenant_id, r.staff.id, r.staff.site_id || null, r2(r.loaded), r2(r.bagged),
+          r.rows.join(', '), r.sheetBank || null, r.sheetAcct || null, r.bankNote || null]);
+
+        // Fill a blank only. A staff record that already has an account keeps it;
+        // the difference is reported instead. Wages go where the roster says.
+        if (r.bankAction === 'FILL') {
+          await tx.qrun(`UPDATE staff SET bank_name=COALESCE(NULLIF(bank_name,''),?), bank_account=COALESCE(NULLIF(bank_account,''),?)
+            WHERE id=?`, [r.sheetBank || null, r.sheetAcct || null, r.staff.id]);
+        }
       }
       for (const u of unmatched) {
         await tx.qrun(`INSERT INTO production_override_unmatched (id,batch_id,ext_id,full_name,location,designation,bags,reason)

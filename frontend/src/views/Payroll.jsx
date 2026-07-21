@@ -887,6 +887,7 @@ function SheetOverrideCard() {
   const [preview, setPreview] = useState(null);   // dry-run result + the File
   const [busy, setBusy] = useState(false);
   const [showUnmatched, setShowUnmatched] = useState(false);
+  const [showBank, setShowBank] = useState(false);
   // Kept on screen, not toasted. A parse failure answers in ~100ms, so the
   // spinner never registers and a missed toast looks exactly like "I clicked
   // upload and nothing happened".
@@ -921,7 +922,7 @@ function SheetOverrideCard() {
   // finding a bad column name AFTER spending it is a bad trade.
   const pick = async (file) => {
     if (!file) return;
-    setBusy(true); setShowUnmatched(false); setErr(null); setDone(null); setQ('');
+    setBusy(true); setShowUnmatched(false); setShowBank(false); setErr(null); setDone(null); setQ('');
     try {
       const r = await send(file, true);
       setPreview({ ...r, file });
@@ -1062,7 +1063,30 @@ function SheetOverrideCard() {
                 ⚠ {preview.unmatched} row(s) not matched — {showUnmatched ? 'hide' : 'these people will NOT be paid'}
               </button>
             )}
+
+            {/* Bank details. Filling a blank is a quiet win; a conflict is money
+                going somewhere unexpected, so it is stated and left alone. */}
+            {(preview.bank_filled || preview.bank_conflicts || preview.bank_missing) ? (
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 8px', fontSize: 12, marginTop: 6, display: 'block' }}
+                onClick={() => setShowBank((v) => !v)}>
+                🏦 {preview.bank_filled ? `${preview.bank_filled} account(s) will be filled in` : 'bank details'}
+                {preview.bank_conflicts ? ` · ${preview.bank_conflicts} differ from the roster (kept as-is)` : ''}
+                {preview.bank_missing ? ` · ${preview.bank_missing} still with no account` : ''}
+                {showBank ? ' — hide' : ' — details'}
+              </button>
+            ) : null}
           </div>
+
+          {showBank && (
+            <div style={{ maxHeight: 180, overflowY: 'auto', padding: '6px 10px', background: '#f6f9ff', fontSize: 12 }}>
+              {(preview.bank_notes || []).map((b, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
+                  <span style={{ flex: 1 }}>{b.full_name}</span>
+                  <span style={{ color: 'var(--muted)', textAlign: 'right', flex: 2 }}>{b.note}</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {showUnmatched && (
             <div style={{ maxHeight: 200, overflowY: 'auto', padding: '6px 10px', background: '#fffaf2', fontSize: 12 }}>
@@ -1095,6 +1119,7 @@ function SheetOverrideCard() {
                       <span style={{ color: 'var(--muted)' }}>
                         {' · '}{r.site_name}{' · '}
                         {r.designation === 'LOADER' ? `L${Number(r.bags_loaded).toLocaleString()}` : `B${Number(r.bags_bagged).toLocaleString()}`}
+                        {r.account ? ` · ${r.account}` : ' · ⚠ no account'}
                       </span>
                     </span>
                     <strong style={{ whiteSpace: 'nowrap' }}>{ngn(r.amount)}</strong>

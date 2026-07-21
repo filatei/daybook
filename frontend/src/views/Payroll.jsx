@@ -860,6 +860,12 @@ function SheetOverrideCard() {
   const [preview, setPreview] = useState(null);   // dry-run result + the File
   const [busy, setBusy] = useState(false);
   const [showUnmatched, setShowUnmatched] = useState(false);
+  // Kept on screen, not toasted. A parse failure answers in ~100ms, so the
+  // spinner never registers and a missed toast looks exactly like "I clicked
+  // upload and nothing happened".
+  const [err, setErr] = useState(null);
+  const [done, setDone] = useState(null);        // result of the applied import
+  const [q, setQ] = useState('');
 
   const load = useCallback(async () => {
     try { setState(await api(scopedAny('/payroll/production-override'))); } catch { /* leave as-is */ }
@@ -888,11 +894,12 @@ function SheetOverrideCard() {
   // finding a bad column name AFTER spending it is a bad trade.
   const pick = async (file) => {
     if (!file) return;
-    setBusy(true); setShowUnmatched(false);
+    setBusy(true); setShowUnmatched(false); setErr(null); setDone(null); setQ('');
     try {
       const r = await send(file, true);
       setPreview({ ...r, file });
-    } catch (e) { toast(e.message, 'err'); setPreview(null); }
+      if (!r.matched) setErr('The file was read, but no row matched anyone on the roster. Check the ID and name columns.');
+    } catch (e) { setErr(e.message || 'Could not read that file'); setPreview(null); }
     setBusy(false);
   };
 
@@ -905,12 +912,12 @@ function SheetOverrideCard() {
       confirmText: 'Override',
     });
     if (!ok) return;
-    setBusy(true);
+    setBusy(true); setErr(null);
     try {
       const r = await send(preview.file, false);
-      toast(`Override loaded: ${r.matched} staff${r.unmatched ? `, ${r.unmatched} unmatched` : ''} ✓`, r.unmatched ? 'err' : 'ok');
-      setPreview(null); load();
-    } catch (e) { toast(e.message, 'err'); }
+      setDone(r); setPreview(null); load();
+      toast(`Override loaded — ${r.matched} staff ✓`, 'ok');
+    } catch (e) { setErr(e.message || 'Import failed'); }
     setBusy(false);
   };
 
@@ -960,50 +967,119 @@ function SheetOverrideCard() {
 
       <div style={{ marginTop: 10 }}>
         <label className="btn btn-ghost btn-sm" style={{ cursor: 'pointer', textAlign: 'center' }}>
-          {busy && !preview ? <span className="spin" /> : '⬆ Check a sheet'}
+          {busy && !preview ? <span className="spin" /> : '⬆ Upload sheet to check'}
           <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={busy}
             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; pick(f); }} />
         </label>
-        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 8 }}>Checking changes nothing.</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 8 }}>
+          Reads the file and shows you the totals. Nothing is saved until you press Save.
+        </span>
       </div>
 
+      {/* A failed read must say so on the page. A toast for a 100ms failure is
+          indistinguishable from the upload doing nothing at all. */}
+      {err && (
+        <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid #f0c0c0', background: '#fdf3f3', fontSize: 12.5 }}>
+          ⚠ {err}
+        </div>
+      )}
+
+      {done && (
+        <div style={{ marginTop: 10, padding: 10, borderRadius: 8, border: '1px solid #bfe3c8', background: '#f2fbf5' }}>
+          <div style={{ fontWeight: 700, fontSize: 13 }}>✓ Override loaded</div>
+          <div style={{ fontSize: 12, marginTop: 3 }}>
+            {done.period_from} → {done.period_to} · {done.kind === 'MONTHEND' ? 'Month-end' : 'Mid-month'} ·{' '}
+            <strong>{done.matched} staff</strong> · <strong>{ngn(done.total_amount)}</strong>
+            {done.unmatched ? <span style={{ color: '#b45309' }}> · {done.unmatched} row(s) not matched</span> : null}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+            Now go to <strong>Run</strong> (or <strong>Mid-month</strong>), set the same dates and Compute — the run will
+            use these figures. Uploading again needs an Admin to enable it once more.
+          </div>
+        </div>
+      )}
+
       {preview && (
-        <div style={{ marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 8 }}>
-          <div style={{ fontWeight: 700, fontSize: 13 }}>
-            {preview.period_from} → {preview.period_to} · {preview.kind === 'MONTHEND' ? 'Month-end' : 'Mid-month'}
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>
-            {preview.matched} staff matched · {Number(preview.total_bagged).toLocaleString()} bagged ·{' '}
-            {Number(preview.total_loaded).toLocaleString()} loaded
-          </div>
-          {preview.unmatched > 0 && (
-            <div style={{ marginTop: 6 }}>
-              {/* Unmatched rows are people who will not be paid. Surfaced loudly,
-                  because the failure mode this whole feature exists to fix is
-                  somebody quietly missing from a payment run. */}
-              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 8px', fontSize: 12 }}
-                onClick={() => setShowUnmatched((v) => !v)}>
-                ⚠ {preview.unmatched} row(s) not matched — {showUnmatched ? 'hide' : 'these people will not be paid'}
+        <div style={{ marginTop: 10, border: '1px solid var(--line)', borderRadius: 8, overflow: 'hidden' }}>
+          {/* The verdict and the Apply button sit ABOVE the list. The accountant's
+              question is "did this work and is the total right" — that has to be
+              answerable without scrolling past 126 names. */}
+          <div style={{ padding: 10, borderBottom: '1px solid var(--line)' }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>
+              ✓ Sheet read · {preview.period_from} → {preview.period_to} · {preview.kind === 'MONTHEND' ? 'Month-end' : 'Mid-month'}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                {preview.matched} staff · {Number(preview.total_bagged).toLocaleString()} bagged ·{' '}
+                {Number(preview.total_loaded).toLocaleString()} loaded
+              </span>
+              <strong style={{ fontSize: 15 }}>{ngn(preview.total_amount)}</strong>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+              at ₦{preview.rates?.bagged}/bag bagged, ₦{preview.rates?.loaded}/bag loaded — compare this total with your workbook
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button className="btn btn-sm" style={{ flex: 1 }} disabled={busy || !state.enabled} onClick={apply}>
+                {busy ? <span className="spin" /> : (state.enabled ? `Save override — ${preview.matched} staff` : 'Save (needs Admin to enable)')}
               </button>
-              {showUnmatched && (
-                <div style={{ maxHeight: 190, overflowY: 'auto', marginTop: 6, fontSize: 12 }}>
-                  {(preview.unmatched_rows || []).map((u, i) => (
-                    <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
-                      <span style={{ flex: 1 }}>{u.full_name || u.ext_id || '—'}{u.location ? ` · ${u.location}` : ''}</span>
-                      <span style={{ color: 'var(--muted)' }}>{u.bags ? Number(u.bags).toLocaleString() : ''} · {u.reason}</span>
-                    </div>
-                  ))}
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+                disabled={busy} onClick={() => { setPreview(null); setErr(null); }}>Discard</button>
+            </div>
+
+            {preview.unmatched > 0 && (
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 8px', fontSize: 12, marginTop: 8, color: '#b45309' }}
+                onClick={() => setShowUnmatched((v) => !v)}>
+                ⚠ {preview.unmatched} row(s) not matched — {showUnmatched ? 'hide' : 'these people will NOT be paid'}
+              </button>
+            )}
+          </div>
+
+          {showUnmatched && (
+            <div style={{ maxHeight: 200, overflowY: 'auto', padding: '6px 10px', background: '#fffaf2', fontSize: 12 }}>
+              {(preview.unmatched_rows || []).map((u, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
+                  <span style={{ flex: 1 }}>{u.full_name || u.ext_id || '—'}{u.location ? ` · ${u.location}` : ''}</span>
+                  <span style={{ color: 'var(--muted)', textAlign: 'right' }}>{u.bags ? Number(u.bags).toLocaleString() : ''} · {u.reason}</span>
                 </div>
-              )}
+              ))}
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-            <button className="btn btn-sm" style={{ flex: 1 }} disabled={busy || !state.enabled} onClick={apply}>
-              {state.enabled ? 'Apply override' : 'Apply (needs Admin to enable)'}
-            </button>
-            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
-              disabled={busy} onClick={() => setPreview(null)}>Discard</button>
+
+          {/* Only the people in the file — this list IS the sheet, matched to the
+              roster, so it can be read straight against the workbook. */}
+          <div style={{ padding: '8px 10px' }}>
+            <input className="input" style={{ padding: '6px 8px', fontSize: 12.5 }} value={q}
+              onChange={(e) => setQ(e.target.value)} placeholder="Search these staff (e.g. Mbiama)…" />
           </div>
+          {(() => {
+            const term = q.trim().toLowerCase();
+            const list = (preview.rows || []).filter((r) => !term
+              || r.full_name.toLowerCase().includes(term) || (r.site_name || '').toLowerCase().includes(term));
+            return (
+              <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                {list.length === 0 ? <div style={{ padding: 10, fontSize: 12, color: 'var(--muted)' }}>No match.</div> : null}
+                {list.map((r) => (
+                  <div key={r.staff_id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '6px 10px', borderTop: '1px solid var(--line)', fontSize: 12.5 }}>
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.full_name}
+                      <span style={{ color: 'var(--muted)' }}>
+                        {' · '}{r.site_name}{' · '}
+                        {r.designation === 'LOADER' ? `L${Number(r.bags_loaded).toLocaleString()}` : `B${Number(r.bags_bagged).toLocaleString()}`}
+                      </span>
+                    </span>
+                    <strong style={{ whiteSpace: 'nowrap' }}>{ngn(r.amount)}</strong>
+                  </div>
+                ))}
+                {term && list.length ? (
+                  <div style={{ padding: '6px 10px', borderTop: '1px solid var(--line)', fontSize: 12, display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--muted)' }}>{list.length} shown</span>
+                    <strong>{ngn(list.reduce((a, r) => a + r.amount, 0))}</strong>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })()}
         </div>
       )}
 

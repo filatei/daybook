@@ -2001,11 +2001,34 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
 
   const rows = [...matched.values()];
   const totals = rows.reduce((a, r) => ({ bagged: a.bagged + r.bagged, loaded: a.loaded + r.loaded }), { bagged: 0, loaded: 0 });
+
+  // Show the MONEY, not just the bag counts. The accountant is checking this
+  // against their own workbook total, and bags at ₦1 vs ₦6 is the single most
+  // consequential thing to get wrong — so price it at the rate this batch's kind
+  // will actually be paid at, and say which rate that is.
+  const pRates = await getBagRates(kind);
+  const sites = await qall('SELECT id, name FROM sites');
+  const siteName = {}; for (const st of sites) siteName[st.id] = st.name;
+  const priced = rows.map((r) => ({
+    staff_id: r.staff.id,
+    full_name: r.staff.full_name,
+    ext_id: r.staff.ext_people_id || '',
+    site_name: siteName[r.staff.site_id] || '—',
+    designation: r.loaded >= r.bagged ? 'LOADER' : 'BAGGER',
+    bags_loaded: r2(r.loaded), bags_bagged: r2(r.bagged),
+    amount: r2(r.loaded * (pRates.loaded || 0) + r.bagged * (pRates.bagged || 0)),
+  })).sort((a, b) => a.site_name.localeCompare(b.site_name) || a.full_name.localeCompare(b.full_name));
+
   const preview = {
     period_from: pFrom, period_to: pTo, kind,
     matched: rows.length, unmatched: unmatched.length,
     total_bagged: r2(totals.bagged), total_loaded: r2(totals.loaded),
-    unmatched_rows: unmatched.slice(0, 200),
+    rates: pRates,
+    total_amount: r2(priced.reduce((a, x) => a + x.amount, 0)),
+    // Everyone the sheet will pay, and everyone it will not. Both lists matter:
+    // the second is people who worked and would otherwise vanish from the run.
+    rows: priced,
+    unmatched_rows: unmatched.slice(0, 400),
   };
   if (dryRun) return res.json({ dry_run: true, ...preview });
 

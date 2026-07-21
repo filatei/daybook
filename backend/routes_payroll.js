@@ -17,7 +17,7 @@ const { v4: uuid } = require('uuid');
 
 // In-memory upload for the payroll Excel import (parsed, never written to disk).
 const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
-const { qone, qall, qrun, withTransaction } = require('./db');
+const { qone, qall, qrun, withTransaction, clientQ } = require('./db');
 const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
 
 const router = express.Router();
@@ -657,6 +657,56 @@ router.post('/production', requireAuth, async (req, res) => {
 // Shared: compute gross-pay lines for a period (+ outstanding advance per staff).
 // `pieceOnly` drops monthly/daily (REGULAR) staff — used by the mid-month run,
 // which pays per-bag commission only.
+// Bags for a pay period: normally the sum of what the sites recorded in
+// `production`, but the Snr Accountant's uploaded sheet stands in for it when a
+// batch covers EXACTLY this window.
+//
+// Exact-match on the dates, not overlap. The two cycles overlap by design
+// (16th→15th and 28th→27th), so an overlap test would let a mid-month sheet
+// silently supply a month-end run's numbers at six times the rate.
+//
+// Returns { by: { staff_id: {l, g} }, override: batch|null, sourceIds:Set }.
+// `sourceIds` is who came from the sheet, so a run can say so on the line.
+async function bagsForPeriod(tenantIds, from, to, kind) {
+  const ids = tenantList(tenantIds);
+  const by = {}; const sourceIds = new Set();
+  if (!ids.length) return { by, override: null, sourceIds };
+  const ph = ids.map(() => '?').join(',');
+
+  const batch = await overrideForPeriod(from, to, kind);
+
+  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
+    FROM production WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [...ids, from, to]);
+  for (const p of prod) by[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+
+  if (batch) {
+    // REPLACES, per person — it does not add to what the site recorded. A site
+    // that entered its production and also appears on the sheet must not be paid
+    // twice, and where the two disagree the accountant's figure is the one that
+    // was signed off.
+    const ovr = await qall(`SELECT staff_id, bags_loaded, bags_bagged FROM production_override
+      WHERE batch_id=? AND tenant_id IN (${ph})`, [batch.id, ...ids]);
+    for (const o of ovr) {
+      by[o.staff_id] = { l: Number(o.bags_loaded) || 0, g: Number(o.bags_bagged) || 0 };
+      sourceIds.add(o.staff_id);
+    }
+  }
+  return { by, override: batch || null, sourceIds };
+}
+
+// The batch covering a period, or null — for telling the UI that a run it is
+// about to compute will use the accountant's sheet rather than the sites' own
+// records. Nobody should approve a payroll without knowing which it was.
+// `kind` is REQUIRED, not decorative. The two cycles overlap in dates AND a run's
+// rate pair is chosen independently of its dates (the Run tab has a free date box
+// and a separate mid-month checkbox), so matching on dates alone would let a
+// MIDMONTH sheet's bags be paid at the ₦6 month-end rate — a silent 6x overpay.
+async function overrideForPeriod(from, to, kind) {
+  const k = String(kind || '').toUpperCase() === 'MIDMONTH' ? 'MIDMONTH' : 'MONTHEND';
+  return qone(`SELECT * FROM production_override_batch WHERE period_from=? AND period_to=? AND kind=?
+    ORDER BY created_at DESC, id DESC LIMIT 1`, [from, to, k]);
+}
+
 async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false) {
   // Default follows the run kind: a piece-only run is a mid-month run.
   rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
@@ -669,11 +719,9 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
   const att = await qall(`SELECT staff_id, COUNT(DISTINCT work_date) d FROM attendance
     WHERE tenant_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
   const daysBy = {}; for (const a of att) daysBy[a.staff_id] = Number(a.d);
-  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g FROM production
-    WHERE tenant_id=? AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
-  const prodBy = {}; for (const p of prod) prodBy[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  const { by: prodBy, override, sourceIds } = await bagsForPeriod(tenant_id, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   // Per-site split behind each worker's total (where the bags were actually done).
-  const bySite = await siteSplit(tenant_id, from, to);
+  const bySite = await siteSplit(tenant_id, from, to, override);
   // Outstanding (unsettled) advances up to the period end.
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id=? AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [tenant_id, to]);
@@ -692,6 +740,7 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
       days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
       by_site: bySite[s.id] || [],
+      bags_source: sourceIds.has(s.id) ? 'SHEET' : 'PRODUCTION',
       member_ids: [s.id],
       advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
   });
@@ -702,10 +751,17 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
 // Per-worker, per-site production split for a period. Returns
 // { [staff_id]: [{ site_id, site_name, loaded, bagged }, ...] }, only sites with
 // nonzero bags, ordered by name. Used to show the breakdown behind each total.
-async function siteSplit(tenant_id, from, to) {
+//
+// When an override batch supplies the bags, the split comes from the batch
+// instead: the sheet gives one LOCATION per person, so their whole total sits at
+// that one site. Mixing the two would show a per-site breakdown that does not
+// add up to the total being paid, which is worse than a coarse one.
+async function siteSplit(tenant_id, from, to, override = null) {
   const ids = tenantList(tenant_id);
   if (!ids.length) return {};
   const ph = ids.map(() => '?').join(',');
+
+
   const rows = await qall(`SELECT p.staff_id, p.site_id, COALESCE(si.name,'—') site_name,
       COALESCE(SUM(p.bags_loaded),0) loaded, COALESCE(SUM(p.bags_bagged),0) bagged
     FROM production p LEFT JOIN sites si ON si.id = p.site_id
@@ -718,6 +774,22 @@ async function siteSplit(tenant_id, from, to) {
     (by[r.staff_id] = by[r.staff_id] || []).push({
       site_id: r.site_id, site_name: r.site_name, loaded: Number(r.loaded), bagged: Number(r.bagged),
     });
+  }
+
+  // REPLACE (not merge) the split for anyone the sheet covers, mirroring what
+  // bagsForPeriod did to their totals. If their production split survived here,
+  // the breakdown would not add up to the figure being paid.
+  if (override) {
+    const ovr = await qall(`SELECT o.staff_id, o.site_id, COALESCE(si.name,'—') site_name,
+        o.bags_loaded loaded, o.bags_bagged bagged
+      FROM production_override o LEFT JOIN sites si ON si.id = o.site_id
+      WHERE o.batch_id=? AND o.tenant_id IN (${ph})`, [override.id, ...ids]);
+    for (const r of ovr) {
+      const loaded = Number(r.loaded) || 0, bagged = Number(r.bagged) || 0;
+      by[r.staff_id] = (loaded > 0 || bagged > 0)
+        ? [{ site_id: r.site_id, site_name: r.site_name, loaded, bagged, source: 'SHEET' }]
+        : [];
+    }
   }
   return by;
 }
@@ -739,9 +811,7 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [...tenantIds, from, to]);
   const daysByStaff = {};
   for (const a of att) (daysByStaff[a.staff_id] = daysByStaff[a.staff_id] || new Set()).add(a.work_date);
-  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
-    FROM production WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [...tenantIds, from, to]);
-  const prodBy = {}; for (const p of prod) prodBy[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  const { by: prodBy, sourceIds } = await bagsForPeriod(tenantIds, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id IN (${ph}) AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [...tenantIds, to]);
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
@@ -761,11 +831,20 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     const memberIds = members.map((m) => m.id);
     const dayset = new Set();
     let l = 0, g = 0, advance = 0;
+    // One human can hold two staff records (multi-site duplicates — see
+    // fix_merge_multisite_dupes.sql), and this line merges them. If the sheet
+    // matched only ONE of those records, summing every member would pay the
+    // sheet figure for record A PLUS the site's production for record B: the
+    // same work, twice. bagsForPeriod replaces per staff_id; the merge has to
+    // replace per person. So when any member came from the sheet, only the
+    // sheet members' bags count.
+    const fromSheet = memberIds.some((id) => sourceIds.has(id));
+    const bagIds = fromSheet ? memberIds.filter((id) => sourceIds.has(id)) : memberIds;
     for (const id of memberIds) {
       for (const d of (daysByStaff[id] || [])) dayset.add(d);
-      const pb = prodBy[id]; if (pb) { l += pb.l; g += pb.g; }
       advance += advBy[id] || 0;
     }
+    for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; g += pb.g; } }
     const days = dayset.size;
     const pt = (head.pay_type || '').toUpperCase();
     let gross;
@@ -776,6 +855,7 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
       bags_loaded: l, bags_bagged: g, gross: round2(gross), advance: round2(advance),
+      bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
       tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
     };
     lines.push(line); // include all; UI splits paid vs review, save skips zero
@@ -798,10 +878,10 @@ router.post('/compute2', requireAuth, async (req, res) => {
   if (combined) {
     const group = await payrollGroup(req.user, c.tenant_id, c);
     const lines = await computeCombinedLines(group, from, to, rates, pieceOnly);
-    return res.json({ from, to, combined: true, piece_only: pieceOnly, tenants: group, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+    return res.json({ from, to, combined: true, piece_only: pieceOnly, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
   }
   const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly);
-  res.json({ from, to, piece_only: pieceOnly, rates, lines, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+  res.json({ from, to, piece_only: pieceOnly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
 });
 
 // ── Excel template download (Fido-shaped: REGULAR / BAGGERS / LOADERS) ─────────
@@ -974,7 +1054,29 @@ router.get('/staff-detail', requireAuth, async (req, res) => {
   // client-side from the days/production rows above.
   const ps = await qall(`SELECT si.name FROM staff s LEFT JOIN sites si ON si.id=s.site_id WHERE s.id IN (${ph})`, ids);
   const primary_site = (ps.find((r) => r.name) || {}).name || null;
-  res.json({ primary_site, days, production });
+
+  // If the accountant's sheet supplied this person's bags, the day-by-day list
+  // above is empty (or, worse, shows a different, ignored figure) while their pay
+  // line reads several thousand bags. Say where the number came from rather than
+  // letting the drill-down look like a bug — or like a missing payment.
+  // No run kind on this request, so show whichever batch covers the window —
+  // this is an explanatory panel, not a payment path.
+  const batch = (await overrideForPeriod(from, to, 'MIDMONTH')) || (await overrideForPeriod(from, to, 'MONTHEND'));
+  let override = null;
+  if (batch) {
+    const rows = await qall(`SELECT o.bags_loaded, o.bags_bagged, COALESCE(si.name,'—') site_name
+      FROM production_override o LEFT JOIN sites si ON si.id=o.site_id
+      WHERE o.batch_id=? AND o.staff_id IN (${ph})`, [batch.id, ...ids]);
+    if (rows.length) {
+      override = {
+        period_from: batch.period_from, period_to: batch.period_to,
+        file_name: batch.file_name, site_name: rows[0].site_name,
+        bags_loaded: rows.reduce((a, r) => a + (Number(r.bags_loaded) || 0), 0),
+        bags_bagged: rows.reduce((a, r) => a + (Number(r.bags_bagged) || 0), 0),
+      };
+    }
+  }
+  res.json({ primary_site, days, production, override });
 });
 
 // ── Advances / deductions — Supervisor (Site Manager+) records; settled at run ──
@@ -1015,13 +1117,18 @@ router.post('/runs2', requireAuth, async (req, res) => {
     ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
     : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly);
   const runId = uuid();
+  // Which override batch (if any) fed this run. Recorded ON THE RUN because the
+  // batch can later be removed, and an approved payroll whose numbers cannot be
+  // explained afterwards is worse than one that was never saved.
+  const usedOverride = await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   let tg = 0, td = 0, tn = 0;
   await withTransaction(async () => {
     // Persist WHICH run this is. Without it the draft looks REGULAR, and any later
     // line edit or Excel re-import would recompute a ₦1 mid-month run at the ₦6
     // full rate — a silent 6x overpay.
-    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?, ?)`,
-      [runId, c.tenant_id, combined ? null : site, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR', req.user.id]);
+    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?,?)`,
+      [runId, c.tenant_id, combined ? null : site, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR',
+        usedOverride ? usedOverride.id : null, req.user.id]);
     for (const l of lines) {
       if (l.gross <= 0) continue; // never save a zero payslip line
       const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
@@ -1029,9 +1136,9 @@ router.post('/runs2', requireAuth, async (req, res) => {
       tg += l.gross; td += d; tn += net;
       // rec_* = the daily-recorded snapshot at compute time; later edits/uploads
       // are compared against it to flag discrepancies in `remarks`.
-      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged]);
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged,bags_source)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged, l.bags_source || 'PRODUCTION']);
       // Settle outstanding advances up to the period end. Combined runs settle
       // across ALL of the person's merged staff ids (both tenants) by staff_id;
       // single-tenant runs scope by tenant_id as before.
@@ -1061,6 +1168,13 @@ router.get('/runs2/:id', requireAuth, async (req, res) => {
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   run.lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
+  // Carry the provenance through to the saved view, so a run that was paid from
+  // the accountant's sheet still says so at approval time — and keeps saying so
+  // after the batch itself has been removed.
+  run.override = run.override_batch_id
+    ? await qone('SELECT * FROM production_override_batch WHERE id=?', [run.override_batch_id])
+    : null;
+  run.override_removed = !!run.override_batch_id && !run.override;
   res.json(run);
 });
 // Edit one payslip line on a DRAFT run — adjust deduction / bags / days, recompute
@@ -1254,9 +1368,9 @@ router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
       const d = Math.min(l.gross, Math.max(0, l.advance || 0));
       const net = round2(l.gross - d);
       tg += l.gross; td += d; tn += net; n += 1;
-      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), run.id, run.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged]);
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged,bags_source)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), run.id, run.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged, l.bags_source || 'PRODUCTION']);
       if (d > 0) {
         if (combined && Array.isArray(l.member_ids) && l.member_ids.length) {
           const ph = l.member_ids.map(() => '?').join(',');
@@ -1266,7 +1380,12 @@ router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
         }
       }
     }
-    await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?', [round2(tg), round2(td), round2(tn), run.id]);
+    // A recompute can pick up an override that did not exist when the draft was
+    // first built (or lose one that has since been removed), so the stamp is
+    // rewritten here too rather than left describing the previous computation.
+    const nowOverride = await overrideForPeriod(run.period_from, run.period_to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+    await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=?, override_batch_id=? WHERE id=?',
+      [round2(tg), round2(td), round2(tn), nowOverride ? nowOverride.id : null, run.id]);
   });
   await audit(run.tenant_id, req.user.id, 'PAYROLL_RUN_RECOMPUTE', 'pay_runs', run.id,
     { was_gross: run.total_gross, now_gross: round2(tg), lines: n, rates });
@@ -1392,10 +1511,8 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
   const staff = await qall(`SELECT s.id, s.tenant_id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
       s.rate_loaded, s.rate_bagged, s.bank_name, s.bank_account, st.name site_name
     FROM staff s LEFT JOIN sites st ON st.id=s.site_id WHERE ${sWhere.join(' AND ')} ORDER BY st.name, s.full_name`, sArgs);
-  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
-    FROM production WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [...ids, from, to]);
-  const by = {}; for (const p of prod) by[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
-  const bySite = await siteSplit(ids, from, to);
+  const { by, override, sourceIds } = await bagsForPeriod(ids, from, to, 'MIDMONTH');
+  const bySite = await siteSplit(ids, from, to, override);
   const lines = [];
   for (const s of staff) {
     const pb = by[s.id] || { l: 0, g: 0 };
@@ -1411,6 +1528,7 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
       location: s.site_name || '', account: [s.bank_name, s.bank_account].filter(Boolean).join('-'),
       bags_loaded: pb.l, bags_bagged: pb.g, qty: designation === 'LOADER' ? pb.l : pb.g,
       by_site: bySite[s.id] || [],
+      bags_source: sourceIds.has(s.id) ? 'SHEET' : 'PRODUCTION',
       commission, designation,
     });
   }
@@ -1430,6 +1548,7 @@ router.get('/midmonth/preview', requireAuth, async (req, res) => {
   const loaders = lines.filter((l) => l.designation === 'LOADER');
   res.json({
     month, from, to, combined, tenants: scope,
+    override: await overrideForPeriod(from, to, 'MIDMONTH'),
     baggers, loaders,
     total_baggers: r2(baggers.reduce((a, l) => a + l.commission, 0)),
     total_loaders: r2(loaders.reduce((a, l) => a + l.commission, 0)),
@@ -1674,6 +1793,301 @@ async function emailMidMonth(tenant_id, runId, tenants) {
     await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?)', [uuid(), tenant_id, '', 'Mid-month payroll', 'FAILED', e.message]).catch(() => {});
   }
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  PRODUCTION OVERRIDE — the Snr Accountant's spreadsheet, for one period
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Payroll pays from `production`. Sites that never enter production pay nobody —
+// which is how ~20 Mbiama baggers and loaders worked a fortnight for nothing in
+// the app while the accountant's workbook showed every bag.
+//
+// This lets that workbook stand in for `production` for ONE pay period. It is
+// built to be hard to leave switched on:
+//
+//   * `sheet_override_enabled` starts at 0 and only an ADMIN can raise it;
+//   * a successful import puts it straight back to 0;
+//   * each upload is a batch, and deleting the batch undoes the whole thing;
+//   * `production` itself is never written, so daily reports keep telling the
+//     truth about which sites actually record their work.
+//
+// Sites entering production daily remains the fix. This is the bridge.
+
+const OVERRIDE_FLAG = 'sheet_override_enabled';
+
+async function overrideEnabled() {
+  const r = await qone('SELECT value FROM payroll_settings WHERE key=?', [OVERRIDE_FLAG]);
+  return Number(r?.value) > 0;
+}
+async function setOverrideFlag(on, userId) {
+  await qrun(`INSERT INTO payroll_settings (key,value,updated_at,updated_by) VALUES (?,?,?,?)
+    ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by`,
+  [OVERRIDE_FLAG, on ? 1 : 0, nowS(), userId || null]);
+}
+
+// Excel stores dates as days since 1899-12-30. The accountant's sheet carries the
+// period in PAY START DATE / PAY END DATE, so we can read the window off the file
+// rather than trusting whoever is at the keyboard to retype it.
+const fromSerial = (n) => {
+  const v = Number(n);
+  if (!isFinite(v) || v < 20000 || v > 80000) return null;
+  return new Date(Date.UTC(1899, 11, 30) + v * 86400000).toISOString().slice(0, 10);
+};
+const asDate = (v) => {
+  if (v == null || v === '') return null;
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  return fromSerial(s);
+};
+const collapse = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+// Read the flag + the batches already loaded. Snr Accountant+ so the accountant
+// can see whether Admin has opened the gate for them yet.
+router.get('/production-override', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const enabled = await overrideEnabled();
+  const { sql, args } = scopeSql(c, 'o.tenant_id');
+  const batches = await qall(`SELECT b.*,
+      (SELECT COUNT(*) FROM production_override o WHERE o.batch_id=b.id AND ${sql}) rows_in_scope
+    FROM production_override_batch b ORDER BY b.created_at DESC LIMIT 50`, args);
+  res.json({ enabled, batches });
+});
+
+// Open the gate. ADMIN only — this is the whole point of the control: the person
+// who uploads the sheet is not the person who decides the sheet may override the
+// system of record.
+router.post('/production-override/enable', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'ADMIN'); if (!c) return;
+  const on = req.body?.enabled !== false;
+  await setOverrideFlag(on, req.user.id);
+  await audit(c.tenant_id, req.user.id, on ? 'override.enable' : 'override.disable', 'payroll_settings', OVERRIDE_FLAG, null);
+  res.json({ ok: true, enabled: on });
+});
+
+// Upload. Reads BAGGERS (QTY) and LOADERS (BAGS LOADED) exactly as the legacy Fido
+// workbook lays them out.
+router.post('/production-override/import', requireAuth, xlsUpload.single('file'), async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;              // SNR_ACCOUNTANT+
+  // A dry run writes nothing, so it does not need the Admin's permission. The
+  // accountant can check a sheet parses and matches BEFORE asking for the gate to
+  // be opened — otherwise the one enable gets burnt on a typo.
+  const dryRun = String(req.body?.dry_run || '') === '1' || req.body?.dry_run === true;
+  if (!dryRun && !await overrideEnabled()) {
+    return res.status(403).json({
+      error: 'Spreadsheet override is switched off. An Admin must enable it for this upload.',
+      code: 'OVERRIDE_DISABLED',
+    });
+  }
+  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
+  let wb;
+  try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
+
+  // The staff pool is company-wide, like every other payroll path: one workbook
+  // covers Fido and Fiafia sites together.
+  const tenants = await payrollGroup(req.user, c.tenant_id, c);
+  if (!tenants.length) return res.status(400).json({ error: 'no active workspaces' });
+  const ph = tenants.map(() => '?').join(',');
+  const staff = await qall(`SELECT s.id, s.tenant_id, s.site_id, s.full_name, s.ext_people_id, s.staff_type, s.pay_type,
+      s.payroll_eligible, s.status FROM staff s WHERE s.tenant_id IN (${ph})`, tenants);
+  // An ambiguous match is NOT a match. `null` marks a key that two staff records
+  // claim; the row is reported unmatched so a human decides, because paying the
+  // wrong Blessing is worse than paying nobody and saying so.
+  //
+  // ext_people_id has no unique constraint and the pool spans every tenant, so
+  // Fido and Fiafia can genuinely share a legacy id — the id needs the same
+  // ambiguity check the name gets, not a silent last-one-wins overwrite.
+  const byExt = {}, byName = {};
+  for (const s of staff) {
+    const e = s.ext_people_id == null ? '' : String(s.ext_people_id).replace(/\.0$/, '').trim();
+    if (e) byExt[e] = (e in byExt) ? null : s;
+    const n = collapse(s.full_name);
+    if (n) byName[n] = (n in byName) ? null : s;
+  }
+
+  const norm = (k) => String(k || '').trim().toUpperCase();
+  const num = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[, ₦]/g, '')); return isNaN(n) ? null : n; };
+
+  let mixedPeriod = null;
+  const matched = new Map();       // staff_id → { staff, loaded, bagged, row }
+  const unmatched = [];
+  // Read the window and the cycle OFF THE SHEET. The accountant already stated
+  // both in the file; letting a request field win would let a mid-month sheet be
+  // stamped as month-end and then paid at six times the rate. The body values are
+  // a fallback for a sheet that carries no dates, and are cross-checked below.
+  let pFrom = null, pTo = null, sheetKind = null;
+
+  const readSheet = (sheetName, kind) => {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' });
+    for (const row of rows) {
+      const get = (names) => { for (const k of Object.keys(row)) if (names.includes(norm(k))) return row[k]; return undefined; };
+      const ext = String(get(['ID', 'STAFF ID', 'EXT ID']) ?? '').replace(/\.0$/, '').trim();
+      const full = [get(['FIRST NAME']), get(['MIDDLE NAME']), get(['LAST NAME'])]
+        .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
+      const qty = num(kind === 'LOADERS'
+        ? get(['BAGS LOADED', 'QTY', 'LOADED'])
+        : get(['QTY', 'BAGS BAGGED', 'BAGGED']));
+      // The sheet's own TOTAL row is a footer, not a person.
+      if (/^total$/i.test(full) || (!ext && !full)) continue;
+      if (/HIRED/i.test(full)) continue;    // day-labour placeholders, paid cash
+
+      const rFrom = asDate(get(['PAY START DATE', 'PERIOD FROM', 'FROM']));
+      const rTo = asDate(get(['PAY END DATE', 'PERIOD TO', 'TO']));
+      // Rows that disagree about the period are not a detail to ignore — it means
+      // two pay runs got pasted into one file. Refuse rather than pay the first
+      // row's window to everybody.
+      if (rFrom && rTo) {
+        if (pFrom && (rFrom !== pFrom || rTo !== pTo)) mixedPeriod = `${rFrom}..${rTo} vs ${pFrom}..${pTo}`;
+        pFrom = pFrom || rFrom; pTo = pTo || rTo;
+      }
+      const pt = String(get(['PAY TYPE', 'TYPE']) ?? '').trim().toUpperCase().replace(/[^A-Z]/g, '');
+      if (!sheetKind && pt) sheetKind = pt.startsWith('MIDMONTH') ? 'MIDMONTH' : (pt.startsWith('MONTHEND') ? 'MONTHEND' : null);
+
+      const loc = String(get(['LOCATION']) ?? '').trim();
+      const note = (reason) => unmatched.push({
+        ext_id: ext || null, full_name: full || null, location: loc || null,
+        designation: kind === 'LOADERS' ? 'LOADER' : 'BAGGER', bags: qty || 0, reason,
+      });
+
+      if (qty == null || qty <= 0) { note('no quantity on the row'); continue; }
+      // Ambiguity is checked BEFORE the not-found message, or a person who exists
+      // on the roster TWICE gets reported as "not on the roster" — which invites
+      // the accountant to create a third duplicate.
+      const nk = collapse(full);
+      if (ext && byExt[ext] === null) { note(`ID ${ext} belongs to more than one staff record`); continue; }
+      if (!byExt[ext] && nk && byName[nk] === null) { note('name matches more than one staff record'); continue; }
+      const st = byExt[ext] || (nk ? byName[nk] : null);
+      if (!st) { note(ext ? `no staff with ID ${ext}` : 'name not on the roster'); continue; }
+      // These guards MUST mirror the compute paths exactly. Anyone the import
+      // accepts but a run later filters out is written into the batch, counted in
+      // "N staff overridden", and then silently paid nothing — the exact failure
+      // this feature exists to fix, wearing a green tick.
+      if (!isPieceWorker(st)) { note(`${st.full_name} is ${st.staff_type || st.pay_type || 'non-piece'} staff`); continue; }
+      if (String(st.status || '') !== 'ACTIVE') { note(`${st.full_name} is ${String(st.status || 'not active').toLowerCase()} — payroll only pays ACTIVE staff`); continue; }
+      if (st.payroll_eligible === false) { note(`${st.full_name} is parked out of payroll`); continue; }
+      if (/HIRED/i.test(st.full_name || '')) { note(`${st.full_name} is a day-labour placeholder, paid cash`); continue; }
+
+      const cur = matched.get(st.id) || { staff: st, loaded: 0, bagged: 0, rows: [] };
+      if (kind === 'LOADERS') cur.loaded += qty; else cur.bagged += qty;
+      cur.rows.push(`${sheetName}:${ext || full}`);
+      matched.set(st.id, cur);
+    }
+  };
+
+  for (const kind of ['BAGGERS', 'LOADERS']) {
+    const name = Object.keys(wb.Sheets).find((n) => norm(n) === kind);
+    if (name) readSheet(name, kind);
+  }
+  if (!matched.size && !unmatched.length) {
+    return res.status(400).json({ error: 'no BAGGERS or LOADERS sheet found in that file' });
+  }
+  if (mixedPeriod) {
+    return res.status(400).json({ error: `the sheet covers more than one pay period (${mixedPeriod}) — split it and upload one period at a time` });
+  }
+  if (!pFrom || !pTo) { pFrom = pFrom || asDate(req.body?.period_from); pTo = pTo || asDate(req.body?.period_to); }
+  if (!pFrom || !pTo) {
+    return res.status(400).json({ error: 'could not read the pay period — use a sheet with PAY START DATE / PAY END DATE, or send period_from and period_to' });
+  }
+  if (pFrom > pTo) return res.status(400).json({ error: 'the pay period starts after it ends' });
+
+  // The sheet's own PAY TYPE decides the cycle, because the cycle decides the
+  // rate (₦1 vs ₦6 a bag). A caller-supplied kind is honoured only when it
+  // AGREES with the sheet, or when the sheet does not say.
+  const kindIn = String(req.body?.kind || '').toUpperCase();
+  const asked = kindIn === 'MONTHEND' || kindIn === 'MIDMONTH' ? kindIn : null;
+  if (asked && sheetKind && asked !== sheetKind) {
+    return res.status(400).json({ error: `the sheet says ${sheetKind}, but the upload asked for ${asked}` });
+  }
+  const kind = sheetKind || asked || 'MIDMONTH';
+
+  const rows = [...matched.values()];
+  const totals = rows.reduce((a, r) => ({ bagged: a.bagged + r.bagged, loaded: a.loaded + r.loaded }), { bagged: 0, loaded: 0 });
+  const preview = {
+    period_from: pFrom, period_to: pTo, kind,
+    matched: rows.length, unmatched: unmatched.length,
+    total_bagged: r2(totals.bagged), total_loaded: r2(totals.loaded),
+    unmatched_rows: unmatched.slice(0, 200),
+  };
+  if (dryRun) return res.json({ dry_run: true, ...preview });
+
+  const batchId = uuid();
+  // EVERY statement below goes through the transaction's own client. Using the
+  // pooled qrun here would put the DELETE and the INSERTs on other connections,
+  // so the BEGIN/COMMIT would wrap nothing — and since the first act is to delete
+  // the previous batch, a mid-way failure would leave the old numbers destroyed
+  // and the new ones half-written. That is silent non-payment.
+  try {
+    await withTransaction(async (client) => {
+      const tx = clientQ(client);
+
+      // Consume the enable ATOMICALLY. The earlier overrideEnabled() read is only
+      // a fast fail for the common case; two accountants uploading against one
+      // Admin enable would both pass it. This UPDATE is the real gate: whoever
+      // flips 1→0 owns the upload, and the loser is told to ask again.
+      const gate = await tx.qrun('UPDATE payroll_settings SET value=0, updated_at=? WHERE key=? AND value>0', [nowS(), OVERRIDE_FLAG]);
+      if (!gate.rowCount) { const e = new Error('OVERRIDE_TAKEN'); e.code = 'OVERRIDE_TAKEN'; throw e; }
+
+      // One live batch per period+kind. Re-uploading a corrected sheet replaces
+      // the previous attempt rather than stacking a second set of numbers on it.
+      const old = await tx.qall('SELECT id FROM production_override_batch WHERE period_from=? AND period_to=? AND kind=?', [pFrom, pTo, kind]);
+      for (const b of old) await tx.qrun('DELETE FROM production_override_batch WHERE id=?', [b.id]);
+
+      await tx.qrun(`INSERT INTO production_override_batch
+        (id,period_from,period_to,kind,file_name,note,matched,unmatched,total_bagged,total_loaded,created_by,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [batchId, pFrom, pTo, kind, req.file.originalname || null, req.body?.note || null,
+        rows.length, unmatched.length, r2(totals.bagged), r2(totals.loaded), req.user.id, nowS()]);
+
+      for (const r of rows) {
+        await tx.qrun(`INSERT INTO production_override (id,batch_id,tenant_id,staff_id,site_id,bags_loaded,bags_bagged,source_row)
+          VALUES (?,?,?,?,?,?,?,?)`,
+        [uuid(), batchId, r.staff.tenant_id, r.staff.id, r.staff.site_id || null, r2(r.loaded), r2(r.bagged), r.rows.join(', ')]);
+      }
+      for (const u of unmatched) {
+        await tx.qrun(`INSERT INTO production_override_unmatched (id,batch_id,ext_id,full_name,location,designation,bags,reason)
+          VALUES (?,?,?,?,?,?,?,?)`,
+        [uuid(), batchId, u.ext_id, u.full_name, u.location, u.designation, u.bags, u.reason]);
+      }
+    });
+  } catch (e) {
+    if (e.code === 'OVERRIDE_TAKEN') {
+      return res.status(409).json({ error: 'Another upload used the Admin\'s enable first. Ask for it to be enabled again.', code: 'OVERRIDE_TAKEN' });
+    }
+    // Nothing was written — the transaction rolled back, including the gate, so
+    // the enable is still available for a retry.
+    return res.status(500).json({ error: `Import failed, nothing was changed: ${e.message}` });
+  }
+
+  await audit(c.tenant_id, req.user.id, 'override.import', 'production_override_batch', batchId,
+    { period: `${pFrom}..${pTo}`, kind, matched: rows.length, unmatched: unmatched.length });
+  res.json({ batch_id: batchId, ...preview, enabled_now: false });
+});
+
+router.get('/production-override/:id', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const b = await qone('SELECT * FROM production_override_batch WHERE id=?', [req.params.id]);
+  if (!b) return res.status(404).json({ error: 'not found' });
+  const { sql, args } = scopeSql(c, 'o.tenant_id');
+  const rows = await qall(`SELECT o.*, s.full_name, s.ext_people_id, s.staff_type, st.name site_name, t.name tenant_name
+    FROM production_override o
+    JOIN staff s ON s.id=o.staff_id
+    LEFT JOIN sites st ON st.id=o.site_id
+    LEFT JOIN tenants t ON t.id=o.tenant_id
+    WHERE o.batch_id=? AND ${sql} ORDER BY t.name, st.name, s.full_name`, [req.params.id, ...args]);
+  const unmatched = await qall('SELECT * FROM production_override_unmatched WHERE batch_id=? ORDER BY location, full_name', [req.params.id]);
+  res.json({ batch: b, rows, unmatched });
+});
+
+// Revert. The whole point of keeping this out of `production` is that undoing it
+// is one delete and leaves no trace in the daily records.
+router.delete('/production-override/:id', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res, 'ADMIN'); if (!c) return;
+  const b = await qone('SELECT * FROM production_override_batch WHERE id=?', [req.params.id]);
+  if (!b) return res.status(404).json({ error: 'not found' });
+  await qrun('DELETE FROM production_override_batch WHERE id=?', [req.params.id]);
+  await audit(c.tenant_id, req.user.id, 'override.delete', 'production_override_batch', req.params.id,
+    { period: `${b.period_from}..${b.period_to}`, kind: b.kind });
+  res.json({ ok: true });
+});
 
 module.exports = router;
 module.exports.generateMidMonth = generateMidMonth;

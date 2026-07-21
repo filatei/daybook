@@ -112,6 +112,20 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
       </div>
       {row('Net pay', ngn(net))}
 
+      {/* Without this, an overridden worker shows a big bag total up top and an
+          empty day-by-day list below it, which reads as a bug or a missing
+          payment rather than as "these came from the sheet". */}
+      {bd?.override && (
+        <div style={{ marginTop: 12, padding: '8px 10px', border: '1px solid var(--line)', borderRadius: 8, fontSize: 12 }}>
+          <strong>📄 From the accountant&apos;s sheet</strong>
+          <div style={{ color: 'var(--muted)', marginTop: 2 }}>
+            {Number(bd.override.bags_loaded).toLocaleString()} loaded · {Number(bd.override.bags_bagged).toLocaleString()} bagged
+            {bd.override.site_name ? ` · ${bd.override.site_name}` : ''} — for {bd.override.period_from} → {bd.override.period_to}.
+            Daily records below are whatever the site itself entered, and are not what is being paid.
+          </div>
+        </div>
+      )}
+
       <div style={{ marginTop: 12, fontWeight: 700, fontSize: 13 }}>{piece ? 'Bags by day' : 'Days worked'}</div>
       {!bd ? <div className="skel" /> : piece ? (
         bd.production.length === 0 ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>No bag records.</div> :
@@ -145,6 +159,9 @@ function RunTab({ sites, onSaved }) {
   const [combinedRaw, setCombined] = useState(true); // Fido + Fiafia in one run
   const combined = isGroup ? true : combinedRaw;
   const [lines, setLines] = useState(null);
+  // The override batch behind this period, if any — shown as a banner so the run
+  // cannot be approved without knowing the bags came from a spreadsheet.
+  const [override, setOverride] = useState(null);
   const [busy, setBusy] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
   const [q, setQ] = useState('');
@@ -159,7 +176,7 @@ function RunTab({ sites, onSaved }) {
     // month = 28th prev → 27th, everyone, ₦6/bag full commission
     const w = kind === 'mid' ? midMonthWindow() : fullMonthWindow();
     setFrom(w.from); setTo(w.to); setPieceOnly(kind === 'mid');
-    setLines(null); // stale result would still show the old staff mix and rate
+    setLines(null); setOverride(null); // stale result would still show the old staff mix and rate
   };
   // `err` is kept on screen. A toast alone is missed: a failed compute answers in
   // ~40ms, so the spinner never registers and the page looks like nothing happened.
@@ -167,10 +184,11 @@ function RunTab({ sites, onSaved }) {
   const run = async () => {
     if (!from || !to) return toast('Pick both dates first', 'err');
     if (from > to) return toast('“From” is after “To”', 'err');
-    setBusy(true); setErr(null); setLines(null);
+    setBusy(true); setErr(null); setLines(null); setOverride(null);
     try {
       const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 })));
+      setOverride(r.override || null);
       if (!r.lines.length) toast('No one to pay for this period', 'err');
     } catch (e) {
       const msg = isNetErr(e) ? 'No connection — check your network and try again.' : (e.message || 'Compute failed');
@@ -201,7 +219,7 @@ function RunTab({ sites, onSaved }) {
     try {
       const deductions = {}; lines.forEach((l) => { deductions[l.staff_id] = +l.deduction || 0; });
       await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly } });
-      toast('Payroll saved as draft ✓', 'ok'); setLines(null); onSaved && onSaved();
+      toast('Payroll saved as draft ✓', 'ok'); setLines(null); setOverride(null); onSaved && onSaved();
     } catch (e) { toast(e.message, 'err'); }
     setBusy(false);
   };
@@ -213,7 +231,7 @@ function RunTab({ sites, onSaved }) {
         <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 10px' }} onClick={() => preset('month')}>Full month (28→27)</button>
       </div>
       <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
-        <input type="checkbox" checked={pieceOnly} onChange={(e) => { setPieceOnly(e.target.checked); setLines(null); }} />
+        <input type="checkbox" checked={pieceOnly} onChange={(e) => { setPieceOnly(e.target.checked); setLines(null); setOverride(null); }} />
         Mid-month incentive — baggers &amp; loaders only, at the mid-month per-bag rate
       </label>
       {pieceOnly && (
@@ -256,6 +274,8 @@ function RunTab({ sites, onSaved }) {
         onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
         ⬇ Excel template (Regular / Baggers / Loaders)
       </button>
+
+      <OverrideBanner override={override} />
 
       {lines && (() => {
         if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
@@ -472,11 +492,25 @@ function RunsTab() {
             </div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}</div>
             <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 10 }}>
+              {/* Provenance survives to the saved run, and stays visible even if
+                  the batch has since been removed — an approved payroll whose
+                  numbers cannot be explained is the thing to avoid. */}
+              {(open.override || open.override_removed) && (
+                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--line)', fontSize: 12 }}>
+                  <strong>📄 Paid from the accountant&apos;s sheet</strong>
+                  <div style={{ color: 'var(--muted)' }}>
+                    {open.override
+                      ? `${open.override.matched} staff · ${open.override.file_name || 'uploaded sheet'}`
+                      : 'The override batch behind this run has since been removed — recompute to rebuild it from recorded production.'}
+                  </div>
+                </div>
+              )}
               {(open.lines || []).map((l) => (
                 <button key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
                   style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13, width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: open.status === 'DRAFT' ? 'pointer' : 'default' }}>
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {l.remarks ? <span title={l.remarks} style={{ marginRight: 4 }}>ℹ️</span> : null}
+                    {l.bags_source === 'SHEET' ? <span title="Bags came from the accountant's sheet, not recorded production" style={{ marginRight: 4 }}>📄</span> : null}
                     {l.staff_name}<span style={{ color: 'var(--muted)' }}> · {l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`}{l.deductions ? ` − ${ngn(l.deductions)}` : ''}</span>
                   </span>
                   <strong style={{ whiteSpace: 'nowrap' }}>{ngn(l.net)}{open.status === 'DRAFT' ? ' ›' : ''}</strong>
@@ -747,6 +781,7 @@ function MidMonthTab({ onSaved }) {
         : !data ? null
           : (
             <>
+              <OverrideBanner override={data.override} />
               {/* Search + group toggle */}
               <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
                 <input className="input" style={{ flex: '1 1 180px' }} value={q} onChange={(e) => setQ(e.target.value)}
@@ -788,6 +823,210 @@ function MidMonthTab({ onSaved }) {
               )}
             </>
           )}
+    </div>
+  );
+}
+
+// A run computed from the accountant's spreadsheet must say so on its face.
+// Silently paying from an override is exactly the sort of thing that is fine
+// until the one time it is not.
+function OverrideBanner({ override }) {
+  if (!override) return null;
+  return (
+    <div className="card" style={{ padding: '9px 12px', marginBottom: 10, borderLeft: '3px solid var(--warn, #c98a00)' }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700 }}>
+        📄 Bag figures for {override.period_from} → {override.period_to} come from the accountant&apos;s sheet
+      </div>
+      <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>
+        {override.matched} staff overridden{override.unmatched ? ` · ${override.unmatched} sheet row(s) unmatched` : ''}
+        {override.file_name ? ` · ${override.file_name}` : ''} — what the sites recorded is not being used for these people.
+      </div>
+    </div>
+  );
+}
+
+// ── Accountant's spreadsheet override ─────────────────────────────────────────
+// Lets the Snr Accountant's payroll workbook stand in for `production` for ONE
+// pay period, for the sites whose bags never got entered.
+//
+// The card is deliberately unglamorous and states what it is. It is a bridge for
+// sites that are not yet recording production, not a normal way to run payroll,
+// and the copy should keep saying so.
+function SheetOverrideCard() {
+  const { toast, confirm, tenant } = useStore();
+  const role = useRole();
+  const isAdmin = role && atLeast(role, 'ADMIN');
+  const [state, setState] = useState({ enabled: false, batches: [] });
+  const [preview, setPreview] = useState(null);   // dry-run result + the File
+  const [busy, setBusy] = useState(false);
+  const [showUnmatched, setShowUnmatched] = useState(false);
+
+  const load = useCallback(async () => {
+    try { setState(await api(scopedAny('/payroll/production-override'))); } catch { /* leave as-is */ }
+  }, [tenant]);
+  // Re-read on workspace change, and whenever the window regains focus — an Admin
+  // usually flips the flag in another session, and a stale "Disabled" pill leaves
+  // the accountant staring at a greyed-out Apply button for no visible reason.
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [load]);
+
+  // No `kind` is sent. The cycle decides the rate (₦1 vs ₦6 a bag), and the sheet
+  // states it in its own PAY TYPE column — the server reads it there. Guessing it
+  // here and echoing the guess back would label every sheet mid-month.
+  const send = async (file, dry) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (dry) fd.append('dry_run', '1');
+    return api(scopedAny('/payroll/production-override/import'), { method: 'POST', form: fd });
+  };
+
+  // Always dry-run first. The Admin's enable is good for exactly one upload, so
+  // finding a bad column name AFTER spending it is a bad trade.
+  const pick = async (file) => {
+    if (!file) return;
+    setBusy(true); setShowUnmatched(false);
+    try {
+      const r = await send(file, true);
+      setPreview({ ...r, file });
+    } catch (e) { toast(e.message, 'err'); setPreview(null); }
+    setBusy(false);
+  };
+
+  const apply = async () => {
+    if (!preview) return;
+    const ok = await confirm({
+      title: 'Override production for this period?',
+      message: `${preview.matched} staff will be paid from the spreadsheet instead of what the sites recorded for `
+          + `${preview.period_from} → ${preview.period_to}. Daily production records are not changed.`,
+      confirmText: 'Override',
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const r = await send(preview.file, false);
+      toast(`Override loaded: ${r.matched} staff${r.unmatched ? `, ${r.unmatched} unmatched` : ''} ✓`, r.unmatched ? 'err' : 'ok');
+      setPreview(null); load();
+    } catch (e) { toast(e.message, 'err'); }
+    setBusy(false);
+  };
+
+  const toggle = async (on) => {
+    setBusy(true);
+    try {
+      await api(scopedAny('/payroll/production-override/enable'), { method: 'POST', body: { enabled: on } });
+      load();
+    } catch (e) { toast(e.message, 'err'); }
+    setBusy(false);
+  };
+
+  const drop = async (b) => {
+    const ok = await confirm({
+      title: 'Remove this override?',
+      message: `Payroll for ${b.period_from} → ${b.period_to} goes back to using what the sites recorded. `
+          + 'Any run already computed from it must be recomputed.',
+      confirmText: 'Remove', danger: true,
+    });
+    if (!ok) return;
+    try { await api(scopedAny(`/payroll/production-override/${b.id}`), { method: 'DELETE' }); toast('Override removed ✓', 'ok'); load(); }
+    catch (e) { toast(e.message, 'err'); }
+  };
+
+  return (
+    <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
+      <strong style={{ display: 'block', marginBottom: 2 }}>Accountant&apos;s payroll sheet</strong>
+      <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+        Loads the Snr Accountant&apos;s workbook (BAGGERS + LOADERS) as the bag figures for one pay period,
+        replacing what the sites recorded. Daily production records are left untouched.
+        Use it only while a site is still not entering production.
+      </span>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12 }}>
+        <span className="pill" style={{ background: state.enabled ? 'var(--ok-bg, #e7f7ec)' : 'var(--line)', fontWeight: 700 }}>
+          {state.enabled ? '🔓 Enabled for one upload' : '🔒 Disabled'}
+        </span>
+        {isAdmin ? (
+          <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '3px 10px' }}
+            disabled={busy} onClick={() => toggle(!state.enabled)}>
+            {state.enabled ? 'Disable' : 'Enable for one upload'}
+          </button>
+        ) : !state.enabled && (
+          <span style={{ color: 'var(--muted)' }}>An Admin must enable it before you can apply a sheet.</span>
+        )}
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <label className="btn btn-ghost btn-sm" style={{ cursor: 'pointer', textAlign: 'center' }}>
+          {busy && !preview ? <span className="spin" /> : '⬆ Check a sheet'}
+          <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={busy}
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; pick(f); }} />
+        </label>
+        <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 8 }}>Checking changes nothing.</span>
+      </div>
+
+      {preview && (
+        <div style={{ marginTop: 10, padding: 10, border: '1px solid var(--line)', borderRadius: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 13 }}>
+            {preview.period_from} → {preview.period_to} · {preview.kind === 'MONTHEND' ? 'Month-end' : 'Mid-month'}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>
+            {preview.matched} staff matched · {Number(preview.total_bagged).toLocaleString()} bagged ·{' '}
+            {Number(preview.total_loaded).toLocaleString()} loaded
+          </div>
+          {preview.unmatched > 0 && (
+            <div style={{ marginTop: 6 }}>
+              {/* Unmatched rows are people who will not be paid. Surfaced loudly,
+                  because the failure mode this whole feature exists to fix is
+                  somebody quietly missing from a payment run. */}
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 8px', fontSize: 12 }}
+                onClick={() => setShowUnmatched((v) => !v)}>
+                ⚠ {preview.unmatched} row(s) not matched — {showUnmatched ? 'hide' : 'these people will not be paid'}
+              </button>
+              {showUnmatched && (
+                <div style={{ maxHeight: 190, overflowY: 'auto', marginTop: 6, fontSize: 12 }}>
+                  {(preview.unmatched_rows || []).map((u, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 8, padding: '3px 0', borderBottom: '1px solid var(--line)' }}>
+                      <span style={{ flex: 1 }}>{u.full_name || u.ext_id || '—'}{u.location ? ` · ${u.location}` : ''}</span>
+                      <span style={{ color: 'var(--muted)' }}>{u.bags ? Number(u.bags).toLocaleString() : ''} · {u.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button className="btn btn-sm" style={{ flex: 1 }} disabled={busy || !state.enabled} onClick={apply}>
+              {state.enabled ? 'Apply override' : 'Apply (needs Admin to enable)'}
+            </button>
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+              disabled={busy} onClick={() => setPreview(null)}>Discard</button>
+          </div>
+        </div>
+      )}
+
+      {(state.batches || []).length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 4 }}>Loaded periods</div>
+          {state.batches.map((b) => (
+            <div key={b.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--line)', fontSize: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700 }}>{b.period_from} → {b.period_to} · {b.kind === 'MONTHEND' ? 'Month-end' : 'Mid-month'}</div>
+                <div style={{ color: 'var(--muted)' }}>
+                  {b.matched} staff{b.unmatched ? ` · ${b.unmatched} unmatched` : ''}
+                  {b.file_name ? ` · ${b.file_name}` : ''}
+                </div>
+              </div>
+              {isAdmin && (
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px' }}
+                  onClick={() => drop(b)}>Remove</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -932,6 +1171,7 @@ function SetupTab({ sites }) {
           </div>
         );
       })()}
+      <SheetOverrideCard />
       {/* Import creates staff in ONE workspace — the Group roll-up has no single
           workspace to own them, so it is offered only inside Fido or Fiafia. */}
       <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>

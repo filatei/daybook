@@ -74,6 +74,20 @@ async function qexec(sql) {
   return pool.query(sql);
 }
 
+/** Bind the q* helpers to ONE client — use inside withTransaction.
+ *
+ * The module-level qone/qall/qrun go through the pool, so calling them inside a
+ * withTransaction callback runs those statements on a DIFFERENT connection: the
+ * BEGIN/COMMIT wraps nothing and a failure half-way leaves the writes committed.
+ * Anything that must actually be atomic has to use these. */
+function clientQ(client) {
+  return {
+    qone: async (sql, params = []) => (await client.query(pq(sql), params)).rows[0] || null,
+    qall: async (sql, params = []) => (await client.query(pq(sql), params)).rows,
+    qrun: (sql, params = []) => client.query(pq(sql), params),
+  };
+}
+
 /** Run fn(client) inside a transaction; rolls back on error. */
 async function withTransaction(fn) {
   const client = await pool.connect();
@@ -746,6 +760,74 @@ async function migrate() {
     -- as "unset" and bring it up to the standard rate.
     UPDATE payroll_settings SET value = 6 WHERE key IN ('rate_loaded','rate_bagged')         AND value = 0;
     UPDATE payroll_settings SET value = 1 WHERE key IN ('rate_loaded_mid','rate_bagged_mid') AND value = 0;
+
+    -- ESCAPE HATCH — the Snr Accountant's payroll spreadsheet, overriding what the
+    -- sites recorded (or failed to record) in "production" for one pay period.
+    --
+    -- Why this exists: sites like Mbiama pay ~₦100k a fortnight to people whose
+    -- bags were never entered into Daybook, because the numbers live only in the
+    -- accountant's workbook. Payroll pays from "production", so those workers got
+    -- nothing. Rather than let a spreadsheet quietly become a second source of
+    -- truth, the override is:
+    --   * its own table — "production" and every daily report stay honest;
+    --   * batched — one upload is one batch, reversible with a single DELETE;
+    --   * period-scoped — it only applies to a run whose dates it covers;
+    --   * OFF by default, and it turns itself off again after each use.
+    --
+    -- The real fix is sites entering production daily. This is the bridge, and it
+    -- is deliberately awkward so it does not become the road.
+    -- NOT tenant-scoped, deliberately — same reasoning as payroll_settings. The
+    -- accountant's workbook is one document covering the whole business, and its
+    -- BAGGERS sheet mixes Fido sites (Kpansia, Okutukutu) with Fiafia's (Mbiama).
+    -- Anchoring the batch to one tenant would hide it from the other's pay run.
+    -- The individual override ROWS carry the staff member's real tenant_id, and
+    -- that is what payroll filters on.
+    CREATE TABLE IF NOT EXISTS production_override_batch (
+      id           TEXT PRIMARY KEY,
+      period_from  TEXT NOT NULL,
+      period_to    TEXT NOT NULL,
+      kind         TEXT NOT NULL DEFAULT 'MIDMONTH',   -- MIDMONTH | MONTHEND
+      file_name    TEXT,
+      note         TEXT,
+      matched      INTEGER DEFAULT 0,
+      unmatched    INTEGER DEFAULT 0,
+      total_bagged DOUBLE PRECISION DEFAULT 0,
+      total_loaded DOUBLE PRECISION DEFAULT 0,
+      created_by   TEXT,
+      created_at   BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
+    -- One row per person per batch: their WHOLE-PERIOD totals, not a day's work.
+    -- That is why this cannot live in "production", which is keyed by work_date.
+    CREATE TABLE IF NOT EXISTS production_override (
+      id          TEXT PRIMARY KEY,
+      batch_id    TEXT NOT NULL REFERENCES production_override_batch(id) ON DELETE CASCADE,
+      tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+      staff_id    TEXT NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+      site_id     TEXT REFERENCES sites(id),
+      bags_loaded DOUBLE PRECISION DEFAULT 0,
+      bags_bagged DOUBLE PRECISION DEFAULT 0,
+      source_row  TEXT,
+      UNIQUE(batch_id, staff_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_prodovr_batch ON production_override(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_prodovr_staff ON production_override(tenant_id, staff_id);
+    CREATE INDEX IF NOT EXISTS idx_prodovr_period ON production_override_batch(period_from, period_to);
+    -- Rows the sheet named but the roster could not match. Kept, not discarded:
+    -- an unmatched name is somebody who does not get paid, and that must be
+    -- visible rather than silently absent from a total.
+    CREATE TABLE IF NOT EXISTS production_override_unmatched (
+      id          TEXT PRIMARY KEY,
+      batch_id    TEXT NOT NULL REFERENCES production_override_batch(id) ON DELETE CASCADE,
+      ext_id      TEXT,
+      full_name   TEXT,
+      location    TEXT,
+      designation TEXT,
+      bags        DOUBLE PRECISION DEFAULT 0,
+      reason      TEXT
+    );
+    -- The gate. 0 = off. Admin sets it to 1 for one upload; the import resets it.
+    INSERT INTO payroll_settings (key, value) VALUES ('sheet_override_enabled', 0)
+      ON CONFLICT (key) DO NOTHING;
 
     -- Advances / deductions given to a worker; settled (run_id set) at payroll time.
     CREATE TABLE IF NOT EXISTS staff_advances (
@@ -1469,6 +1551,13 @@ async function migrate() {
   // ── Phase 8: payroll run kind (REGULAR vs MIDMONTH piece-worker commission) ───
   await pool.query(`
     ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'REGULAR';
+    -- Which override batch (if any) supplied the bags for this run. Provenance has
+    -- to live on the RUN, not only on the batch: batches can be removed, and an
+    -- approved run whose numbers can no longer be explained is an audit problem.
+    ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS override_batch_id TEXT;
+    -- 'SHEET' when this line's bags came from the accountant's workbook rather
+    -- than from what the site recorded.
+    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS bags_source TEXT;
   `);
 
   // ── Phase 9: Inventory — raw-material/stock catalogue + signed movements ──────
@@ -1553,4 +1642,4 @@ async function migrate() {
   );
 }
 
-module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction };
+module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction, clientQ };

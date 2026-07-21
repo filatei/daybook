@@ -441,6 +441,24 @@ function RunsTab() {
   // change or staff correction. Recompute rebuilds it in place; delete throws it
   // away (needed when the PERIOD itself is wrong, which recompute keeps).
   const [acting, setActing] = useState(false);
+  // Emailing is a deliberate act, confirmed, because it puts figures in front of
+  // people who will act on them. It used to fire automatically on save.
+  const sendEmail = async () => {
+    const ok = await confirm({
+      title: 'Email this run to the accountants?',
+      message: `${open.period_from} → ${open.period_to} · ${(open.lines || []).length} staff · ${ngn(open.total_net)}. `
+        + 'They will receive the summary and the Fido-format CSV.',
+      confirmText: 'Send',
+    });
+    if (!ok) return;
+    setActing(true);
+    try {
+      const r = await api(scopedAny(`/payroll/runs2/${open.id}/email`), { method: 'POST' });
+      toast(r.recipients ? `Sent to ${r.recipients} ✓` : 'Sent ✓', 'ok');
+    } catch (e) { toast(e.message || 'Could not send', 'err'); }
+    setActing(false);
+  };
+
   const recompute = async () => {
     setActing(true);
     try {
@@ -535,6 +553,12 @@ function RunsTab() {
               {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/export.csv?tenant=${tenant}`, `payroll_${open.period_from}.csv`)}>⬇ CSV</button>
               {open.kind === 'MIDMONTH' && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/fido.csv?tenant=${tenant}`, `midmonth_${open.period_from}.csv`)}>⬇ Fido format</button>}
+              {open.kind === 'MIDMONTH' && (
+                <button className="btn btn-ghost" style={{ flex: 1 }} disabled={acting} onClick={sendEmail}
+                  title="Email this run and the Fido CSV to the accountants — nothing is sent unless you press this">
+                  {acting ? <span className="spin" /> : '✉️'} Send to accountants
+                </button>
+              )}
               <button className="btn btn-ghost" style={{ flex: 1, ...(bankCheck?.at_risk ? { color: '#b45309' } : {}) }}
                 onClick={() => dl(`/payroll/runs2/${open.id}/bank.csv?tenant=${tenant}`, `bank_payment_${open.period_from}.csv`)}
                 title="CSV for upload to the bank — payee, bank, account number and net pay">
@@ -741,7 +765,8 @@ function MidMonthTab({ onSaved }) {
 
   const generate = async () => {
     setBusy(true);
-    try { const r = await api(scopedAny('/payroll/midmonth/generate'), { method: 'POST', body: { month } }); toast(`Mid-month draft saved (${r.count} staff) ✓`, 'ok'); onSaved && onSaved(); }
+    // No email on save. The draft goes to Saved, where there is a Send button.
+    try { const r = await api(scopedAny('/payroll/midmonth/generate'), { method: 'POST', body: { month } }); toast(`Mid-month draft saved (${r.count} staff) — not emailed ✓`, 'ok'); onSaved && onSaved(); }
     catch (e) { toast(e.message || 'Generate failed', 'err'); }
     setBusy(false);
   };
@@ -774,7 +799,8 @@ function MidMonthTab({ onSaved }) {
         Baggers &amp; loaders across <strong>every workspace</strong> (Fido + Fiafia), paid at the mid-month incentive
         rate for bags done 16th of last month → 15th of this one. Built automatically from recorded production — no
         Excel upload. Save the draft, then approve &amp; mark paid under <strong>Saved</strong>, and download the
-        Fido-format CSV there.
+        Fido-format CSV there. Saving does <strong>not</strong> email anyone — send it from <strong>Saved</strong>
+        when the figures are agreed.
       </p>
 
       {loading ? <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>
@@ -838,8 +864,9 @@ function OverrideBanner({ override }) {
         📄 Bag figures for {override.period_from} → {override.period_to} come from the accountant&apos;s sheet
       </div>
       <div style={{ fontSize: 11.5, color: 'var(--muted)' }}>
-        {override.matched} staff overridden{override.unmatched ? ` · ${override.unmatched} sheet row(s) unmatched` : ''}
-        {override.file_name ? ` · ${override.file_name}` : ''} — what the sites recorded is not being used for these people.
+        {override.matched} staff on the sheet{override.unmatched ? ` · ${override.unmatched} sheet row(s) unmatched` : ''}
+        {override.file_name ? ` · ${override.file_name}` : ''} — for this period the sheet is the whole bag payroll:
+        recorded production is not used, and anyone not on the sheet earns no commission.
       </div>
     </div>
   );
@@ -907,8 +934,9 @@ function SheetOverrideCard() {
     if (!preview) return;
     const ok = await confirm({
       title: 'Override production for this period?',
-      message: `${preview.matched} staff will be paid from the spreadsheet instead of what the sites recorded for `
-          + `${preview.period_from} → ${preview.period_to}. Daily production records are not changed.`,
+      message: `For ${preview.period_from} → ${preview.period_to}, this sheet becomes the whole bag payroll: `
+          + `${preview.matched} staff paid ${ngn(preview.total_amount)}, and anyone NOT on it earns no commission `
+          + 'for the period. Daily production records are not changed.',
       confirmText: 'Override',
     });
     if (!ok) return;
@@ -946,8 +974,9 @@ function SheetOverrideCard() {
     <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
       <strong style={{ display: 'block', marginBottom: 2 }}>Accountant&apos;s payroll sheet</strong>
       <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-        Loads the Snr Accountant&apos;s workbook (BAGGERS + LOADERS) as the bag figures for one pay period,
-        replacing what the sites recorded. Daily production records are left untouched.
+        Loads the Snr Accountant&apos;s workbook (BAGGERS + LOADERS) as <strong>the</strong> bag figures for one pay
+        period. Recorded production is then ignored for that period entirely — anyone not on the sheet earns no
+        commission — so the run reconciles to the workbook. Daily production records are left untouched.
         Use it only while a site is still not entering production.
       </span>
 

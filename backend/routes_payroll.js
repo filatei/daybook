@@ -675,23 +675,33 @@ async function bagsForPeriod(tenantIds, from, to, kind) {
 
   const batch = await overrideForPeriod(from, to, kind);
 
-  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
-    FROM production WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [...ids, from, to]);
-  for (const p of prod) by[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
-
   if (batch) {
-    // REPLACES, per person — it does not add to what the site recorded. A site
-    // that entered its production and also appears on the sheet must not be paid
-    // twice, and where the two disagree the accountant's figure is the one that
-    // was signed off.
+    // EXCLUSIVE, not a merge. When a sheet covers the period it IS the bag
+    // payroll: production is not consulted at all, so nobody on it is paid twice
+    // and nobody off it is paid a figure the accountant never signed.
+    //
+    // Business decision, 2026-07-21. The alternative — topping the sheet up with
+    // whatever the sites recorded — made the July run ₦194,812 heavier than the
+    // workbook, which is precisely the reconciliation the Snr Accountant cannot
+    // do. Cost of this rule: a site that DOES record its production still gets
+    // paid only what the sheet says, so an incomplete sheet underpays. That is
+    // why the unmatched list is shown loudly at upload, and why this only
+    // applies to periods somebody deliberately loaded a sheet for.
+    //
+    // Salaried staff are untouched: this function only supplies bags.
     const ovr = await qall(`SELECT staff_id, bags_loaded, bags_bagged FROM production_override
       WHERE batch_id=? AND tenant_id IN (${ph})`, [batch.id, ...ids]);
     for (const o of ovr) {
       by[o.staff_id] = { l: Number(o.bags_loaded) || 0, g: Number(o.bags_bagged) || 0 };
       sourceIds.add(o.staff_id);
     }
+    return { by, override: batch, sourceIds };
   }
-  return { by, override: batch || null, sourceIds };
+
+  const prod = await qall(`SELECT staff_id, COALESCE(SUM(bags_loaded),0) l, COALESCE(SUM(bags_bagged),0) g
+    FROM production WHERE tenant_id IN (${ph}) AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [...ids, from, to]);
+  for (const p of prod) by[p.staff_id] = { l: Number(p.l), g: Number(p.g) };
+  return { by, override: null, sourceIds };
 }
 
 // The batch covering a period, or null — for telling the UI that a run it is
@@ -761,6 +771,22 @@ async function siteSplit(tenant_id, from, to, override = null) {
   if (!ids.length) return {};
   const ph = ids.map(() => '?').join(',');
 
+
+  if (override) {
+    const ovr = await qall(`SELECT o.staff_id, o.site_id, COALESCE(si.name,'—') site_name,
+        o.bags_loaded loaded, o.bags_bagged bagged
+      FROM production_override o LEFT JOIN sites si ON si.id = o.site_id
+      WHERE o.batch_id=? AND o.tenant_id IN (${ph})
+        AND (o.bags_loaded > 0 OR o.bags_bagged > 0)`, [override.id, ...ids]);
+    const byO = {};
+    for (const r of ovr) {
+      byO[r.staff_id] = [{
+        site_id: r.site_id, site_name: r.site_name,
+        loaded: Number(r.loaded), bagged: Number(r.bagged), source: 'SHEET',
+      }];
+    }
+    return byO;
+  }
 
   const rows = await qall(`SELECT p.staff_id, p.site_id, COALESCE(si.name,'—') site_name,
       COALESCE(SUM(p.bags_loaded),0) loaded, COALESCE(SUM(p.bags_bagged),0) bagged
@@ -1513,25 +1539,57 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
     FROM staff s LEFT JOIN sites st ON st.id=s.site_id WHERE ${sWhere.join(' AND ')} ORDER BY st.name, s.full_name`, sArgs);
   const { by, override, sourceIds } = await bagsForPeriod(ids, from, to, 'MIDMONTH');
   const bySite = await siteSplit(ids, from, to, override);
-  const lines = [];
+
+  // MERGE DUPLICATE PEOPLE, exactly as computeCombinedLines does.
+  //
+  // The roster carries the same human twice: a legacy record with a numeric
+  // ext_people_id and an ETL twin keyed by a Mongo ObjectId. Listing both paid
+  // them twice for one fortnight's work — and it got worse with the accountant's
+  // sheet, which matches one record by id and leaves the twin drawing its own
+  // recorded production on a separate line. July 2026 mid-month: 29 people, an
+  // extra ₦140,492.
+  //
+  // Identity is name + bank account (name alone when there is no account), so two
+  // real people who share a name but not an account stay separate.
+  const nrm = (x) => String(x || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const groups = {};
   for (const s of staff) {
-    const pb = by[s.id] || { l: 0, g: 0 };
-    const loadComm = pb.l * (rates.loaded || 0);
-    const bagComm = pb.g * (rates.bagged || 0);
-    const commission = r2(loadComm + bagComm);
+    const acct = nrm(s.bank_account);
+    const key = acct ? `${nrm(s.full_name)}|${acct}` : `n:${nrm(s.full_name)}`;
+    (groups[key] = groups[key] || []).push(s);
+  }
+
+  const lines = [];
+  for (const key of Object.keys(groups)) {
+    const members = groups[key];
+    // Prefer the record the sheet matched as the head — its site and bank details
+    // are the ones the accountant is working from.
+    const head = members.find((m) => sourceIds.has(m.id)) || members[0];
+    const memberIds = members.map((m) => m.id);
+    // If ANY copy of this person came from the sheet, ONLY the sheet copies count.
+    // Otherwise every copy's recorded production is summed once.
+    const fromSheet = memberIds.some((id) => sourceIds.has(id));
+    const bagIds = fromSheet ? memberIds.filter((id) => sourceIds.has(id)) : memberIds;
+    let l = 0, g = 0;
+    for (const id of bagIds) { const pb = by[id]; if (pb) { l += pb.l; g += pb.g; } }
+
+    const commission = r2(l * (rates.loaded || 0) + g * (rates.bagged || 0));
     if (commission <= 0) continue;
     // Designation: explicit staff_type, else whichever production dominates.
-    const designation = (s.staff_type === 'LOADER' || s.staff_type === 'BAGGER') ? s.staff_type : (pb.l >= pb.g ? 'LOADER' : 'BAGGER');
-    const nm = splitName(s.full_name);
+    const designation = (head.staff_type === 'LOADER' || head.staff_type === 'BAGGER') ? head.staff_type : (l >= g ? 'LOADER' : 'BAGGER');
+    const nm = splitName(head.full_name);
     lines.push({
-      staff_id: s.id, ext_id: s.ext_people_id || '', ...nm, full_name: s.full_name,
-      location: s.site_name || '', account: [s.bank_name, s.bank_account].filter(Boolean).join('-'),
-      bags_loaded: pb.l, bags_bagged: pb.g, qty: designation === 'LOADER' ? pb.l : pb.g,
-      by_site: bySite[s.id] || [],
-      bags_source: sourceIds.has(s.id) ? 'SHEET' : 'PRODUCTION',
+      staff_id: head.id, member_ids: memberIds,
+      ext_id: head.ext_people_id || '', ...nm, full_name: head.full_name,
+      location: head.site_name || '', account: [head.bank_name, head.bank_account].filter(Boolean).join('-'),
+      bags_loaded: l, bags_bagged: g, qty: designation === 'LOADER' ? l : g,
+      by_site: memberIds.flatMap((id) => bySite[id] || []),
+      bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
+      merged: memberIds.length > 1,
       commission, designation,
     });
   }
+  lines.sort((a, b) => String(a.location).localeCompare(String(b.location)) || String(a.full_name).localeCompare(String(b.full_name)));
   return lines;
 }
 
@@ -1592,7 +1650,12 @@ router.post('/midmonth/generate', requireAuth, async (req, res) => {
   // Must match the scope the accountant previewed, or the saved draft would differ.
   const combined = b.combined !== false;
   const tenants = combined ? await payrollGroup(req.user, c.tenant_id, c) : [c.tenant_id];
-  const out = await generateMidMonth(c.tenant_id, month, req.user.id, site, { email: b.email !== false, tenants });
+  // Saving a draft does NOT email. A draft is a working document — it gets
+  // recomputed, corrected, and reconciled against the accountant's own workbook
+  // before anyone should see it. Emailing on save sent out a run that was
+  // ₦194,812 over the sheet because of duplicate staff records. Sending is now
+  // an explicit act: POST /runs2/:id/email.
+  const out = await generateMidMonth(c.tenant_id, month, req.user.id, site, { email: b.email === true, tenants });
   res.status(201).json(out);
 });
 
@@ -2110,6 +2173,28 @@ router.delete('/production-override/:id', requireAuth, async (req, res) => {
   await audit(c.tenant_id, req.user.id, 'override.delete', 'production_override_batch', req.params.id,
     { period: `${b.period_from}..${b.period_to}`, kind: b.kind });
   res.json({ ok: true });
+});
+
+// Send the mid-month draft + Fido CSV to the accountants — on request, never
+// automatically. Returns who it went to so the sender can see it landed.
+router.post('/runs2/:id/email', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const run = await runFor(c, req.params.id);
+  if (!run) return res.status(404).json({ error: 'not found' });
+  const lines = await qone('SELECT COUNT(*) n FROM pay_run_lines WHERE run_id=?', [run.id]);
+  if (!Number(lines?.n)) return res.status(400).json({ error: 'nothing to send — this run has no lines' });
+  const tenants = await payrollGroup(req.user, run.tenant_id, c);
+  try {
+    await emailMidMonth(run.tenant_id, run.id, tenants);
+  } catch (e) {
+    return res.status(500).json({ error: `could not send: ${e.message}` });
+  }
+  // emailMidMonth swallows its own failures into email_log, so read the outcome
+  // back rather than reporting success just because the call returned.
+  const sent = await qone('SELECT to_addrs, status, error FROM email_log WHERE tenant_id=? ORDER BY created_at DESC LIMIT 1', [run.tenant_id]).catch(() => null);
+  if (sent && sent.status === 'FAILED') return res.status(502).json({ error: `mail server refused it: ${sent.error || 'unknown error'}` });
+  await audit(run.tenant_id, req.user.id, 'PAYROLL_RUN_EMAIL', 'pay_runs', run.id, { period: `${run.period_from}..${run.period_to}` });
+  res.json({ ok: true, recipients: sent?.to_addrs || null, status: sent?.status || 'SENT' });
 });
 
 module.exports = router;

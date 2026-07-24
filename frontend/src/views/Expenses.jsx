@@ -363,6 +363,11 @@ function PayablesView() {
   const vScope = (path, tid) => (combined && tid)
     ? path + (path.includes('?') ? '&' : '?') + 'tenant=' + tid
     : scoped(path);
+  // The tenants a (merged) vendor trades with. Combined → the list gathered when
+  // merging balances; otherwise the active workspace.
+  const vendorTenants = (v) => (combined && Array.isArray(v?.tenants) && v.tenants.length)
+    ? v.tenants
+    : [{ id: v?.tenant_id || tenant, name: v?.tenant_name || null }];
   const [rows, setRows] = useState(null);
   const [vendor, setVendor] = useState(null);   // drilled vendor → their open tickets + recent payments
   const [items, setItems] = useState(null);
@@ -382,10 +387,17 @@ function PayablesView() {
     setStmtBusy(true);
     try {
       const q = `from=${stmtFrom}&to=${stmtTo}`;
-      await downloadFile(
-        vScope(`/expenses/vendors/${encodeURIComponent(vendor.vendor)}/ledger.pdf?${q}`, vendor.tenant_id),
-        `ledger-${vendor.vendor.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${stmtFrom}-to-${stmtTo}.pdf`,
-      );
+      const safe = vendor.vendor.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+      // A statement is a per-entity reconciliation doc — if the vendor trades with
+      // both Fido and Fiafia, produce one PDF per entity (their books are separate).
+      const tlist = vendorTenants(vendor);
+      for (const t of tlist) {
+        const suffix = combined && t.name ? `-${t.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}` : '';
+        await downloadFile(
+          vScope(`/expenses/vendors/${encodeURIComponent(vendor.vendor)}/ledger.pdf?${q}`, t.id),
+          `ledger-${safe}${suffix}-${stmtFrom}-to-${stmtTo}.pdf`,
+        );
+      }
       setStmtOpen(false);
     } catch (e) { toast(e.message || 'Could not generate the statement', 'err'); }
     setStmtBusy(false);
@@ -394,23 +406,45 @@ function PayablesView() {
   useBackHandler(!!vendor || !!openExp, () => { if (openExp) setOpenExp(null); else setVendor(null); });
   const loadRows = useCallback(() => {
     if (combined) {
-      // Fan out across every superintended tenant, tagging each vendor balance with
-      // its entity so a vendor that trades with both shows one line per workspace.
+      // Fan out across every superintended tenant, then MERGE by vendor so a supplier
+      // that trades with both Fido and Fiafia is ONE line — combined owed — carrying
+      // the list of entities it spans (used to fan the drill + statements back out).
       Promise.all(groupTenants.map(async (t) => {
         try { return (await api(`/expenses/vendors/balances?tenant=${t.id}`)).map((r) => ({ ...r, tenant_id: t.id, tenant_name: t.name })); }
         catch { return []; }
-      })).then((parts) => setRows(parts.flat().sort((a, b) => b.owed - a.owed))).catch(() => setRows([]));
+      })).then((parts) => {
+        const byV = new Map();
+        for (const r of parts.flat()) {
+          const k = (r.vendor || '').toLowerCase();
+          const cur = byV.get(k) || { vendor: r.vendor, billed: 0, paid: 0, owed: 0, open_count: 0, tenants: [] };
+          cur.billed += Number(r.billed) || 0; cur.paid += Number(r.paid) || 0;
+          cur.owed += Number(r.owed) || 0; cur.open_count += Number(r.open_count) || 0;
+          if (r.tenant_id && !cur.tenants.some((t) => t.id === r.tenant_id)) cur.tenants.push({ id: r.tenant_id, name: r.tenant_name });
+          byV.set(k, cur);
+        }
+        setRows([...byV.values()].sort((a, b) => b.owed - a.owed));
+      }).catch(() => setRows([]));
     } else {
       api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([]));
     }
   }, [tenant, combined, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { loadRows(); }, [loadRows]);
   const loadVendor = useCallback(async (v) => {
-    const tid = v.tenant_id;
-    try { setItems(await api(vScope(`/expenses?vendor=${encodeURIComponent(v.vendor)}&unpaid=1`, tid))); } catch { setItems([]); }
-    try { setRecent(await api(vScope(`/expenses/vendors/${encodeURIComponent(v.vendor)}/recent-payments`, tid))); } catch { setRecent([]); }
-    try { setTrash(await api(vScope(`/expenses/deleted?vendor=${encodeURIComponent(v.vendor)}`, tid))); } catch { setTrash([]); }
-  }, [combined]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Pull the vendor's open tickets / recent payments / trash from EVERY entity it
+    // trades with, tag each row with its workspace, and merge date-descending.
+    const tlist = vendorTenants(v);
+    const fan = async (mk) => {
+      const parts = await Promise.all(tlist.map(async (t) => {
+        try { return (await api(vScope(mk(v.vendor), t.id))).map((row) => ({ ...row, _tenant: t.name })); }
+        catch { return []; }
+      }));
+      return parts.flat();
+    };
+    const byDateDesc = (k) => (a, b) => (a[k] < b[k] ? 1 : a[k] > b[k] ? -1 : 0);
+    try { setItems((await fan((v2) => `/expenses?vendor=${encodeURIComponent(v2)}&unpaid=1`)).sort(byDateDesc('expense_date'))); } catch { setItems([]); }
+    try { setRecent((await fan((v2) => `/expenses/vendors/${encodeURIComponent(v2)}/recent-payments`)).sort(byDateDesc('pay_date')).slice(0, 30)); } catch { setRecent([]); }
+    try { setTrash(await fan((v2) => `/expenses/deleted?vendor=${encodeURIComponent(v2)}`)); } catch { setTrash([]); }
+  }, [combined, tenant]); // eslint-disable-line react-hooks/exhaustive-deps
   const openVendor = (v) => { setVendor(v); setItems(null); setRecent(null); setTrash(null); loadVendor(v); };
   // Undo a delete. Nothing was destroyed — the ticket comes back exactly as it was,
   // attachments and payment history intact.
@@ -450,7 +484,7 @@ function PayablesView() {
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ borderRadius: 8 }}>{(r.vendor || '?').charAt(0).toUpperCase()}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{r.vendor}{combined && r.tenant_name ? <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', marginLeft: 6 }}>· {r.tenant_name}</span> : null}</div>
+                <div style={{ fontWeight: 700 }}>{r.vendor}{combined && r.tenants?.length ? <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', marginLeft: 6 }}>· {r.tenants.map((t) => t.name).join(' + ')}</span> : null}</div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>billed {ngn(r.billed)} · paid {ngn(r.paid)} · {r.open_count} open</div>
               </div>
               <div style={{ fontWeight: 800, color: 'var(--err)' }}>{ngn(r.owed)} ›</div>
@@ -463,7 +497,7 @@ function PayablesView() {
         <div onClick={() => setVendor(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
           <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 440, margin: 0, maxHeight: '86vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-              <strong>{vendor.vendor}{combined && vendor.tenant_name ? <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted)', marginLeft: 6 }}>· {vendor.tenant_name}</span> : null}</strong><strong style={{ color: 'var(--err)' }}>owe {ngn(vendor.owed)}</strong>
+              <strong>{vendor.vendor}{combined && vendor.tenants?.length ? <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted)', marginLeft: 6 }}>· {vendor.tenants.map((t) => t.name).join(' + ')}</span> : null}</strong><strong style={{ color: 'var(--err)' }}>owe {ngn(vendor.owed)}</strong>
             </div>
 
             {/* Statement of account — reconcile our record against the vendor's own ledger. */}
@@ -480,6 +514,7 @@ function PayablesView() {
                   <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.description || e.category}</div>
                   <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                     {e.expense_date} · billed {ngn(e.amount)} · paid {ngn(e.amount_paid)}
+                    {combined && e._tenant ? ` · ${e._tenant}` : ''}
                     {/* When it was last settled — the question you actually ask of an open ticket. */}
                     {e.last_payment_date ? <span style={{ color: '#166534' }}> · last pay {e.last_payment_date}</span> : ''}
                   </div>
@@ -495,7 +530,7 @@ function PayablesView() {
                 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '9px 4px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.description || p.category}</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{p.pay_date}{p.method ? ` · ${p.method}` : ''}{p.bank ? ` · ${p.bank}` : ''}</div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{p.pay_date}{p.method ? ` · ${p.method}` : ''}{p.bank ? ` · ${p.bank}` : ''}{combined && p._tenant ? ` · ${p._tenant}` : ''}</div>
                 </div>
                 <strong style={{ color: 'var(--brand-d)', whiteSpace: 'nowrap' }}>{ngn(p.amount)} ›</strong>
               </button>
@@ -543,6 +578,7 @@ function PayablesView() {
                 <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--muted)', lineHeight: 1.5 }}>
                   A ledger for <b>{vendor.vendor}</b> — opening balance, bills, payments and closing balance —
                   laid out like their own statement so you can compare line by line.
+                  {combined && vendor.tenants?.length > 1 ? ` Trades with ${vendor.tenants.length} entities — you'll get one PDF per entity (their books are separate).` : ''}
                 </p>
                 <div className="grid2">
                   <div>

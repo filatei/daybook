@@ -351,9 +351,18 @@ function ReceiptsView() {
 }
 
 function PayablesView() {
-  const { tenant, sites, toast } = useStore();
+  const { tenant, sites, toast, isGroup, groupTenants } = useStore();
   const role = useRole();
   const canRestore = !!(role && atLeast(role, 'SNR_ACCOUNTANT'));
+  // Snr Accountant+ superintends every tenant they hold that rank in: payables span
+  // both entities (Fido + Fiafia) regardless of the selected workspace.
+  const combined = isGroup || (groupTenants.length > 1);
+  const groupKey = groupTenants.map((t) => t.id).join(',');
+  // Scope a payables call to a specific tenant when combined (each vendor row knows
+  // which entity it belongs to); otherwise the active-workspace scope.
+  const vScope = (path, tid) => (combined && tid)
+    ? path + (path.includes('?') ? '&' : '?') + 'tenant=' + tid
+    : scoped(path);
   const [rows, setRows] = useState(null);
   const [vendor, setVendor] = useState(null);   // drilled vendor → their open tickets + recent payments
   const [items, setItems] = useState(null);
@@ -374,7 +383,7 @@ function PayablesView() {
     try {
       const q = `from=${stmtFrom}&to=${stmtTo}`;
       await downloadFile(
-        scoped(`/expenses/vendors/${encodeURIComponent(vendor.vendor)}/ledger.pdf?${q}`),
+        vScope(`/expenses/vendors/${encodeURIComponent(vendor.vendor)}/ledger.pdf?${q}`, vendor.tenant_id),
         `ledger-${vendor.vendor.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${stmtFrom}-to-${stmtTo}.pdf`,
       );
       setStmtOpen(false);
@@ -383,13 +392,25 @@ function PayablesView() {
   };
   // Back closes the top layer first (ticket detail), then the vendor drill.
   useBackHandler(!!vendor || !!openExp, () => { if (openExp) setOpenExp(null); else setVendor(null); });
-  const loadRows = useCallback(() => { api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([])); }, [tenant]);
+  const loadRows = useCallback(() => {
+    if (combined) {
+      // Fan out across every superintended tenant, tagging each vendor balance with
+      // its entity so a vendor that trades with both shows one line per workspace.
+      Promise.all(groupTenants.map(async (t) => {
+        try { return (await api(`/expenses/vendors/balances?tenant=${t.id}`)).map((r) => ({ ...r, tenant_id: t.id, tenant_name: t.name })); }
+        catch { return []; }
+      })).then((parts) => setRows(parts.flat().sort((a, b) => b.owed - a.owed))).catch(() => setRows([]));
+    } else {
+      api(scoped('/expenses/vendors/balances')).then(setRows).catch(() => setRows([]));
+    }
+  }, [tenant, combined, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { loadRows(); }, [loadRows]);
   const loadVendor = useCallback(async (v) => {
-    try { setItems(await api(scoped(`/expenses?vendor=${encodeURIComponent(v.vendor)}&unpaid=1`))); } catch { setItems([]); }
-    try { setRecent(await api(scoped(`/expenses/vendors/${encodeURIComponent(v.vendor)}/recent-payments`))); } catch { setRecent([]); }
-    try { setTrash(await api(scoped(`/expenses/deleted?vendor=${encodeURIComponent(v.vendor)}`))); } catch { setTrash([]); }
-  }, []);
+    const tid = v.tenant_id;
+    try { setItems(await api(vScope(`/expenses?vendor=${encodeURIComponent(v.vendor)}&unpaid=1`, tid))); } catch { setItems([]); }
+    try { setRecent(await api(vScope(`/expenses/vendors/${encodeURIComponent(v.vendor)}/recent-payments`, tid))); } catch { setRecent([]); }
+    try { setTrash(await api(vScope(`/expenses/deleted?vendor=${encodeURIComponent(v.vendor)}`, tid))); } catch { setTrash([]); }
+  }, [combined]); // eslint-disable-line react-hooks/exhaustive-deps
   const openVendor = (v) => { setVendor(v); setItems(null); setRecent(null); setTrash(null); loadVendor(v); };
   // Undo a delete. Nothing was destroyed — the ticket comes back exactly as it was,
   // attachments and payment history intact.
@@ -425,11 +446,11 @@ function PayablesView() {
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {shown.map((r) => (
-            <button key={r.vendor} onClick={() => openVendor(r)}
+            <button key={`${r.tenant_id || ''}:${r.vendor}`} onClick={() => openVendor(r)}
               style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: 'none', background: 'none', width: '100%', borderBottom: '1px solid var(--line)', cursor: 'pointer', textAlign: 'left' }}>
               <div className="av" style={{ borderRadius: 8 }}>{(r.vendor || '?').charAt(0).toUpperCase()}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 700 }}>{r.vendor}</div>
+                <div style={{ fontWeight: 700 }}>{r.vendor}{combined && r.tenant_name ? <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', marginLeft: 6 }}>· {r.tenant_name}</span> : null}</div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>billed {ngn(r.billed)} · paid {ngn(r.paid)} · {r.open_count} open</div>
               </div>
               <div style={{ fontWeight: 800, color: 'var(--err)' }}>{ngn(r.owed)} ›</div>
@@ -442,7 +463,7 @@ function PayablesView() {
         <div onClick={() => setVendor(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
           <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 440, margin: 0, maxHeight: '86vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-              <strong>{vendor.vendor}</strong><strong style={{ color: 'var(--err)' }}>owe {ngn(vendor.owed)}</strong>
+              <strong>{vendor.vendor}{combined && vendor.tenant_name ? <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted)', marginLeft: 6 }}>· {vendor.tenant_name}</span> : null}</strong><strong style={{ color: 'var(--err)' }}>owe {ngn(vendor.owed)}</strong>
             </div>
 
             {/* Statement of account — reconcile our record against the vendor's own ledger. */}
@@ -993,6 +1014,11 @@ export default function Expenses() {
   const { openModal, closeModal, toast, tenant, sites, isGroup, groupTenants } = useStore();
   const role = useRole();
   const canBulk = role && atLeast(role, 'SNR_ACCOUNTANT');   // Snr Accountant / GM / Admin
+  // A Snr Accountant / GM / Admin superintends the whole business as one: when they
+  // hold that rank in 2+ tenants (Fido + Fiafia), expenses and payables ALWAYS show
+  // both entities — whether the selected workspace is Fido, Fiafia, or Group. So we
+  // fan out across every superintended tenant, not just when Group is active.
+  const combined = isGroup || (groupTenants.length > 1);
   const [selMode, setSelMode] = useState(false);
   const [openGroups, setOpenGroups] = useState({});   // status → expanded? (FAQ-style)
   const toggleGroupOpen = (st) => setOpenGroups((p) => ({ ...p, [st]: !p[st] }));
@@ -1013,9 +1039,9 @@ export default function Expenses() {
   const groupKey = groupTenants.map((t) => t.id).join(',');
 
   useEffect(() => {
-    if (isGroup) return;   // categories are per-tenant; group view uses the defaults
+    if (combined) return;   // categories are per-tenant; the combined view uses the defaults
     api(scoped('/expenses/categories')).then((c) => { if (Array.isArray(c) && c.length) setCategories(c); }).catch(() => {});
-  }, [tenant, isGroup]);
+  }, [tenant, combined]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1029,9 +1055,9 @@ export default function Expenses() {
       return p;
     };
     try {
-      if (isGroup) {
-        // Combined view (Snr Accountant/GM/Admin): fetch each member tenant and
-        // merge, tagging every row with its workspace name.
+      if (combined) {
+        // Combined view (Snr Accountant/GM/Admin): fetch each superintended tenant
+        // and merge, tagging every row with its workspace name.
         const parts = await Promise.all(groupTenants.map(async (t) => {
           const p = qs(); p.set('tenant', t.id);
           try { return (await api(`/expenses?${p}`)).map((e) => ({ ...e, tenant_name: t.name })); }
@@ -1044,7 +1070,7 @@ export default function Expenses() {
       }
     } catch { setExpenses([]); }
     setLoading(false);
-  }, [tenant, filter, isGroup, groupKey, qDebounced]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tenant, filter, combined, groupKey, qDebounced]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
 
@@ -1052,7 +1078,7 @@ export default function Expenses() {
   useEffect(() => {
     if (filter.kind !== 'IMPREST') { setImprest(null); return; }
     const buildQs = () => { const p = new URLSearchParams(); if (filter.from) p.set('from', filter.from); if (filter.to) p.set('to', filter.to); return p; };
-    if (isGroup) {
+    if (combined) {
       Promise.all(groupTenants.map(async (t) => {
         const p = buildQs(); p.set('tenant', t.id);
         try { const r = await api(`/expenses/imprest-summary?${p}`); return (r.sites || []).map((s) => ({ ...s, site_name: `${s.site_name || '—'} · ${t.name}` })); }
@@ -1064,7 +1090,7 @@ export default function Expenses() {
       return;
     }
     api(scoped(`/expenses/imprest-summary?${buildQs()}`)).then(setImprest).catch(() => setImprest(null));
-  }, [tenant, filter.kind, filter.from, filter.to, expenses, isGroup, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tenant, filter.kind, filter.from, filter.to, expenses, combined, groupKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openForm = (exp = null) => {
     openModal(<ExpenseForm expense={exp} sites={sites} categories={categories} onSave={load} onClose={closeModal} />, { guard: true });
@@ -1114,7 +1140,7 @@ export default function Expenses() {
       <div className="seg" style={{ marginBottom: 12 }}>
         <button className={`seg-b${tab === 'list' ? ' on' : ''}`} onClick={() => setTab('list')}>💸 Expenses</button>
         <button className={`seg-b${tab === 'cash' ? ' on' : ''}`} onClick={() => setTab('cash')}>💵 Cash deposits</button>
-        {!isGroup && <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>}
+        <button className={`seg-b${tab === 'payables' ? ' on' : ''}`} onClick={() => setTab('payables')}>🏦 Payables</button>
         {/* Receipts are per-workspace files, so not offered in the combined group view. */}
         {!isGroup && <button className={`seg-b${tab === 'receipts' ? ' on' : ''}`} onClick={() => setTab('receipts')}>📎 Receipts</button>}
       </div>
@@ -1217,7 +1243,7 @@ export default function Expenses() {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontWeight: 700 }}>{e.description || e.category}{e.kind === 'IMPREST' && <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 20, background: '#e0e7ff', color: '#3730a3', marginLeft: 4 }}>IMPREST</span>}</div>
                         <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                          #{e.ext_id || String(e.id).slice(0, 6)} · {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{isGroup && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
+                          #{e.ext_id || String(e.id).slice(0, 6)} · {e.expense_date}{e.site_name ? ` · ${e.site_name}` : ''}{e.vendor ? ` · ${e.vendor}` : ''}{combined && e.tenant_name ? ` · ${e.tenant_name}` : ''}{Number(e.balance) > 0.01 ? ` · owed ${ngn(e.balance)}` : ''}
                           {/* Last payment date — so you can see at a glance when a ticket was last settled. */}
                           {e.last_payment_date ? <span style={{ color: '#166534' }}> · paid {e.last_payment_date}</span> : ''}
                         </div>

@@ -15,8 +15,28 @@ cd "${BACKEND}" || die "missing ${BACKEND}"
 [ -f .env ] || die "missing ${BACKEND}/.env (copy .env.example and fill JWT_SECRET)"
 
 # ── 1. Pull newest image (CI pushes to GHCR) ──────────────────────────────────
+# A failed pull is FATAL. It used to be a soft warning, which meant an expired
+# GHCR token silently restarted the OLD image on every deploy — CI green, site
+# unchanged; a payroll fix once sat undeployed for an afternoon this way
+# (2026-07-29). If you genuinely want to restart whatever image is already on
+# the box (first bring-up building locally, or GHCR is down), opt in loudly:
+#   DEPLOY_ALLOW_STALE=1 daybook-deploy
 log "Pulling latest image…"
-docker compose pull --quiet || log "pull skipped (building locally?)"
+if ! docker compose pull --quiet daybook; then
+  if [ "${DEPLOY_ALLOW_STALE:-0}" = "1" ]; then
+    log "pull FAILED but DEPLOY_ALLOW_STALE=1 — continuing with the image already on this server"
+  else
+    die "image pull FAILED — refusing to restart stale code.
+[deploy] Almost always GHCR auth: run  docker login ghcr.io -u filatei
+[deploy] (classic PAT with read:packages), and update the repo secret:
+[deploy]   gh secret set GHCR_TOKEN
+[deploy] To deliberately deploy the image already on this box: DEPLOY_ALLOW_STALE=1 daybook-deploy"
+  fi
+fi
+# Deploy trail: say exactly which build is about to run, so "did it actually
+# ship?" is answerable from the deploy output alone.
+IMG_CREATED="$(docker image inspect ghcr.io/filatei/daybook:latest --format '{{.Created}}' 2>/dev/null || echo unknown)"
+log "image ghcr.io/filatei/daybook:latest built ${IMG_CREATED}"
 
 # ── 2. Restart the APP container only ─────────────────────────────────────────
 # --no-deps + naming the service so Postgres is NOT recreated. Recreating the DB

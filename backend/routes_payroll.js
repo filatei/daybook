@@ -18,7 +18,7 @@ const { v4: uuid } = require('uuid');
 // In-memory upload for the payroll Excel import (parsed, never written to disk).
 const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
 const { qone, qall, qrun, withTransaction, clientQ } = require('./db');
-const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
+const { requireAuth, contextFor, requestedTenant, atLeast, siteBound, groupContexts } = require('./auth');
 
 const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -37,19 +37,11 @@ async function audit(tenant_id, user_id, action, entity, entity_id, meta) {
 // resolve it rather than 403.
 const GROUP_ID = '__group__';
 
-// Every ACTIVE tenant where this user holds minRole (superadmin: all of them).
-// Ordered by name so the anchor tenant is stable across requests — a combined
-// run is recorded against the anchor, and it must not drift between compute and
-// save, or the draft would land in a different workspace than it was previewed in.
-async function groupContexts(user, minRole) {
-  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE' ORDER BY name, id");
-  const out = [];
-  for (const t of rows) {
-    const c = await contextFor(user, t.id);
-    if (c && atLeast(c.role, minRole)) out.push(c);
-  }
-  return out;
-}
+// groupContexts now lives in auth.js (shared with the attendance and staff
+// routes) and carries the finance-tier whole-business rule: SNR_ACCOUNTANT+
+// anywhere = every active tenant. Membership tenants order first, so the
+// anchor tenant a combined run is recorded against stays stable between
+// compute and save, and is always one the user really belongs to.
 
 // Payroll compute/config/approve is restricted to the finance tier: SNR
 // ACCOUNTANT / GENERAL MANAGER / ADMIN (rank ≥ 7). Operational routes (recording

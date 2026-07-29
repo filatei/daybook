@@ -134,6 +134,46 @@ const atLeast = (role, min) => (ROLE_RANK[role] || 0) >= (ROLE_RANK[min] || 0);
 // site.  Senior Accountant, General Manager and Admin are cross-site (all sites).
 const siteBound = (ctx) => !!(ctx && ctx.site_id && !atLeast(ctx.role, 'SNR_ACCOUNTANT'));
 
+// ── Whole-business (Group) scope ──────────────────────────────────────────────
+// Every ACTIVE tenant this user may act in at minRole. Two ways in:
+//   1. A membership at minRole+ in that tenant (the original rule).
+//   2. BUSINESS RULE (2026-07-29): the finance tier is whole-business. Payroll
+//      is prepared for Fido + Fiafia COMBINED, so a user holding
+//      SNR_ACCOUNTANT+ in ANY active tenant gets a borrowed, site-unbound
+//      context in every other active tenant at that same role. Without this, a
+//      Snr Accountant whose membership row exists only under Fido silently got
+//      a Fido-only "combined" payroll — Fiafia staff, clock-ins and bag counts
+//      just didn't show up, with nothing to say why.
+// Ordering: membership tenants first (alphabetical), borrowed after — so the
+// anchor (first entry) is always a tenant the user really belongs to, and it
+// is stable between a combined run's preview and its save.
+async function groupContexts(user, minRole) {
+  const rows = await qall("SELECT id, name FROM tenants WHERE status='ACTIVE' ORDER BY name, id");
+  const out = []; const rest = [];
+  let financeRole = null;   // the user's highest SNR_ACCOUNTANT+ role anywhere
+  for (const t of rows) {
+    const c = await contextFor(user, t.id);
+    if (c && atLeast(c.role, 'SNR_ACCOUNTANT') && (!financeRole || !atLeast(financeRole, c.role))) financeRole = c.role;
+    if (c && atLeast(c.role, minRole)) out.push({ ...c, tenant_name: t.name });
+    else rest.push(t);
+  }
+  if (financeRole && atLeast(financeRole, minRole)) {
+    for (const t of rest) out.push({ tenant_id: t.id, tenant_name: t.name, role: financeRole, site_id: null, borrowed: true });
+  }
+  return out;
+}
+
+// The whole-business roll-up for the workspace switcher: [{id, name}] when this
+// user qualifies for a combined (Group) view spanning 2+ tenants, else null.
+// Sent with every auth payload so the frontend builds the Group entry from what
+// the SERVER says the scope is — not from the user's own membership list, which
+// misses tenants the finance rule above grants without a membership row.
+async function groupTenantsFor(user) {
+  const ctxs = await groupContexts(user, 'SNR_ACCOUNTANT');
+  if (ctxs.length < 2) return null;
+  return ctxs.map((c) => ({ id: c.tenant_id, name: c.tenant_name }));
+}
+
 // Sets req.user when a valid token is present, but never blocks the request.
 async function optionalAuth(req, _res, next) {
   const token = readToken(req);
@@ -150,5 +190,6 @@ async function optionalAuth(req, _res, next) {
 module.exports = {
   verifyGoogleToken, signSession, requireAuth, optionalAuth,
   membershipsFor, accessibleTenants, contextFor, requestedTenant, atLeast, siteBound,
+  groupContexts, groupTenantsFor,
   JWT_SECRET, GOOGLE_CLIENT_ID,
 };

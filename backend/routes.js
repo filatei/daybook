@@ -13,6 +13,7 @@ const { qone, qall, qrun } = require('./db');
 const {
   verifyGoogleToken, signSession, requireAuth, optionalAuth,
   accessibleTenants, contextFor, requestedTenant, atLeast, siteBound, GOOGLE_CLIENT_ID,
+  groupContexts, groupTenantsFor,
 } = require('./auth');
 const { sendDailyReport, sendGeneratedReport, sendManualReport, sendInvite, sendContactMessage, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
 
@@ -207,7 +208,12 @@ async function loginResponse(res, req, user) {
   const token = signSession(user);
   // Persist the session until explicit logout (cookie cleared by /auth/logout).
   res.cookie('daybook_token', token, { httpOnly: true, sameSite: 'Lax', secure: req.secure, maxAge: 365 * 24 * 3600 * 1000 });
-  return res.json({ token, user: publicUser(user), tenants: await accessibleTenants(user) });
+  return res.json({
+    token, user: publicUser(user), tenants: await accessibleTenants(user),
+    // Whole-business roll-up scope (server-decided): lets the frontend show the
+    // Group workspace even when the finance role is held in only one tenant.
+    group_tenants: await groupTenantsFor(user),
+  });
 }
 
 router.post('/auth/google', async (req, res) => {
@@ -258,7 +264,10 @@ router.post('/auth/dev-login', async (req, res) => {
 });
 
 router.post('/auth/logout', (_req, res) => { res.clearCookie('daybook_token'); res.json({ ok: true }); });
-router.get('/auth/me', requireAuth, async (req, res) => res.json({ user: publicUser(req.user), tenants: await accessibleTenants(req.user) }));
+router.get('/auth/me', requireAuth, async (req, res) => res.json({
+  user: publicUser(req.user), tenants: await accessibleTenants(req.user),
+  group_tenants: await groupTenantsFor(req.user),
+}));
 
 // ── ONBOARDING ────────────────────────────────────────────────────────────────
 router.post('/onboard', requireAuth, async (req, res) => {
@@ -1683,6 +1692,18 @@ const STAFF_TYPES = ['REGULAR', 'BAGGER', 'LOADER'];
 // Piece workers (baggers/loaders) are paid per bag; regular staff get a daily/monthly rate.
 const payTypeFor = (staffType, requested) => (staffType === 'BAGGER' || staffType === 'LOADER') ? 'PIECE' : (['DAILY', 'MONTHLY', 'HOURLY'].includes(String(requested || '').toUpperCase()) ? String(requested).toUpperCase() : 'DAILY');
 router.get('/staff', requireAuth, async (req, res) => {
+  // Group roll-up: the combined staff roster across every tenant in scope
+  // (finance tier — Snr Accountant+ anywhere). Read-only by nature: edits,
+  // clock-ins and enrolment stay in a single workspace, where rows have one
+  // owning tenant. Rows carry tenant_name so the UI can label who is whose.
+  if (requestedTenant(req) === '__group__') {
+    const ctxs = await groupContexts(req.user, 'SNR_ACCOUNTANT');
+    if (!ctxs.length) return res.status(403).json({ error: 'forbidden' });
+    const ids = ctxs.map((c) => c.tenant_id);
+    return res.json(await qall(`SELECT ${STAFF_COLS},
+        (SELECT name FROM tenants t WHERE t.id = staff.tenant_id) tenant_name
+      FROM staff WHERE tenant_id IN (${ids.map(() => '?').join(',')}) ORDER BY full_name`, ids));
+  }
   const s = await scope(req); if (s.error) return res.status(403).json({ error: s.error });
   const cols = STAFF_COLS + (req.query.photos === '1' ? ', photo' : '');   // photos for badge screen
   if (s.all) return res.json(await qall(`SELECT ${cols} FROM staff ORDER BY full_name`));
@@ -1938,8 +1959,20 @@ function saveDataUrl(dataUrl, tag) {
   return name;
 }
 router.get('/attendance', requireAuth, async (req, res) => {
-  const s = await scope(req); if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
-  const where = ['a.tenant_id=?'], args = [s.ctx.tenant_id];
+  // Group roll-up: clock-in data across every tenant in scope, in one list —
+  // the finance tier reviews attendance for the whole business (Fido + Fiafia)
+  // when preparing payroll, not one workspace at a time.
+  let where, args, groupCtx = null;
+  if (requestedTenant(req) === '__group__') {
+    const ctxs = await groupContexts(req.user, 'SNR_ACCOUNTANT');
+    if (!ctxs.length) return res.status(403).json({ error: 'forbidden' });
+    const ids = ctxs.map((c) => c.tenant_id);
+    where = [`a.tenant_id IN (${ids.map(() => '?').join(',')})`]; args = [...ids];
+    groupCtx = { role: 'SNR_ACCOUNTANT', site_id: null };   // never site-bound
+  }
+  const s = groupCtx ? { ctx: groupCtx } : await scope(req);
+  if (!s.ctx) return res.status(400).json({ error: s.error || 'select a workspace' });
+  if (!groupCtx) { where = ['a.tenant_id=?']; args = [s.ctx.tenant_id]; }
   // Single ?date=, or a ?from=&to= range.
   if (req.query.from || req.query.to) {
     if (req.query.from) { where.push('a.work_date>=?'); args.push(req.query.from); }
@@ -1950,15 +1983,16 @@ router.get('/attendance', requireAuth, async (req, res) => {
   if (siteBound(s.ctx)) { where.push('a.site_id=?'); args.push(s.ctx.site_id); }
   else if (req.query.site) { where.push('a.site_id=?'); args.push(req.query.site); }
   const rows = await qall(`SELECT a.*, st.full_name, st.role_title, st.staff_type, st.phone, st.bank_name, st.bank_account,
-      si.name site_name FROM attendance a
+      si.name site_name, tn.name tenant_name FROM attendance a
     LEFT JOIN staff st ON st.id=a.staff_id LEFT JOIN sites si ON si.id=a.site_id
+    LEFT JOIN tenants tn ON tn.id=a.tenant_id
     WHERE ${where.join(' AND ')} ORDER BY a.work_date DESC, a.clock_in DESC, st.full_name LIMIT 500`, args);
   res.json(rows.map((r) => ({
     id: r.id, staff_id: r.staff_id, staff: r.full_name,
     // Human title for the row: role_title, else the piece designation (bagger/loader).
     title: r.role_title || (r.staff_type && r.staff_type !== 'REGULAR' ? r.staff_type.charAt(0) + r.staff_type.slice(1).toLowerCase() : null),
     staff_type: r.staff_type, phone: r.phone, bank: [r.bank_name, r.bank_account].filter(Boolean).join('-') || null,
-    site_id: r.site_id, site: r.site_name, work_date: r.work_date,
+    site_id: r.site_id, site: r.site_name, tenant: r.tenant_name, work_date: r.work_date,
     clock_in: r.clock_in, clock_out: r.clock_out, has_photo_in: !!r.photo_in, has_photo_out: !!r.photo_out, has_signature: !!r.signature,
     source: r.source, match_score: r.match_score, in_lat: r.in_lat, in_lng: r.in_lng, out_lat: r.out_lat, out_lng: r.out_lng,
   })));
@@ -2025,7 +2059,11 @@ router.post('/attendance/badge', requireAuth, needTenant('SECRETARY'), async (re
 router.get('/attendance/:id/img/:which', requireAuth, async (req, res) => {
   const a = await qone('SELECT * FROM attendance WHERE id=?', [req.params.id]);
   if (!a) return res.status(404).end();
-  const c = await contextFor(req.user, a.tenant_id);
+  // Membership context, or the finance tier's whole-business scope — a Snr
+  // Accountant reviewing the combined attendance list can open its photos even
+  // for a tenant they hold no membership row in.
+  let c = await contextFor(req.user, a.tenant_id);
+  if (!c) c = (await groupContexts(req.user, 'SNR_ACCOUNTANT')).find((x) => x.tenant_id === a.tenant_id) || null;
   if (!c || (siteBound(c) && a.site_id !== c.site_id)) return res.status(404).end();
   const name = req.params.which === 'out' ? a.photo_out : req.params.which === 'sig' ? a.signature : a.photo_in;
   if (!name) return res.status(404).end();

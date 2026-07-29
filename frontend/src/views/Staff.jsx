@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { api, scoped, scopedAny, today, getToken } from '../api.js';
-import { useStore, useRole, atLeast, useActiveTenant } from '../store.jsx';
+import { useStore, useRole, atLeast, useActiveTenant, GROUP_ID } from '../store.jsx';
 import { useFaceLiveness, faceDistance, FACE_MATCH_THRESHOLD } from '../hooks/useFaceLiveness.js';
 import { brandFor, printBadges } from '../badge.js';
 import BarcodeScanner from '../components/BarcodeScanner.jsx';
@@ -454,7 +454,9 @@ function AttendanceReport({ siteFilter }) {
     try {
       const p = new URLSearchParams({ from, to });
       if (siteFilter) p.set('site', siteFilter);
-      setRows(await api(scoped(`/attendance?${p}`)));
+      // scopedAny, not scoped: under the Group roll-up the server merges the
+      // clock-in data of every tenant in scope into this one list.
+      setRows(await api(scopedAny(`/attendance?${p}`)));
     } catch { setRows([]); }
     setLoading(false);
   }, [tenant, from, to, siteFilter]);
@@ -489,7 +491,7 @@ function AttendanceReport({ siteFilter }) {
                   {r.title ? <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}> · {r.title}</span> : null}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  {r.work_date} · {r.site || '—'} · in {clockTime(r.clock_in)} · out {clockTime(r.clock_out)}
+                  {r.work_date} · {tenant === GROUP_ID && r.tenant ? `${r.tenant} · ` : ''}{r.site || '—'} · in {clockTime(r.clock_in)} · out {clockTime(r.clock_out)}
                   {r.match_score != null ? ` · match ${Number(r.match_score).toFixed(2)}${r.match_score <= 0.55 ? ' ✓' : ' ⚠'}` : ''}
                 </div>
               </button>
@@ -768,18 +770,25 @@ export default function Staff() {
   const [showAdd, setShowAdd] = useState(false);
   const [editStaff, setEditStaff] = useState(null);
   const role = useRole();
-  const canManage = role && atLeast(role, 'SECRETARY');
+  // The Group roll-up is a combined READ view (roster + clock-ins across every
+  // tenant). Staff rows belong to one workspace, so editing, enrolment,
+  // clocking and eligibility all stay single-workspace — switch to Fido or
+  // Fiafia to change anything.
+  const isGroup = tenant === GROUP_ID;
+  const canManage = role && atLeast(role, 'SECRETARY') && !isGroup;
   // Payroll eligibility moves money — SNR_ACCOUNTANT+ only, matching the route.
-  const canPayroll = role && atLeast(role, 'SNR_ACCOUNTANT');
+  const canPayroll = role && atLeast(role, 'SNR_ACCOUNTANT') && !isGroup;
   const siteBound = role && !atLeast(role, 'SNR_ACCOUNTANT');
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const params = siteFilter ? `?site=${siteFilter}` : '';
+      // scopedAny, not scoped: under the Group roll-up the server returns the
+      // combined roster and clock-in list of every tenant in scope.
       const [staffData, attData] = await Promise.all([
-        api(scoped(`/staff${params}`)),
-        api(scoped(`/attendance?date=${today()}`)),
+        api(scopedAny(`/staff${params}`)),
+        api(scopedAny(`/attendance?date=${today()}`)),
       ]);
       setStaff(staffData);
       const byStaff = {};
@@ -792,6 +801,8 @@ export default function Staff() {
   useEffect(() => { load(); }, [load]);
 
   const openClock = (person, enroll = false) => {
+    // Clocking writes to one workspace; the Group roll-up is read-only.
+    if (isGroup) return;
     openModal(
       <ClockModal
         staff={person}
@@ -867,7 +878,7 @@ export default function Staff() {
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 700 }}>{s.full_name} {s.face_enrolled ? <span title="Face enrolled" style={{ fontSize: 12 }}>🙂</span> : <span title="No face on file" style={{ fontSize: 12, opacity: .5 }}>📷</span>}</div>
                       <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                        {s.role_title || 'Staff'} · {sites.find((x) => x.id === s.site_id)?.name || '—'}
+                        {s.role_title || 'Staff'} · {isGroup ? (s.tenant_name || '—') : (sites.find((x) => x.id === s.site_id)?.name || '—')}
                         {s.status === 'LEFT' && <span title={s.exit_reason || 'Has left the company'} style={{ marginLeft: 6, color: '#b91c1c', fontWeight: 700 }}>· left{s.exit_date ? ` ${s.exit_date}` : ''}</span>}
                         {s.status !== 'LEFT' && s.payroll_eligible === false && <span title={s.eligibility_note || 'Not eligible for payroll'} style={{ marginLeft: 6, color: '#b45309', fontWeight: 700 }}>· off payroll</span>}
                       </div>

@@ -129,7 +129,7 @@ function Inner() {
     setToken(saved);
     api('/auth/me')
       .then((me) => {
-        login(me.user, saved, me.tenants);
+        login(me.user, saved, me.tenants, me.group_tenants);
         setBooting(false);
         refreshPushIfGranted();
       })
@@ -151,7 +151,7 @@ function Inner() {
       try {
         const data = await api('/auth/google', { method: 'POST', body: { credential: resp.credential } });
         localStorage.setItem('daybook_token', data.token);
-        login(data.user, data.token, data.tenants);
+        login(data.user, data.token, data.tenants, data.group_tenants);
         toast('Welcome back!', 'ok');
         refreshPushIfGranted();
       } catch (e) {
@@ -165,7 +165,7 @@ function Inner() {
     try {
       const data = await api('/auth/dev-login', { method: 'POST', body: {} });
       localStorage.setItem('daybook_token', data.token);
-      login(data.user, data.token, data.tenants);
+      login(data.user, data.token, data.tenants, data.group_tenants);
     } catch (e) { toast(e.message, 'err'); }
   }, []);
 

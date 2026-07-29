@@ -39,11 +39,18 @@ function reducer(state, action) {
 export function StoreProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initial);
 
-  const login = useCallback((user, token, tenants) => {
+  const login = useCallback((user, token, tenants, groupTenants) => {
     setToken(token);
     const real = Array.isArray(tenants) ? tenants : [];
-    // Tenants this user can roll up: Snr Accountant+ in each (or superadmin).
-    const eligible = real.filter((t) => user?.is_superadmin || atLeast(t.role, 'SNR_ACCOUNTANT'));
+    // Whole-business roll-up scope. The SERVER decides who qualifies
+    // (group_tenants in the auth payload): a Snr Accountant+ anywhere covers
+    // every active tenant — including ones with no membership row, which the
+    // old membership-only test below could never see (it silently produced a
+    // Fido-only "combined" payroll for single-membership accountants).
+    // The membership-based filter stays as a fallback for older servers.
+    const eligible = Array.isArray(groupTenants) && groupTenants.length >= 2
+      ? groupTenants
+      : real.filter((t) => user?.is_superadmin || atLeast(t.role, 'SNR_ACCOUNTANT'));
     let all = real;
     if (eligible.length >= 2) {
       const group = {

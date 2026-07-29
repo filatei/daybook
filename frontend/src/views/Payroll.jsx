@@ -280,10 +280,14 @@ function RunTab({ sites, onSaved }) {
       {lines && (() => {
         if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
         const term = q.trim().toLowerCase();
-        // A worker's site(s) come from their production split. The one with the most
-        // bags is their primary site; regular staff with no bags group under "—".
-        const sitesOf = (l) => (l.by_site || []).map((s) => s.site_name).filter(Boolean);
+        // The server attributes every line to ONE site (site_name): most bags,
+        // else most clock-in days, else the staff record's home site. The
+        // production-split reduce below survives only as a fallback for runs
+        // saved before site_name existed.
+        const sitesOf = (l) => Array.from(new Set(
+          [l.site_name, ...(l.by_site || []).map((s) => s.site_name)].filter(Boolean)));
         const primarySite = (l) => {
+          if (l.site_name) return l.site_name;
           const bs = l.by_site || [];
           if (!bs.length) return '—';
           return (bs.reduce((a, b) => ((b.loaded + b.bagged) > (a.loaded + a.bagged) ? b : a)).site_name) || '—';

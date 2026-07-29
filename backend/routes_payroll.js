@@ -724,6 +724,9 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
   const { by: prodBy, override, sourceIds } = await bagsForPeriod(tenant_id, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   // Per-site split behind each worker's total (where the bags were actually done).
   const bySite = await siteSplit(tenant_id, from, to, override);
+  // Site attribution inputs: clock-in days per site + site names (see primarySiteId).
+  const attSites = await attendanceSiteSplit(tenant_id, from, to);
+  const siteNames = await siteNamesFor(tenant_id);
   // Outstanding (unsettled) advances up to the period end.
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id=? AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [tenant_id, to]);
@@ -739,9 +742,11 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
     // Monthly staff earn a FIXED salary, prorated by attendance over the period.
     else if (pt === 'MONTHLY') gross = (s.daily_rate || 0) * (days / periodDays);
     else gross = days * (s.daily_rate || 0);   // daily wage
+    const primary = primarySiteId(bySite[s.id], attSites[s.id], s.site_id);
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
       days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
       by_site: bySite[s.id] || [],
+      site_id: primary, site_name: primary ? (siteNames[primary] || null) : null,
       bags_source: sourceIds.has(s.id) ? 'SHEET' : 'PRODUCTION',
       member_ids: [s.id],
       advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
@@ -812,6 +817,53 @@ async function siteSplit(tenant_id, from, to, override = null) {
   return by;
 }
 
+// Clock-in days per worker PER SITE for a period — the second leg of the site
+// attribution rule below (bags decide first; days decide when there are none).
+async function attendanceSiteSplit(tenantIds, from, to) {
+  const ids = tenantList(tenantIds);
+  if (!ids.length) return {};
+  const ph = ids.map(() => '?').join(',');
+  const rows = await qall(`SELECT staff_id, site_id, COUNT(DISTINCT work_date) days
+    FROM attendance WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL
+      AND work_date BETWEEN ? AND ? AND site_id IS NOT NULL
+    GROUP BY staff_id, site_id`, [...ids, from, to]);
+  const by = {};
+  for (const r of rows) (by[r.staff_id] = by[r.staff_id] || []).push({ site_id: r.site_id, days: Number(r.days) });
+  return by;
+}
+
+// id → name for every site in scope, for labelling payroll lines.
+async function siteNamesFor(tenantIds) {
+  const ids = tenantList(tenantIds);
+  if (!ids.length) return {};
+  const ph = ids.map(() => '?').join(',');
+  const rows = await qall(`SELECT id, name FROM sites WHERE tenant_id IN (${ph})`, ids);
+  const m = {}; for (const r of rows) m[r.id] = r.name;
+  return m;
+}
+
+// SITE ATTRIBUTION RULE (business decision, 2026-07-29): every payroll line
+// must belong to a site. When a person worked at more than one, the site with
+// the most BAGS wins (that is where their pay was earned); with no bags at
+// all (salaried/daily staff), the site with the most clock-in DAYS; and only
+// when neither exists, the staff record's home site. Keeps the payroll's
+// per-site grouping meaningful instead of piling everyone under "no site".
+function primarySiteId(bagSplit, attSplit, homeSiteId) {
+  let best = null, bestBags = 0;
+  for (let i = 0; i < (bagSplit || []).length; i++) {
+    const s = bagSplit[i];
+    const b = (Number(s.loaded) || 0) + (Number(s.bagged) || 0);
+    if (s.site_id && b > bestBags) { bestBags = b; best = s.site_id; }
+  }
+  if (best) return best;
+  let bestDays = 0;
+  for (let i = 0; i < (attSplit || []).length; i++) {
+    const a = attSplit[i];
+    if (a.site_id && a.days > bestDays) { bestDays = a.days; best = a.site_id; }
+  }
+  return best || homeSiteId || null;
+}
+
 // Combined payroll across MULTIPLE tenants (e.g. Fido + Fiafia), merging the same
 // person into one payslip. Identity = normalized name + bank account (name-only
 // when no account on file). Piece pay uses the shared per-bag rates; monthly pay
@@ -829,7 +881,14 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [...tenantIds, from, to]);
   const daysByStaff = {};
   for (const a of att) (daysByStaff[a.staff_id] = daysByStaff[a.staff_id] || new Set()).add(a.work_date);
-  const { by: prodBy, sourceIds } = await bagsForPeriod(tenantIds, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const { by: prodBy, sourceIds, override } = await bagsForPeriod(tenantIds, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  // Site attribution inputs (see primarySiteId): per-site bags behind each
+  // worker's total, per-site clock-in days, and site names across ALL tenants
+  // in scope. The combined run previously carried no site information at all,
+  // which piled every line under "No production site" in the UI.
+  const bagSites = await siteSplit(tenantIds, from, to, override);
+  const attSites = await attendanceSiteSplit(tenantIds, from, to);
+  const siteNames = await siteNamesFor(tenantIds);
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id IN (${ph}) AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [...tenantIds, to]);
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
@@ -863,6 +922,25 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
       advance += advBy[id] || 0;
     }
     for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; g += pb.g; } }
+    // Merge the members' per-site bag splits (same bagIds as the totals, so
+    // the breakdown always adds up to the figure being paid) and their
+    // per-site clock-in days, then attribute the person to ONE site.
+    const siteBags = {};
+    for (const id of bagIds) {
+      for (const s of (bagSites[id] || [])) {
+        const k = String(s.site_id || '');
+        const acc = siteBags[k] || (siteBags[k] = { site_id: s.site_id, site_name: s.site_name, loaded: 0, bagged: 0 });
+        acc.loaded = round2(acc.loaded + (Number(s.loaded) || 0));
+        acc.bagged = round2(acc.bagged + (Number(s.bagged) || 0));
+      }
+    }
+    const bySiteMerged = Object.values(siteBags).sort((a, b) => String(a.site_name).localeCompare(String(b.site_name)));
+    const siteDays = {};
+    for (const id of memberIds) {
+      for (const a of (attSites[id] || [])) siteDays[a.site_id] = (siteDays[a.site_id] || 0) + a.days;
+    }
+    const attMerged = Object.keys(siteDays).map((sid) => ({ site_id: sid, days: siteDays[sid] }));
+    const primary = primarySiteId(bySiteMerged, attMerged, head.site_id);
     const days = dayset.size;
     const pt = (head.pay_type || '').toUpperCase();
     let gross;
@@ -873,6 +951,8 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
       bags_loaded: l, bags_bagged: g, gross: round2(gross), advance: round2(advance),
+      by_site: bySiteMerged,
+      site_id: primary, site_name: primary ? (siteNames[primary] || null) : null,
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
       tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
     };

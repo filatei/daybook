@@ -1803,7 +1803,9 @@ router.post('/staff', requireAuth, needTenant('SECRETARY'), async (req, res) => 
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, req.ctx.tenant_id, site_id, b.full_name.trim(), role_title, b.phone || null, pay_type, staff_type,
         b.department || null, b.bank_name || null, b.bank_account || null,
-        +b.daily_rate || 0, +b.rate_loaded || 0, +b.rate_bagged || 0, newBadgeCode(), b.ext_people_id || null]);
+        +b.daily_rate || 0, +b.rate_loaded || 0, +b.rate_bagged || 0, newBadgeCode(),
+        // Every staff gets a Staff ID at birth — it is how spreadsheets address them.
+        b.ext_people_id || ('S' + uuid().replace(/-/g, '').slice(0, 8).toUpperCase())]);
   } catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
   await audit(req.ctx.tenant_id, req.user.id, 'STAFF_ADD', 'staff', id, { full_name: b.full_name, staff_type });
   res.status(201).json(await qone('SELECT * FROM staff WHERE id=?', [id]));

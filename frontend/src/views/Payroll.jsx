@@ -57,6 +57,10 @@ function AdvanceForm({ staff, onSaved, onClose }) {
     <div>
       <div className="grip" />
       <h3>Advance — {staff.full_name}</h3>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '4px 0 10px' }}>
+        An advance is money given to this person <b>now</b>. It is automatically proposed as a
+        <b> deduction</b> on their next computed payroll (you can still adjust it before saving).
+      </p>
       <p className="sub">Deducted from their next payroll automatically.</p>
       <label className="fl">Amount (₦)</label>
       <input type="number" className="input" value={amount} onChange={(e) => setAmount(e.target.value)} />
@@ -200,6 +204,36 @@ function RunTab({ sites, onSaved }) {
     setBusy(false);
   };
   const setDedById = (id, v) => setLines((p) => p.map((l) => (l.staff_id === id ? { ...l, deduction: v } : l)));
+  // Deductions sheet (STAFF ID + DEDUCTION): server resolves IDs, we apply the
+  // amounts to the computed lines on screen. Combined lines are matched through
+  // their member_ids, so a person merged across Fido + Fiafia still resolves.
+  const [uploadingDed, setUploadingDed] = useState(false);
+  const uploadDeductions = async (file) => {
+    if (!file || !lines) return;
+    setUploadingDed(true);
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await api(scopedAny('/payroll/deductions-parse'), { method: 'POST', form: fd });
+      const byStaff = {};
+      for (const it of (r.items || [])) byStaff[it.staff_id] = (byStaff[it.staff_id] || 0) + it.amount;
+      let applied = 0, noLine = 0;
+      setLines((prev) => prev.map((l) => {
+        const ids = Array.isArray(l.member_ids) && l.member_ids.length ? l.member_ids : [l.staff_id];
+        let sum = 0, hit = false;
+        for (const id of ids) if (byStaff[id] != null) { sum += byStaff[id]; hit = true; delete byStaff[id]; }
+        if (!hit) return l;
+        applied++;
+        return { ...l, deduction: Math.round(sum * 100) / 100 };
+      }));
+      noLine = Object.keys(byStaff).length;
+      const problems = [];
+      if (r.unmatched?.length) problems.push(`${r.unmatched.length} unknown Staff ID(s): ${r.unmatched.slice(0, 5).join(', ')}${r.unmatched.length > 5 ? '…' : ''}`);
+      if (r.name_mismatch?.length) problems.push(`${r.name_mismatch.length} name/ID mismatch(es): ${r.name_mismatch[0]}${r.name_mismatch.length > 1 ? ' …' : ''}`);
+      if (noLine) problems.push(`${noLine} staff not in this computed run`);
+      toast(`Deductions applied to ${applied} line(s)${problems.length ? ' · ⚠ ' + problems.join(' · ') : ''}`, problems.length ? 'err' : 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    setUploadingDed(false);
+  };
   const net = (l) => Math.max(0, (l.gross || 0) - (+l.deduction || 0));
   const openDetail = (l) => openModal(
     <StaffPayDetail line={l} from={from} to={to} onClose={closeModal} onDeduction={(amt) => setDedById(l.staff_id, amt)} />);
@@ -353,6 +387,12 @@ function RunTab({ sites, onSaved }) {
             </div>
 
             <div style={{ display: 'flex', gap: 8, margin: '8px 0', flexWrap: 'wrap' }}>
+              <label className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '8px 14px', cursor: 'pointer' }}
+                title="Excel with STAFF ID + DEDUCTION columns — amounts are applied to the lines below for review before saving">
+                {uploadingDed ? <span className="spin" /> : '⬆ Deductions (Excel)'}
+                <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={uploadingDed}
+                  onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadDeductions(f); }} />
+              </label>
               <input className="input" style={{ flex: '1 1 180px' }} placeholder="Search name or site (e.g. Mbiama)…" value={q} onChange={(e) => setQ(e.target.value)} />
               <button className={`btn btn-sm ${bySiteView ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '8px 14px' }}
                 onClick={() => { setBySiteView((v) => !v); if (!bySiteView) setOpenSites(Object.fromEntries(siteNames.map((s) => [s, true]))); }}>
@@ -1264,6 +1304,23 @@ function SetupTab({ sites }) {
   };
 
   const [importingStaff, setImportingStaff] = useState(false);
+  const [importingSalaries, setImportingSalaries] = useState(false);
+  const importSalaries = async (file) => {
+    if (!file) return;
+    setImportingSalaries(true);
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await api(scopedAny('/payroll/salaries-import'), { method: 'POST', form: fd });
+      const problems = [];
+      if (r.unmatched?.length) problems.push(`${r.unmatched.length} unknown Staff ID(s): ${r.unmatched.slice(0, 5).join(', ')}${r.unmatched.length > 5 ? '…' : ''}`);
+      if (r.name_mismatch?.length) problems.push(`${r.name_mismatch.length} name/ID mismatch(es): ${r.name_mismatch[0]}${r.name_mismatch.length > 1 ? ' …' : ''}`);
+      if (r.skipped_piece?.length) problems.push(`${r.skipped_piece.length} bagger/loader row(s) skipped (paid per bag, not salary)`);
+      toast(`Salaries: ${r.updated} updated, ${r.unchanged} already current${problems.length ? ' · ⚠ ' + problems.join(' · ') : ''}`,
+            problems.length ? 'err' : 'ok');
+      load();
+    } catch (e) { toast(e.message, 'err'); }
+    setImportingSalaries(false);
+  };
   const importStaff = async (file) => {
     if (!file) return;
     setImportingStaff(true);
@@ -1352,6 +1409,25 @@ function SetupTab({ sites }) {
         );
       })()}
       <SheetOverrideCard />
+      {/* Bulk MONTHLY salaries by Staff ID. Update-only and keyed by the unique
+          Staff ID, so unlike the roster import it works under Group too. */}
+      <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
+        <strong style={{ display: 'block', marginBottom: 2 }}>Monthly salaries (Excel)</strong>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+          Download the prefilled sheet (every regular staff with their <b>Staff ID</b> and current salary),
+          edit the <b>MONTHLY SALARY</b> column, and upload. Staff ID is the only matching key — a row whose
+          name doesn't match its ID is rejected for review, never guessed.
+        </span>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <button className="btn btn-ghost btn-sm" style={{ flex: 1 }}
+            onClick={() => downloadFile(scopedAny('/payroll/salaries-template.xlsx'), 'salaries-template.xlsx').catch((e) => toast(e.message || 'Download failed', 'err'))}>⬇ Salaries sheet</button>
+          <label className="btn btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
+            {importingSalaries ? <span className="spin" /> : '⬆ Upload salaries'}
+            <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importingSalaries}
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importSalaries(f); }} />
+          </label>
+        </div>
+      </div>
       {/* Import creates staff in ONE workspace — the Group roll-up has no single
           workspace to own them, so it is offered only inside Fido or Fiafia. */}
       <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
@@ -1385,7 +1461,7 @@ function SetupTab({ sites }) {
         .map(({ r, i }) => (
         <div key={r.id} className="card" style={{ padding: '10px 14px', marginBottom: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <strong>{r.full_name}</strong>
+            <strong>{r.full_name} {r.ext_people_id ? <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>· ID {r.ext_people_id}</span> : null}</strong>
             <select className="input" style={{ width: 'auto', padding: '4px 8px' }} value={r.pay_type || 'DAILY'} onChange={(e) => setVal(i, 'pay_type', e.target.value)}>
               <option value="DAILY">Daily (regular)</option>
               <option value="MONTHLY">Monthly (fixed salary)</option>
@@ -1401,7 +1477,9 @@ function SetupTab({ sites }) {
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
             <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 14px' }} onClick={() => save(r)}>Save</button>
-            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => openModal(<AdvanceForm staff={r} onClose={closeModal} />)}>+ Advance</button>
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+              title="Money given to this person now — automatically proposed as a deduction on their next payroll"
+              onClick={() => openModal(<AdvanceForm staff={r} onClose={closeModal} />)}>+ Advance (deducts from next pay)</button>
           </div>
         </div>
       ))}

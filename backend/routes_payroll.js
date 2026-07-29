@@ -451,7 +451,7 @@ router.get('/pay-config', requireAuth, async (req, res) => {
   const sc = scopeSql(c);   // Group roll-up lists the roster of every workspace
   const where = [sc.sql, "status='ACTIVE'"], args = [...sc.args];
   if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
-  res.json(await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
+  res.json(await qall(`SELECT id, ext_people_id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
     FROM staff WHERE ${where.join(' AND ')} ORDER BY full_name`, args));
 });
 router.patch('/pay-config/:id', requireAuth, async (req, res) => {
@@ -1141,7 +1141,8 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
       if (!siteId) { skippedNoSite.push(full || id); return; }
       await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,staff_type,pay_type,daily_rate,bank_name,bank_account,ext_people_id,status)
         VALUES (?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE')`,
-        [uuid(), c.tenant_id, siteId, full, designation, staffType, payType, baseSalary, bankName, bankAcct, id || null]);
+        [uuid(), c.tenant_id, siteId, full, designation, staffType, payType, baseSalary, bankName, bankAcct,
+          id || ('S' + uuid().replace(/-/g, '').slice(0, 8).toUpperCase())]);
       created += 1;
     }
   };
@@ -1153,6 +1154,142 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
     for (const r of rows) await upsert(r, staffType);
   }
   res.json({ created, updated, sites_unmatched: Array.from(noSite), skipped_no_site: skippedNoSite });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MONTH-END STREAMLINING — bulk sheets keyed by STAFF ID (2026-07-29)
+//
+// The Staff ID (ext_people_id — every staff row has one since the Phase 10
+// backfill; it is printed on every template) is the ONLY matching key in these
+// sheets. Names are a SAFETY CHECK, never a matcher: a row whose NAME clearly
+// disagrees with the record behind its Staff ID is rejected for review instead
+// of silently paying the wrong person.
+// ═══════════════════════════════════════════════════════════════════════════════
+const normPersonName = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const nameClash = (sheetName, dbName) => {
+  const a = normPersonName(sheetName), b = normPersonName(dbName);
+  if (!a) return false;                       // no name supplied -> trust the ID
+  return a !== b && a.indexOf(b) < 0 && b.indexOf(a) < 0;
+};
+function firstSheetRows(buffer) {
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  const name = wb.SheetNames[0];
+  return name ? XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' }) : [];
+}
+const cellOf = (row) => {
+  const norm = (k) => String(k || '').trim().toUpperCase();
+  return (names) => { for (const k of Object.keys(row)) if (names.includes(norm(k))) return row[k]; return undefined; };
+};
+const numCell = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[, ]/g, '')); return isNaN(n) ? null : n; };
+
+// Resolve one Staff ID within the request's tenant scope. Returns
+// { staff } | { error: 'unmatched' | 'ambiguous' }.
+async function staffByExtId(c, extId) {
+  const idv = String(extId ?? '').replace(/\.0$/, '').trim();
+  if (!idv) return { error: 'unmatched' };
+  const sc = scopeSql(c);
+  const rows = await qall(`SELECT * FROM staff WHERE ${sc.sql} AND ext_people_id=?`, [...sc.args, idv]);
+  if (rows.length === 0) return { error: 'unmatched' };
+  if (rows.length > 1) return { error: 'ambiguous' };
+  return { staff: rows[0] };
+}
+
+// ── Salaries template: current roster, prefilled, ready to edit ────────────────
+// Group-aware: one workbook covers Fido + Fiafia. Piece workers are excluded -
+// they are paid per bag, not a salary.
+router.get('/salaries-template.xlsx', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const sc = scopeSql(c, 's.tenant_id');
+  const staff = await qall(`SELECT s.ext_people_id, s.full_name, s.pay_type, s.daily_rate,
+      si.name site_name, t.name tenant_name
+    FROM staff s LEFT JOIN sites si ON si.id=s.site_id JOIN tenants t ON t.id=s.tenant_id
+    WHERE ${sc.sql} AND s.status='ACTIVE' AND ${PAYROLL_ELIGIBLE_S}
+      AND NOT ${PIECE_WORKER_S}
+    ORDER BY t.name, s.full_name`, sc.args);
+  const rows = staff.map((st, i) => ({
+    'S/N': i + 1,
+    'STAFF ID': st.ext_people_id || '',
+    NAME: st.full_name,
+    COMPANY: st.tenant_name,
+    SITE: st.site_name || '',
+    'MONTHLY SALARY': String(st.pay_type || '').toUpperCase() === 'MONTHLY' ? (Number(st.daily_rate) || 0) : '',
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows,
+    { header: ['S/N', 'STAFF ID', 'NAME', 'COMPANY', 'SITE', 'MONTHLY SALARY'] }), 'SALARIES');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="salaries-template.xlsx"');
+  res.send(buf);
+});
+
+// ── Bulk salary upload: STAFF ID + MONTHLY SALARY, updates only ────────────────
+// Never creates staff (that is staff-import's job) and never touches piece
+// workers, so it is safe under the Group roll-up: a unique Staff ID names one
+// person in one workspace, wherever the accountant happens to be.
+router.post('/salaries-import', requireAuth, xlsUpload.single('file'), async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
+  let rows;
+  try { rows = firstSheetRows(req.file.buffer); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
+
+  let updated = 0, unchanged = 0;
+  const unmatched = [], nameMismatch = [], skippedPiece = [], ambiguous = [];
+  for (const row of rows) {
+    const get = cellOf(row);
+    const extId = String(get(['STAFF ID', 'ID', 'EXT ID', 'STAFFID']) ?? '').replace(/\.0$/, '').trim();
+    const salary = numCell(get(['MONTHLY SALARY', 'SALARY', 'BASE SALARY', 'AMOUNT']));
+    if (!extId && salary == null) continue;    // blank row
+    if (!extId || salary == null || salary < 0) { unmatched.push(extId || '(no id)'); continue; }
+    const r = await staffByExtId(c, extId);
+    if (r.error === 'unmatched') { unmatched.push(extId); continue; }
+    if (r.error === 'ambiguous') { ambiguous.push(extId); continue; }
+    const st = r.staff;
+    if (isPieceWorker(st)) { skippedPiece.push(`${extId} ${st.full_name}`); continue; }
+    const sheetName = get(['NAME', 'FULL NAME', 'STAFF NAME']);
+    if (nameClash(sheetName, st.full_name)) {
+      nameMismatch.push(`${extId}: sheet says "${String(sheetName).trim()}", record is "${st.full_name}"`);
+      continue;                                // wrong ID until a human says otherwise
+    }
+    if (String(st.pay_type || '').toUpperCase() === 'MONTHLY' && Number(st.daily_rate) === salary) { unchanged++; continue; }
+    await qrun("UPDATE staff SET pay_type='MONTHLY', daily_rate=? WHERE id=?", [salary, st.id]);
+    updated++;
+  }
+  await audit(c.tenant_id, req.user.id, 'PAYROLL_SALARIES_IMPORT', 'staff', null,
+    { updated, unchanged, unmatched: unmatched.length, name_mismatch: nameMismatch.length, skipped_piece: skippedPiece.length });
+  res.json({ updated, unchanged, unmatched, ambiguous, name_mismatch: nameMismatch, skipped_piece: skippedPiece });
+});
+
+// ── Deductions sheet: STAFF ID + DEDUCTION, parsed for a run in progress ───────
+// PARSE ONLY - nothing is written here. The Run tab applies the amounts to the
+// computed lines on screen, the accountant reviews them, and Save persists the
+// draft. Money only moves through the same reviewed path it always did.
+router.post('/deductions-parse', requireAuth, xlsUpload.single('file'), async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
+  let rows;
+  try { rows = firstSheetRows(req.file.buffer); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
+
+  const items = [];
+  const unmatched = [], nameMismatch = [], ambiguous = [];
+  for (const row of rows) {
+    const get = cellOf(row);
+    const extId = String(get(['STAFF ID', 'ID', 'EXT ID', 'STAFFID']) ?? '').replace(/\.0$/, '').trim();
+    const amount = numCell(get(['DEDUCTION', 'DEDUCTIONS', 'AMOUNT', 'SALARY ADV', 'ADVANCE']));
+    if (!extId && amount == null) continue;
+    if (!extId || amount == null || amount < 0) { unmatched.push(extId || '(no id)'); continue; }
+    const r = await staffByExtId(c, extId);
+    if (r.error === 'unmatched') { unmatched.push(extId); continue; }
+    if (r.error === 'ambiguous') { ambiguous.push(extId); continue; }
+    const st = r.staff;
+    const sheetName = get(['NAME', 'FULL NAME', 'STAFF NAME']);
+    if (nameClash(sheetName, st.full_name)) {
+      nameMismatch.push(`${extId}: sheet says "${String(sheetName).trim()}", record is "${st.full_name}"`);
+      continue;
+    }
+    items.push({ staff_id: st.id, ext_id: extId, full_name: st.full_name, amount: round2(amount) });
+  }
+  res.json({ items, unmatched, ambiguous, name_mismatch: nameMismatch });
 });
 
 // ── Per-staff payroll breakdown (drill-down) — Snr Accountant+ ─────────────────

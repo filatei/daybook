@@ -1578,6 +1578,20 @@ async function migrate() {
     ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS prorate_monthly BOOLEAN DEFAULT TRUE;
   `);
 
+  // ── Phase 10: every staff member gets a permanent Staff ID ───────────────────
+  // ext_people_id doubles as the human-facing "Staff ID" used to identify a
+  // person in every payroll spreadsheet (salaries, deductions, run imports).
+  // ETL-imported staff already carry their Mongo people id; staff created
+  // inside Daybook had NULL, which made them unaddressable by ID. Backfill a
+  // stable derived ID (S + 8 hex of md5(uuid)); the second statement widens
+  // the astronomically-unlikely collision pair to 12 hex.
+  await pool.query(`
+    UPDATE staff SET ext_people_id = 'S' || UPPER(SUBSTRING(MD5(id) FROM 1 FOR 8))
+      WHERE COALESCE(ext_people_id, '') = '';
+    UPDATE staff s SET ext_people_id = 'S' || UPPER(SUBSTRING(MD5(s.id) FROM 1 FOR 12))
+      WHERE EXISTS (SELECT 1 FROM staff x WHERE x.ext_people_id = s.ext_people_id AND x.id <> s.id);
+  `);
+
   // ── Phase 9: Inventory — raw-material/stock catalogue + signed movements ──────
   // on-hand = SUM(stock_moves.qty). RECEIVE = +qty, ISSUE = -qty, ADJUST = signed.
   // A receive may link to an expense_id (vendor payable) created at the same time.

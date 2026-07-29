@@ -744,6 +744,7 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
     else gross = days * (s.daily_rate || 0);   // daily wage
     const primary = primarySiteId(bySite[s.id], attSites[s.id], s.site_id);
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
+      zero_reason: zeroReason(gross, pt, pb, days, s.daily_rate, rates),
       days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
       by_site: bySite[s.id] || [],
       site_id: primary, site_name: primary ? (siteNames[primary] || null) : null,
@@ -840,6 +841,24 @@ async function siteNamesFor(tenantIds) {
   const rows = await qall(`SELECT id, name FROM sites WHERE tenant_id IN (${ph})`, ids);
   const m = {}; for (const r of rows) m[r.id] = r.name;
   return m;
+}
+
+// Why did this person compute to zero? Answered PER LINE so the "Not paid
+// this period — review" list is a work queue instead of a mystery. The July
+// 2026 combined run put every Fiafia REGULAR staffer here with nothing to say
+// why — the answer (no clock-ins captured, or no daily rate configured) was
+// invisible without SQL. Returns null when the person was actually paid.
+function zeroReason(gross, pt, bags, days, dailyRate, rates) {
+  if (gross > 0) return null;
+  const isPiece = pt === 'PIECE';
+  if (isPiece) {
+    if ((bags.l + bags.g) <= 0) return 'NO_BAGS';
+    return 'RATE_ZERO'; // bags exist but the shared per-bag rates are zero
+  }
+  const parts = [];
+  if (days <= 0) parts.push('NO_CLOCKINS');
+  if ((Number(dailyRate) || 0) <= 0) parts.push('NO_RATE');
+  return parts.length ? parts.join('+') : 'ZERO';
 }
 
 // SITE ATTRIBUTION RULE (business decision, 2026-07-29): every payroll line
@@ -949,6 +968,7 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     else gross = days * (head.daily_rate || 0);
     const line = {
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
+      zero_reason: zeroReason(round2(gross), pt, { l, g }, days, head.daily_rate, rates),
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
       bags_loaded: l, bags_bagged: g, gross: round2(gross), advance: round2(advance),
       by_site: bySiteMerged,

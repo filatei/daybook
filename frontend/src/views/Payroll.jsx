@@ -299,11 +299,25 @@ function RunTab({ sites, onSaved }) {
         const paid = lines.filter((l) => (l.gross || 0) > 0 && match(l));
         const others = lines.filter((l) => (l.gross || 0) <= 0 && match(l));
 
+        // Why a zero line is zero, in the accountant's language — turns the
+        // review list into a work queue (fix rates vs fix clock-ins vs bags).
+        const ZERO_LABELS = {
+          NO_BAGS: 'no bags recorded',
+          RATE_ZERO: 'per-bag rate is zero',
+          NO_CLOCKINS: 'no clock-ins in period',
+          NO_RATE: 'no daily rate set',
+          ZERO: 'computed to zero',
+        };
+        const zeroLabel = (l) => (l.zero_reason
+          ? l.zero_reason.split('+').map((r) => ZERO_LABELS[r] || r.toLowerCase()).join(' · ')
+          : null);
+
         const rowBtn = (l) => {
           // title · site line: the primary production site (or home site fallback).
           const site = primarySite(l);
           const title = (l.role_title || l.pay_type || '').toString();
-          const meta = [title, site !== '—' ? site : null].filter(Boolean).join(' · ');
+          const reason = (l.gross || 0) <= 0 ? zeroLabel(l) : null;
+          const meta = [title, site !== '—' ? site : null, reason].filter(Boolean).join(' · ');
           return (
             <button key={l.staff_id} onClick={() => openDetail(l)}
               style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--line)', background: 'transparent', border: 'none', borderBottomStyle: 'solid', textAlign: 'left', cursor: 'pointer' }}>

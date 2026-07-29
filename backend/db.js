@@ -1568,6 +1568,16 @@ async function migrate() {
     ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS bags_source TEXT;
   `);
 
+  // ── Phase 9: optional monthly-salary proration, chosen per run ───────────────
+  await pool.query(`
+    -- TRUE/NULL = monthly salaries prorated by clock-in days over the period's
+    -- Mon-Sat working days (original behaviour). FALSE = monthly staff are paid
+    -- their full salary regardless of attendance — chosen on the Run tab.
+    -- Persisted ON THE RUN so later line edits and Excel re-imports recompute
+    -- gross the same way the run was previewed and approved.
+    ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS prorate_monthly BOOLEAN DEFAULT TRUE;
+  `);
+
   // ── Phase 9: Inventory — raw-material/stock catalogue + signed movements ──────
   // on-hand = SUM(stock_moves.qty). RECEIVE = +qty, ISSUE = -qty, ADJUST = signed.
   // A receive may link to an expense_id (vendor payable) created at the same time.

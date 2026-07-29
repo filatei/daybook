@@ -709,7 +709,7 @@ async function overrideForPeriod(from, to, kind) {
     ORDER BY created_at DESC, id DESC LIMIT 1`, [from, to, k]);
 }
 
-async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false) {
+async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false, prorateMonthly = true) {
   // Default follows the run kind: a piece-only run is a mid-month run.
   rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const sWhere = ['tenant_id=?', "status='ACTIVE'", "UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'",
@@ -739,8 +739,10 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
     const pt = (s.pay_type || '').toUpperCase();
     let gross;
     if (pt === 'PIECE') gross = pb.l * rates.loaded + pb.g * rates.bagged;
-    // Monthly staff earn a FIXED salary, prorated by attendance over the period.
-    else if (pt === 'MONTHLY') gross = (s.daily_rate || 0) * (days / periodDays);
+    // Monthly staff earn a FIXED salary — prorated by attendance over the
+    // period's Mon-Sat working days, unless this run pays full salaries
+    // (prorate_monthly=false, chosen on the Run tab).
+    else if (pt === 'MONTHLY') gross = prorateMonthly ? (s.daily_rate || 0) * (days / periodDays) : (s.daily_rate || 0);
     else gross = days * (s.daily_rate || 0);   // daily wage
     const primary = primarySiteId(bySite[s.id], attSites[s.id], s.site_id);
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
@@ -887,7 +889,7 @@ function primarySiteId(bagSplit, attSplit, homeSiteId) {
 // person into one payslip. Identity = normalized name + bank account (name-only
 // when no account on file). Piece pay uses the shared per-bag rates; monthly pay
 // is prorated by DISTINCT days clocked-in across all the person's tenants.
-async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = false) {
+async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = false, prorateMonthly = true) {
   rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (!tenantIds.length) return [];
   const ph = tenantIds.map(() => '?').join(',');
@@ -964,7 +966,7 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     const pt = (head.pay_type || '').toUpperCase();
     let gross;
     if (pt === 'PIECE') gross = l * rates.loaded + g * rates.bagged;
-    else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
+    else if (pt === 'MONTHLY') gross = prorateMonthly ? (head.daily_rate || 0) * (days / periodDays) : (head.daily_rate || 0);
     else gross = days * (head.daily_rate || 0);
     const line = {
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
@@ -991,15 +993,18 @@ router.post('/compute2', requireAuth, async (req, res) => {
   // Mid-month pays per-bag commission only — REGULAR (monthly-salary) staff have
   // nothing to earn in it and must not appear. They are paid at month-end.
   const pieceOnly = (req.body || {}).piece_only === true;
+  // Monthly salaries prorate by clock-in days unless the accountant unticks
+  // it for this run (pay full salary regardless of attendance).
+  const prorateMonthly = (req.body || {}).prorate_monthly !== false;
   // Rate pair must match the run: mid-month = ₦1 incentive, month-end = ₦6 full.
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (combined) {
     const group = await payrollGroup(req.user, c.tenant_id, c);
-    const lines = await computeCombinedLines(group, from, to, rates, pieceOnly);
-    return res.json({ from, to, combined: true, piece_only: pieceOnly, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+    const lines = await computeCombinedLines(group, from, to, rates, pieceOnly, prorateMonthly);
+    return res.json({ from, to, combined: true, piece_only: pieceOnly, prorate_monthly: prorateMonthly, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
   }
-  const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly);
-  res.json({ from, to, piece_only: pieceOnly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+  const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly, prorateMonthly);
+  res.json({ from, to, piece_only: pieceOnly, prorate_monthly: prorateMonthly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
 });
 
 // ── Excel template download (Fido-shaped: REGULAR / BAGGERS / LOADERS) ─────────
@@ -1012,10 +1017,11 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   const combined = req.query.combined === '1' || req.query.combined === 'true';
   // Mid-month: piece workers only, so the REGULAR sheet is omitted entirely.
   const pieceOnly = req.query.piece_only === '1' || req.query.piece_only === 'true';
+  const prorateMonthly = !(req.query.prorate_monthly === '0' || req.query.prorate_monthly === 'false');
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
-    : await computeLines(c.tenant_id, from, to, null, rates, pieceOnly);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly, prorateMonthly)
+    : await computeLines(c.tenant_id, from, to, null, rates, pieceOnly, prorateMonthly);
   const ids = lines.map((l) => l.staff_id).filter(Boolean);
   const sBy = {};
   if (ids.length) {
@@ -1230,10 +1236,11 @@ router.post('/runs2', requireAuth, async (req, res) => {
   // Must mirror the compute2 call the accountant previewed, or the saved draft
   // would quietly differ from what they approved on screen.
   const pieceOnly = b.piece_only === true;
+  const prorateMonthly = b.prorate_monthly !== false;
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
-    : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly, prorateMonthly)
+    : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly, prorateMonthly);
   const runId = uuid();
   // Which override batch (if any) fed this run. Recorded ON THE RUN because the
   // batch can later be removed, and an approved payroll whose numbers cannot be
@@ -1244,9 +1251,9 @@ router.post('/runs2', requireAuth, async (req, res) => {
     // Persist WHICH run this is. Without it the draft looks REGULAR, and any later
     // line edit or Excel re-import would recompute a ₦1 mid-month run at the ₦6
     // full rate — a silent 6x overpay.
-    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?,?)`,
+    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,prorate_monthly,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?,?,?)`,
       [runId, c.tenant_id, combined ? null : site, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR',
-        usedOverride ? usedOverride.id : null, req.user.id]);
+        usedOverride ? usedOverride.id : null, prorateMonthly, req.user.id]);
     for (const l of lines) {
       if (l.gross <= 0) continue; // never save a zero payslip line
       const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
@@ -1320,7 +1327,11 @@ router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
   const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
   let gross;
   if (pt === 'PIECE') gross = loaded * rates.loaded + bagged * rates.bagged;
-  else if (pt === 'MONTHLY') gross = (Number(st?.daily_rate) || 0) * (days / periodDays);
+  // Honour the run's own proration choice — a full-salary run must not be
+  // silently re-prorated by a later line edit.
+  else if (pt === 'MONTHLY') gross = (run.prorate_monthly === false)
+    ? (Number(st?.daily_rate) || 0)
+    : (Number(st?.daily_rate) || 0) * (days / periodDays);
   else gross = days * (Number(st?.daily_rate) || 0);
   gross = round2(gross);
   const ded = Math.min(gross, deduction);
@@ -1400,7 +1411,9 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
         const st = await qone('SELECT daily_rate FROM staff WHERE id=?', [staffId]);
         rate = Number(st?.daily_rate) || 0;
       }
-      gross = pt === 'MONTHLY' ? rate * (days / periodDays) : days * rate;
+      gross = pt === 'MONTHLY'
+        ? (run.prorate_monthly === false ? rate : rate * (days / periodDays))
+        : days * rate;
     }
     gross = round2(gross);
     const d2 = Math.min(gross, Math.max(0, ded != null ? ded : Number(line.deductions) || 0));
@@ -1472,11 +1485,14 @@ router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
   if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be recomputed' });
   const pieceOnly = run.kind === 'MIDMONTH';
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  // Honour the run's own proration choice, exactly like the line-edit and
+  // Excel-import paths — a full-salary draft must recompute as full-salary.
+  const prorateMonthly = run.prorate_monthly !== false;
   // site_id NULL on a saved run means it was combined across the group.
   const combined = !run.site_id;
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, run.tenant_id, c), run.period_from, run.period_to, rates, pieceOnly)
-    : await computeLines(run.tenant_id, run.period_from, run.period_to, run.site_id, rates, pieceOnly);
+    ? await computeCombinedLines(await payrollGroup(req.user, run.tenant_id, c), run.period_from, run.period_to, rates, pieceOnly, prorateMonthly)
+    : await computeLines(run.tenant_id, run.period_from, run.period_to, run.site_id, rates, pieceOnly, prorateMonthly);
   let tg = 0, td = 0, tn = 0, n = 0;
   await withTransaction(async () => {
     await qrun('UPDATE staff_advances SET run_id=NULL WHERE run_id=?', [run.id]);

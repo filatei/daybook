@@ -158,6 +158,9 @@ function RunTab({ sites, onSaved }) {
   // workspace to fall back to, so the toggle is forced on and hidden.
   const [combinedRaw, setCombined] = useState(true); // Fido + Fiafia in one run
   const combined = isGroup ? true : combinedRaw;
+  // Monthly salaries: prorate by clock-in days over Mon-Sat working days
+  // (default), or pay the full salary regardless of attendance.
+  const [prorate, setProrate] = useState(true);
   const [lines, setLines] = useState(null);
   // The override batch behind this period, if any — shown as a banner so the run
   // cannot be approved without knowing the bags came from a spreadsheet.
@@ -186,7 +189,7 @@ function RunTab({ sites, onSaved }) {
     if (from > to) return toast('“From” is after “To”', 'err');
     setBusy(true); setErr(null); setLines(null); setOverride(null);
     try {
-      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly } });
+      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly, prorate_monthly: prorate } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 })));
       setOverride(r.override || null);
       if (!r.lines.length) toast('No one to pay for this period', 'err');
@@ -218,7 +221,7 @@ function RunTab({ sites, onSaved }) {
     setBusy(true);
     try {
       const deductions = {}; lines.forEach((l) => { deductions[l.staff_id] = +l.deduction || 0; });
-      await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly } });
+      await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly, prorate_monthly: prorate } });
       toast('Payroll saved as draft ✓', 'ok'); setLines(null); setOverride(null); onSaved && onSaved();
     } catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -270,8 +273,12 @@ function RunTab({ sites, onSaved }) {
           Combined payroll (Fido + Fiafia in one run; same person merged)
         </label>
       )}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
+        <input type="checkbox" checked={prorate} onChange={(e) => setProrate(e.target.checked)} />
+        Prorate monthly salaries by clock-in days (Mon–Sat working days) — untick to pay full salaries regardless of attendance
+      </label>
       <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
-        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}&prorate_monthly=${prorate ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
         ⬇ Excel template (Regular / Baggers / Loaders)
       </button>
 
@@ -383,14 +390,39 @@ function RunTab({ sites, onSaved }) {
                 })
                 : <div className="card" style={{ padding: 0, overflow: 'hidden' }}>{paid.map(rowBtn)}</div>}
 
-            {others.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setShowOthers((v) => !v)}>
-                  {showOthers ? '▾' : '▸'} Not paid this period ({others.length}) — review
-                </button>
-                {showOthers && <div className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 6 }}>{others.map(rowBtn)}</div>}
-              </div>
-            )}
+            {others.length > 0 && (() => {
+              // The review list is a WORK QUEUE (fix rates / fix clock-ins), so it
+              // gets the same tools as the paid list: the search box above already
+              // filters it, searching auto-opens it, and it groups by site with
+              // the same toggle. Group keys are prefixed so collapsing a review
+              // site doesn't collapse the same site's paid group.
+              const reviewOpen = showOthers || !!term;
+              const reviewSites = Array.from(new Set(others.map((l) => primarySite(l))))
+                .sort((a, b) => (a === '—' ? 1 : b === '—' ? -1 : String(a).localeCompare(String(b))));
+              return (
+                <div style={{ marginTop: 10 }}>
+                  <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setShowOthers((v) => !v)}>
+                    {reviewOpen ? '▾' : '▸'} Not paid this period ({others.length}) — review
+                    {term && !showOthers ? ' · matching your search' : ''}
+                  </button>
+                  {reviewOpen && (bySiteView
+                    ? reviewSites.map((s) => {
+                      const rows = others.filter((l) => primarySite(l) === s);
+                      const open = openSites[`r:${s}`] ?? true;
+                      return (
+                        <div key={`r:${s}`} className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 6 }}>
+                          <button onClick={() => toggleSite(`r:${s}`)}
+                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', border: 'none', background: '#f8fafc', padding: '11px 14px', cursor: 'pointer', textAlign: 'left', borderBottom: open ? '1px solid var(--line)' : 'none' }}>
+                            <strong>{open ? '▾' : '▸'} {s === '—' ? 'No site' : s} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {rows.length}</span></strong>
+                          </button>
+                          {open && rows.map(rowBtn)}
+                        </div>
+                      );
+                    })
+                    : <div className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 6 }}>{others.map(rowBtn)}</div>)}
+                </div>
+              );
+            })()}
 
             {paid.length > 0 && (
               <button className="btn" style={{ marginTop: 10 }} onClick={save} disabled={busy}>{busy ? <span className="spin" /> : '💾'} Save payroll (draft)</button>

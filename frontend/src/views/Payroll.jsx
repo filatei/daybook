@@ -188,12 +188,19 @@ function RunTab({ sites, onSaved }) {
   // `err` is kept on screen. A toast alone is missed: a failed compute answers in
   // ~40ms, so the spinner never registers and the page looks like nothing happened.
   const [err, setErr] = useState(null);
-  const run = async () => {
-    if (!from || !to) return toast('Pick both dates first', 'err');
-    if (from > to) return toast('“From” is after “To”', 'err');
+  const run = async (fromArg, toArg, opts) => {
+    // Explicit args beat state: the one-shot flow computes for the period it
+    // just read off the sheet, before React state has re-rendered. Guarded to
+    // strings because onClick={run} passes the click event as the first arg.
+    const F = typeof fromArg === 'string' ? fromArg : from;
+    const T = typeof toArg === 'string' ? toArg : to;
+    const prorateNow = opts && typeof opts.prorate === 'boolean' ? opts.prorate : prorate;
+    const pieceNow = opts && typeof opts.pieceOnly === 'boolean' ? opts.pieceOnly : pieceOnly;
+    if (!F || !T) return toast('Pick both dates first', 'err');
+    if (F > T) return toast('“From” is after “To”', 'err');
     setBusy(true); setErr(null); setLines(null); setOverride(null);
     try {
-      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly, prorate_monthly: prorate } });
+      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from: F, to: T, site: combined ? undefined : (site || undefined), combined, piece_only: pieceNow, prorate_monthly: prorateNow } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 })));
       setOverride(r.override || null);
       if (!r.lines.length) toast('No one to pay for this period', 'err');
@@ -208,6 +215,71 @@ function RunTab({ sites, onSaved }) {
   // amounts to the computed lines on screen. Combined lines are matched through
   // their member_ids, so a person merged across Fido + Fiafia still resolves.
   const [uploadingDed, setUploadingDed] = useState(false);
+  // ── Month-end in ONE upload ────────────────────────────────────────────────
+  // One workbook (REGULAR + BAGGERS + LOADERS) drives the whole close:
+  //   1. REGULAR sheet -> monthly salaries (by Staff ID)
+  //   2. BAGGERS/LOADERS -> the bags override for the period the sheet states
+  //   3. old DRAFT for that period replaced, payroll computed (full salaries,
+  //      no proration) and saved as a fresh draft for review
+  // Every step's outcome lands in a PERSISTENT panel — no vanishing toasts.
+  const [oneShot, setOneShot] = useState(null);   // { steps: [{label, ok, detail}], busy, file }
+  const oneShotStep = (label, ok, detail) =>
+    setOneShot((p) => ({ ...(p || {}), steps: [...((p && p.steps) || []), { label, ok, detail }] }));
+  const runOneShot = async (file, retryFile) => {
+    const f = file || retryFile;
+    if (!f) return;
+    setOneShot({ steps: [], busy: true, file: f });
+    try {
+      // 1. Salaries from the REGULAR sheet.
+      const fd1 = new FormData(); fd1.append('file', f);
+      const r1 = await api(scopedAny('/payroll/salaries-import'), { method: 'POST', form: fd1 });
+      oneShotStep('Salaries', true,
+        `${r1.updated} updated, ${r1.unchanged} already current`
+        + (r1.unmatched?.length ? ` · ⚠ ${r1.unmatched.length} unknown ID(s)` : '')
+        + (r1.name_mismatch?.length ? ` · ⚠ ${r1.name_mismatch.length} name/ID mismatch(es)` : '')
+        + (r1.skipped_piece?.length ? ` · ${r1.skipped_piece.length} bagger/loader rows skipped (paid per bag)` : ''));
+
+      // 2. Bags override — dry-run first to read the period/kind off the sheet.
+      const fdD = new FormData(); fdD.append('file', f); fdD.append('dry_run', '1');
+      const dry = await api(scopedAny('/payroll/production-override/import'), { method: 'POST', form: fdD });
+      if (dry.kind !== 'MONTHEND') {
+        oneShotStep('Bags', false, `sheet reads as ${dry.kind} — this button is for MONTH-END workbooks`);
+        setOneShot((p) => ({ ...p, busy: false }));
+        return;
+      }
+      const fd2 = new FormData(); fd2.append('file', f);
+      let applied;
+      try {
+        applied = await api(scopedAny('/payroll/production-override/import'), { method: 'POST', form: fd2 });
+      } catch (e) {
+        if (e.code === 'OVERRIDE_DISABLED' || e.code === 'OVERRIDE_TAKEN') {
+          oneShotStep('Bags', false, 'needs the Admin to enable the sheet override (Rates tab) — then press Resume');
+          setOneShot((p) => ({ ...p, busy: false, resume: true }));
+          return;
+        }
+        throw e;
+      }
+      oneShotStep('Bags override', true,
+        `${applied.matched} staff, ${ngn(applied.total_amount)} at ₦${applied.rates?.loaded ?? 6}/bag`
+        + ` for ${applied.period_from} → ${applied.period_to}`
+        + (applied.unmatched ? ` · ⚠ ${applied.unmatched} row(s) NOT matched (will not be paid)` : ''));
+
+      // 3. Replace the draft: full salaries (no proration), combined, month-end.
+      const save = await api(scopedAny('/payroll/runs2'), { method: 'POST', body: {
+        from: dry.period_from, to: dry.period_to, combined: true,
+        piece_only: false, prorate_monthly: false, replace_draft: true, deductions: {},
+      } });
+      oneShotStep('Payroll draft', true, 'computed with FULL salaries (no proration) and saved — review it in the Saved tab');
+
+      // 4. Show the result of the compute on this same screen too.
+      setFrom(dry.period_from); setTo(dry.period_to); setPieceOnly(false); setProrate(false);
+      setOneShot((p) => ({ ...p, busy: false, done: true, run_id: save.id }));
+      run(dry.period_from, dry.period_to, { prorate: false, pieceOnly: false });
+    } catch (e) {
+      oneShotStep('Stopped', false, e.message || 'failed');
+      setOneShot((p) => ({ ...p, busy: false }));
+    }
+  };
   const uploadDeductions = async (file) => {
     if (!file || !lines) return;
     setUploadingDed(true);
@@ -296,6 +368,39 @@ function RunTab({ sites, onSaved }) {
           <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px', marginLeft: 8 }} onClick={run}>Retry</button>
         </div>
       )}
+      <div className="card" style={{ padding: '12px 14px', marginBottom: 12, border: '1.5px solid #bfdbfe' }}>
+        <strong style={{ display: 'block' }}>Month-end in one upload</strong>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+          Upload the salary schedule workbook (REGULAR / BAGGERS / LOADERS). In one go: salaries are set from
+          the REGULAR sheet, the bag sheets become the commission payroll for the period written in the file,
+          and a fresh draft is computed with <b>full salaries</b> and saved for review. Nothing is paid until
+          the draft is approved.
+        </span>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          <label className="btn" style={{ width: 'auto', padding: '8px 16px', cursor: 'pointer' }}>
+            {oneShot?.busy ? <span className="spin" /> : '⬆ Upload month-end workbook'}
+            <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={oneShot?.busy}
+              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; runOneShot(f); }} />
+          </label>
+          {oneShot?.resume && (
+            <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 16px' }}
+              onClick={() => runOneShot(null, oneShot.file)}>▶ Resume</button>
+          )}
+        </div>
+        {oneShot?.steps?.length > 0 && (
+          <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
+            {oneShot.steps.map((st, i) => (
+              <div key={i} style={{ fontSize: 12.5, margin: '3px 0' }}>
+                {st.ok ? '✅' : '⛔'} <b>{st.label}:</b> {st.detail}
+              </div>
+            ))}
+            {oneShot.done && <div style={{ fontSize: 12.5, marginTop: 6, fontWeight: 700, color: '#166534' }}>
+              Done — the computed lines are below; the saved draft is in the Saved tab.
+            </div>}
+          </div>
+        )}
+      </div>
+
       {busy && <div className="skel" style={{ marginBottom: 10 }} />}
       {isGroup ? (
         <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>

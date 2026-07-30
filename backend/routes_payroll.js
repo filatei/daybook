@@ -1379,6 +1379,20 @@ router.post('/runs2', requireAuth, async (req, res) => {
     ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly, prorateMonthly)
     : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly, prorateMonthly);
   const runId = uuid();
+  // replace_draft: delete any existing DRAFT for this period+kind first, so
+  // re-running month-end replaces the working copy instead of stacking
+  // duplicates. Approved/paid runs are never touched.
+  if (b.replace_draft === true) {
+    const scope = ctxTenants(c);
+    const ph2 = scope.map(() => '?').join(',');
+    const olds = await qall(`SELECT id FROM pay_runs WHERE tenant_id IN (${ph2}) AND period_from=? AND period_to=? AND kind=? AND status='DRAFT'`,
+      [...scope, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR']);
+    for (const o of olds) {
+      await qrun('UPDATE staff_advances SET run_id=NULL WHERE run_id=?', [o.id]);
+      await qrun('DELETE FROM pay_runs WHERE id=?', [o.id]);
+      await audit(c.tenant_id, req.user.id, 'PAYROLL_RUN_DELETE', 'pay_runs', o.id, { period: `${from}→${to}`, replaced_by: runId });
+    }
+  }
   // Which override batch (if any) fed this run. Recorded ON THE RUN because the
   // batch can later be removed, and an approved payroll whose numbers cannot be
   // explained afterwards is worse than one that was never saved.
@@ -2190,7 +2204,11 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
   // accountant can check a sheet parses and matches BEFORE asking for the gate to
   // be opened — otherwise the one enable gets burnt on a typo.
   const dryRun = String(req.body?.dry_run || '') === '1' || req.body?.dry_run === true;
-  if (!dryRun && !await overrideEnabled()) {
+  // An ADMIN uploading is the approval itself — the enable gate exists so a
+  // Snr Accountant's override gets an Admin's eyes first, not to make the
+  // Admin approve their own click twice.
+  const isAdminUpload = atLeast(c.role, 'ADMIN');
+  if (!dryRun && !isAdminUpload && !await overrideEnabled()) {
     return res.status(403).json({
       error: 'Spreadsheet override is switched off. An Admin must enable it for this upload.',
       code: 'OVERRIDE_DISABLED',
@@ -2396,7 +2414,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
       // Admin enable would both pass it. This UPDATE is the real gate: whoever
       // flips 1→0 owns the upload, and the loser is told to ask again.
       const gate = await tx.qrun('UPDATE payroll_settings SET value=0, updated_at=? WHERE key=? AND value>0', [nowS(), OVERRIDE_FLAG]);
-      if (!gate.rowCount) { const e = new Error('OVERRIDE_TAKEN'); e.code = 'OVERRIDE_TAKEN'; throw e; }
+      if (!gate.rowCount && !isAdminUpload) { const e = new Error('OVERRIDE_TAKEN'); e.code = 'OVERRIDE_TAKEN'; throw e; }
 
       // One live batch per period+kind. Re-uploading a corrected sheet replaces
       // the previous attempt rather than stacking a second set of numbers on it.

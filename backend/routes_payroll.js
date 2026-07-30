@@ -2147,7 +2147,16 @@ async function emailMidMonth(tenant_id, runId, tenants) {
 
 const OVERRIDE_FLAG = 'sheet_override_enabled';
 
+// TEMPORARY (owner decision, 2026-07-30): the Admin enable gate is OFF — the
+// sheet override is always available to SNR_ACCOUNTANT+. Two reasons: the
+// Group workspace's synthetic GM role was hiding the enable button from real
+// Admins, and the saved-DRAFT approval step is the actual control before any
+// money moves. To restore the gate, set OVERRIDE_GATE_ENFORCED = true; all
+// the flag machinery below is intact.
+const OVERRIDE_GATE_ENFORCED = false;
+
 async function overrideEnabled() {
+  if (!OVERRIDE_GATE_ENFORCED) return true;
   const r = await qone('SELECT value FROM payroll_settings WHERE key=?', [OVERRIDE_FLAG]);
   return Number(r?.value) > 0;
 }
@@ -2414,7 +2423,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
       // Admin enable would both pass it. This UPDATE is the real gate: whoever
       // flips 1→0 owns the upload, and the loser is told to ask again.
       const gate = await tx.qrun('UPDATE payroll_settings SET value=0, updated_at=? WHERE key=? AND value>0', [nowS(), OVERRIDE_FLAG]);
-      if (!gate.rowCount && !isAdminUpload) { const e = new Error('OVERRIDE_TAKEN'); e.code = 'OVERRIDE_TAKEN'; throw e; }
+      if (OVERRIDE_GATE_ENFORCED && !gate.rowCount && !isAdminUpload) { const e = new Error('OVERRIDE_TAKEN'); e.code = 'OVERRIDE_TAKEN'; throw e; }
 
       // One live batch per period+kind. Re-uploading a corrected sheet replaces
       // the previous attempt rather than stacking a second set of numbers on it.

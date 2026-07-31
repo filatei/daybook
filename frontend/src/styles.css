@@ -535,14 +535,22 @@ tr:hover td { background: #f8fafc; }
 /* ── Responsive: mobile layout ─────────────────────────────────────────────── */
 @media (max-width: 767px) {
   .nav-tabs  { display: none; }     /* move tabs to bottom on mobile */
-  .bottom-nav { display: flex; }    /* show bottom nav */
-  /* Extra padding so content clears the fixed bottom nav */
-  .main-content { padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px)); }
-  /* FAB sits above bottom nav on mobile */
+  /* IN-FLOW bottom nav, not position:fixed. The old fixed bar pinned to the
+     LAYOUT viewport's bottom, which sits below the VISIBLE bottom inside
+     in-app browsers (WhatsApp/IG) and Android 15's edge-to-edge Chrome —
+     confirmed on a real phone as half-clipped icons. #root is a 100dvh
+     flex column with .main-content as its only scroller, so an in-flow bar
+     ordered last is always fully visible above any browser/system chrome;
+     the env() padding still lifts it off a PWA gesture bar. */
+  .bottom-nav { display: flex; position: static; order: 99; }
+  /* Content no longer hides under a fixed bar — a small cushion is enough. */
+  .main-content { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+  /* FAB sits above the bottom nav on mobile */
   .fab { bottom: calc(72px + var(--safe-b)); }
-  /* AI: hide the header button, show the floating FAB instead */
+  /* AI: hide the header button, show the floating FAB instead — lifted
+     above the in-flow bottom nav (which, being static, has no z-index). */
   .ai-hdr-btn { display: none; }
-  .ai-fab { display: grid; }
+  .ai-fab { display: grid; bottom: calc(72px + var(--safe-b)); }
 
   /* Inputs at ≥16px so iOS Safari never zooms the page on focus */
   .input, select.input, textarea.input { font-size: 16px; padding: 12px; }

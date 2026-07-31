@@ -31,6 +31,18 @@ a { color: var(--brand-d); text-decoration: none; }
   box-shadow: 0 2px 12px rgba(2,132,199,.25);
   padding-top: env(safe-area-inset-top, 0px);
 }
+/* Installed-app (standalone) fix, same family as the bottom-nav clip: newer
+   Android Chrome draws standalone PWAs edge-to-edge, so page content starts
+   UNDER the status bar - and on many devices env(safe-area-inset-top) still
+   computes to 0, which left the Daybook logo row half-hidden behind the
+   clock/battery icons (confirmed on a real phone). Floor the header padding
+   at 28px (Android status bar is 24-28dp); max() still prefers the real
+   inset on devices that report one. Browser tabs are unaffected - their own
+   chrome sits above the page, and this media query doesn't match there. */
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  .nav { padding-top: max(28px, env(safe-area-inset-top, 0px)); }
+  .offline-pill { top: calc(max(28px, env(safe-area-inset-top, 0px)) + 6px); }
+}
 .nav-top {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 14px;

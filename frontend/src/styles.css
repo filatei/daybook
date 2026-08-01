@@ -20,7 +20,16 @@ body {
 /* App shell: root fills the viewport and never scrolls; only .main-content
    scrolls, so the top header and the fixed bottom nav stay put and content
    flows under them. 100dvh tracks the mobile browser's dynamic viewport. */
-#root { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+#root {
+  height: 100vh; height: 100dvh;
+  /* JS-measured visible height (set in main.jsx). 100vh/100dvh above are
+     fallbacks only: in-app webviews (WhatsApp/IG) and older engines compute
+     them LARGER than the actually-visible area, which pushed the in-flow
+     bottom nav below the screen edge entirely - confirmed on a real phone.
+     window.innerHeight is the one number that is always the truth. */
+  height: var(--appvh, 100dvh);
+  display: flex; flex-direction: column; overflow: hidden;
+}
 button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--brand-d); text-decoration: none; }
 
@@ -42,6 +51,9 @@ a { color: var(--brand-d); text-decoration: none; }
 @media (display-mode: standalone), (display-mode: fullscreen) {
   .nav { padding-top: max(28px, env(safe-area-inset-top, 0px)); }
   .offline-pill { top: calc(max(28px, env(safe-area-inset-top, 0px)) + 6px); }
+  /* Edge-to-edge gesture/3-button bar clearance at the bottom, mirroring
+     the header floor above. */
+  .bottom-nav { padding-bottom: max(24px, env(safe-area-inset-bottom, 0px)); }
 }
 .nav-top {
   display: flex; align-items: center; gap: 10px;
@@ -554,7 +566,7 @@ tr:hover td { background: #f8fafc; }
      flex column with .main-content as its only scroller, so an in-flow bar
      ordered last is always fully visible above any browser/system chrome;
      the env() padding still lifts it off a PWA gesture bar. */
-  .bottom-nav { display: flex; position: static; order: 99; }
+  .bottom-nav { display: flex; position: static; order: 99; flex-shrink: 0; }
   /* Content no longer hides under a fixed bar — a small cushion is enough. */
   .main-content { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
   /* FAB sits above the bottom nav on mobile */

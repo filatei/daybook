@@ -3,6 +3,18 @@ import { createRoot } from 'react-dom/client';
 import App from './App.jsx';
 import './styles.css';
 
+// ── Visible-height shim ──────────────────────────────────────────────────────
+// #root's height uses var(--appvh): 100vh/100dvh over-measure inside in-app
+// webviews and some standalone contexts, which pushed the in-flow bottom nav
+// off-screen. window.innerHeight is the actually-visible height everywhere;
+// keep it fresh across URL-bar collapse, rotation and keyboard.
+const setAppVh = () => {
+  document.documentElement.style.setProperty('--appvh', window.innerHeight + 'px');
+};
+setAppVh();
+window.addEventListener('resize', setAppVh);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', setAppVh);
+
 createRoot(document.getElementById('root')).render(<App />);
 
 // ── Service worker: register + auto-reload on update ──────────────────────────

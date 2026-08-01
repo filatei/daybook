@@ -1775,6 +1775,515 @@ const BANK_CODES = {
   ZENITH: '000015',
 };
 
+// Full NIBSS institution directory (487 banks / microfinance banks /
+// fintechs, pulled from NIBSS's public code list, 2026-08) keyed by the
+// bank name with punctuation and case stripped, so a staff record's raw
+// bank_name text can be matched exactly against an official NIBSS name.
+//
+// This does NOT drive grouping — normaliseBank()/BANK_ALIASES above still
+// decide how a payee is grouped and labelled in the workbook (that stays
+// scoped to the ~23 banks actually seen on a Fido/Fiafia roster, so a new,
+// obscure bank can't silently steal a regex prefix from a real one). This
+// table is purely a code-enrichment fallback: if the raw text is an exact
+// match for an official NIBSS name, its code fills in; anything that
+// doesn't match still exports with a blank code, same as before.
+const NIBSS_CODE_BY_NAME = {
+  '3LINECARDMANAGEMENTLIMITED': '110005', // 3line Card Management Limited
+  '9PAYMENTSERVICEBANK': '120001', // 9Payment Service Bank
+  'AAAFINANCE': '050005', // AAA Finance
+  'ABBEYMORTGAGEBANK': '070010', // Abbey Mortgage Bank
+  'ABMICROFINANCEBANK': '090270', // AB Microfinance Bank
+  'ABOVEONLYMICROFINANCEBANK': '090260', // Above Only Microfinance Bank
+  'ABSUMFB': '090640', // ABSU MFB
+  'ABULESOROMICROFINANCEBANK': '090545', // Abulesoro Microfinance Bank
+  'ABUMICROFINANCEBANK': '090197', // ABU Microfinance Bank
+  'ACCELEREXNETWORKLIMITED': '090202', // Accelerex Network Limited
+  'ACCESSBANK': '000014', // Access Bank
+  'ACCESSMOBILE': '100013', // AccessMobile
+  'ACCESSYELLO': '100052', // Access Yello
+  'ACCIONMICROFINANCEBANK': '090134', // Accion Microfinance Bank
+  'ADAMICROFINANCEBANK': '090483', // Ada Microfinance Bank
+  'ADDOSSERMICROFINANCEBANK': '090160', // Addosser Microfinance Bank
+  'ADEYEMICOLLEGESTAFFMICROFINANCEBANK': '090268', // Adeyemi College Staff Microfinance Bank
+  'ADVANSLAFAYETTEMICROFINANCEBANK': '090155', // Advans La Fayette Microfinance Bank
+  'AFEKHAFEMICROFINANCEBANK': '090292', // Afekhafe Microfinance Bank
+  'AFEMAIMICROFINANCEBANK': '090518', // Afemai Microfinance Bank
+  'AGMORTGAGEBANK': '100028', // AG Mortgage Bank
+  'AKPOMICROFINANCEBANK': '090608', // Akpo Microfinance Bank
+  'AKUCHUCKWUMICROFINANCEBANK': '090561', // Akuchuckwu Microfinance Bank
+  'AKUMICROFINANCEBANK': '090531', // Aku Microfinance Bank
+  'AKWASAVINGSLOANSLIMITED': '070025', // Akwa Savings & Loans Limited
+  'ALBARAKAHMICROFINANCEBANK': '090133', // AL-Barakah Microfinance Bank
+  'ALEKUNMICROFINANCEBANK': '090259', // Alekun Microfinance Bank
+  'ALERTMICROFINANCEBANK': '090297', // Alert Microfinance Bank
+  'ALHAYATMICROFINANCEBANK': '090277', // Al-Hayat Microfinance Bank
+  'ALLWORKERSMICROFINANCEBANK': '090131', // Allworkers Microfinance Bank
+  'ALLYMICROFINANCEBANK': '090548', // Ally Microfinance Bank
+  'ALPHAKAPITALMICROFINANCEBANK': '090169', // Alpha Kapital Microfinance Bank
+  'ALVANAMICROFINANCEBANK': '090489', // Alvana Microfinance Bank
+  'AMACMICROFINANCEBANK': '090394', // Amac Microfinance Bank
+  'AMEGYMFB': '090629', // Amegy MFB
+  'AMJUUNIQUEMICROFINANCEBANK': '090180', // Amju Unique Microfinance Bank
+  'AMMLMFB': '090116', // AMML MFB
+  'AMOYEMICROFINANCEBANK': '090610', // Amoye Microfinance Bank
+  'AMPERSANDMICROFINANCEBANK': '090529', // Ampersand Microfinance Bank
+  'AMUCHAMFB': '090645', // Amucha MFB
+  'ANCHORAGEMICROFINANCEBANK': '090476', // Anchorage Microfinance Bank
+  'ANIOCHAMICROFINANCEBANK': '090469', // Aniocha Microfinance bank
+  'APEKSMICROFINANCEBANK': '090143', // Apeks Microfinance Bank
+  'APPLEMICROFINANCEBANK': '090376', // Apple Microfinance Bank
+  'ARAMOKOMICROFINANCEBANK': '090307', // Aramoko Microfinance Bank
+  'ARISEMICROFINANCEBANK': '090282', // Arise Microfinance Bank
+  'ASOSAVINGSLOANS': '090001', // ASOSavings & Loans
+  'ASPIREMICROFINANCEBANK': '090544', // Aspire Microfinance Bank
+  'ASSETMATRIXMICROFINANCEBANK': '090287', // AssetMatrix Microfinance Bank
+  'ASSETSMICROFINANCEBANK': '090473', // Assets Microfinance Bank
+  'ASTRAPOLARISMICROFINANCEBANK': '090172', // Astrapolaris Microfinance Bank
+  'AUCHIMICROFINANCEBANK': '090264', // Auchi Microfinance Bank
+  'AVEMARIAMICROFINANCEBANK': '090600', // Ave Maria Microfinance Bank
+  'AWACASHMFB': '090633', // Awacash MFB
+  'AZTECMICROFINANCEBANK': '090540', // Aztec Microfinance Bank
+  'BABURAMFB': '090625', // Babura MFB
+  'BAINESCREDITMICROFINANCEBANK': '090188', // Baines Credit Microfinance Bank
+  'BALERAMICROFINANCEBANK': '090563', // Balera Microfinance Bank
+  'BALOGUNFULANIMICROFINANCEBANK': '090181', // Balogun Fulani Microfinance Bank
+  'BALOGUNGAMBARIMICROFINANCEBANK': '090326', // Balogun Gambari Microfinance Bank
+  'BANCCORPMFB': '090581', // Banc Corp MFB
+  'BCKASHMICROFINANCEBANK': '090127', // BC Kash Microfinance Bank
+  'BERACHAHMFB': '090618', // Berachah MFB
+  'BESTSTARMFB': '090615', // Beststar MFB
+  'BIPCMICROFINANCEBANK': '090336', // BIPC Microfinance Bank
+  'BISHOPGATEMICROFINANCEBANK': '090555', // BishopGate Microfinance Bank
+  'BLUEPRINTINVESTMENTSMICROFINANCEBANK': '090538', // BluePrint Investments Microfinance Bank
+  'BOCTRUSTMICROFINANCEBANK': '090117', // Boctrust Microfinance Bank
+  'BOIMICROFINANCEBANK': '090444', // BOI Microfinance Bank
+  'BOJIMFB': '090494', // Boji MFB
+  'BORGUMICROFINANCEBANK': '090395', // Borgu Microfinance Bank
+  'BOSAKMICROFINANCEBANK': '090176', // Bosak Microfinance Bank
+  'BOWENMICROFINANCEBANK': '090148', // Bowen Microfinance Bank
+  'BRANCHINTERNATIONALFINANCIALSERVICES': '050006', // Branch International Financial Services
+  'BRENTMORTGAGEBANK': '070015', // Brent Mortgage Bank
+  'BRETHRENMICROFINANCEBANK': '090293', // Brethren Microfinance Bank
+  'BRIDGEWAYMICROFINANCEBANK': '090393', // Bridgeway Microfinance Bank
+  'BRIGHTWAYMICROFINANCEBANK': '090308', // Brightway Microfinance Bank
+  'BRIYTHCOVENANTMFB': '090636', // Briyth-Covenant MFB
+  'BROADVIEWMICROFINANCEBANK': '090568', // Broadview Microfinance Bank
+  'BUNKUREMFB': '090655', // Bunkure MFB
+  'BUSINESSSUPPORTMICROFINANCEBANK': '090406', // Business Support Microfinance Bank
+  'CANAANMFB': '090647', // Canaan MFB
+  'CARETAKERMICROFINANCEBANK': '090472', // Caretaker Microfinance Bank
+  'CASHBRIDGEMFB': '090634', // Cashbridge MFB
+  'CASHCONNECTMICROFINANCEBANK': '090360', // CashConnect Microfinance Bank
+  'CASHRITEMFB': '090649', // Cashrite MFB
+  'CATLANDMFB': '090498', // Catland MFB
+  'CEDARMICROFINANCEBANK': '090562', // Cedar Microfinance Bank
+  'CELLULANT': '100005', // Cellulant
+  'CEMCSMICROFINANCEBANK': '090154', // CEMCS Microfinance Bank
+  'CENTRALBANKOFNIGERIA': '000028', // Central Bank of Nigeria
+  'CHANGANRTSMICROFINANCEBANK': '090470', // Changan RTS Microfinance Bank
+  'CHASEMICROFINANCEBANK': '090523', // Chase Microfinance Bank
+  'CHIKUMMICROFINANCEBANK': '090141', // Chikum Microfinance Bank
+  'CHUKWUNENYEMFB': '090490', // Chukwunenye MFB
+  'CINTRUSTMICROFINANCEBANK': '090480', // Cintrust Microfinance Bank
+  'CITIBANK': '000009', // Citi Bank
+  'CITMICROFINANCEBANK': '090144', // CIT Microfinance Bank
+  'COALCAMPMICROFINANCEBANK': '090254', // Coalcamp Microfinance Bank
+  'COASTLINEMICROFINANCEBANK': '090374', // Coastline Microfinance Bank
+  'CONFIDENCEMFB': '090530', // Confidence MFB
+  'CONPROMICROFINANCEBANK': '090380', // Conpro Microfinance Bank
+  'CONSISTENTTRUSTMICROFINANCEBANK': '090553', // Consistent Trust Microfinance Bank
+  'CONSUMERMICROFINANCEBANK': '090130', // Consumer Microfinance Bank
+  'CONTECGLOBALINFOTECHLIMITEDNOWNOW': '100032', // Contec Global Infotech Limited (NowNow)
+  'COOPMORTGAGEBANK': '070021', // Coop Mortgage Bank
+  'CORESTEPMICROFINANCEBANK': '090365', // Corestep Microfinance Bank
+  'CORONATIONMERCHANTBANK': '060001', // Coronation Merchant Bank
+  'COVENANTMFB': '070006', // Covenant MFB
+  'CREDITAFRIQUEMICROFINANCEBANK': '090159', // Credit Afrique Microfinance Bank
+  'CREDITVILLEMFB': '090611', // Creditville MFB
+  'CRESCENTMICROFINANCEBANK': '090526', // Crescent Microfinance Bank
+  'CROWDFORCE': '110017', // Crowdforce
+  'CSADVANCE': '050017', // CS Advance
+  'CYBERSPACELIMITED': '110014', // Cyberspace Limited
+  'DALMFB': '090596', // DAL MFB
+  'DAVODANIMICROFINANCEBANK': '090391', // Davodani Microfinance Bank
+  'DAYLIGHTMICROFINANCEBANK': '090167', // Daylight Microfinance Bank
+  'DELTATRUSTMICROFINANCEBANK': '070023', // Delta Trust Microfinance Bank
+  'DIGNITYFINANCE': '050013', // Dignity Finance
+  'DIOBUMFB': '090643', // Diobu MFB
+  'EAGLEFLIGHTMICROFINANCEBANK': '090294', // Eagle Flight Microfinance Bank
+  'EARTHOLEUM': '100021', // Eartholeum
+  'EBARCSMICROFINANCEBANK': '090156', // e-Barcs Microfinance Bank
+  'ECOBANKBANK': '000010', // Ecobank Bank
+  'ECOBANKXPRESSACCOUNT': '100008', // Ecobank Xpress Account
+  'ECOMOBILE': '100030', // EcoMobile
+  'EDFINMICROFINANCEBANK': '090310', // EdFin Microfinance Bank
+  'EFINANCE': '050016', // E-Finance
+  'EGWAFINMICROFINANCEBANK': '090556', // Egwafin Microfinance Bank
+  'EKONDOMFB': '090097', // Ekondo MFB
+  'EKRELIABLEMICROFINANCEBANK': '090389', // EK-Reliable Microfinance Bank
+  'EMERALDSMICROFINANCEBANK': '090273', // Emeralds Microfinance Bank
+  'EMPIRETRUSTMFB': '090114', // Empire trust MFB
+  'ENAIRA': '000033', // eNaira
+  'ENCOFINANCE': '050012', // Enco Finance
+  'ENRICHMICROFINANCEBANK': '090539', // Enrich Microfinance Bank
+  'ENTERPRISEBANK': '000019', // Enterprise Bank
+  'ESANMICROFINANCEBANK': '090189', // Esan Microfinance Bank
+  'ESOEMICROFINANCEBANK': '090166', // Eso-E Microfinance Bank
+  'ETRANZACT': '100006', // eTranzact
+  'EVANGELMICROFINANCEBANK': '090304', // Evangel Microfinance Bank
+  'EVERGREENMICROFINANCEBANK': '090332', // Evergreen Microfinance Bank
+  'EWTMICROFINANCEBANK': '090572', // EWT Microfinance Bank
+  'EXCELLENTMICROFINANCEBANK': '090541', // Excellent Microfinance Bank
+  'EYOWO': '090328', // Eyowo
+  'FAIRMONEYMICROFINANCEBANK': '090551', // FairMoney Microfinance Bank
+  'FASTCREDIT': '050009', // Fast Credit
+  'FASTMICROFINANCEBANK': '090179', // FAST Microfinance Bank
+  'FBNMOBILE': '100014', // FBNMobile
+  'FBNMORTGAGESLIMITED': '090107', // FBN Mortgages Limited
+  'FBNQUESTMERCHANTBANK': '060002', // FBNQUEST Merchant Bank
+  'FCMB': '000003', // FCMB
+  'FCMBBETA': '090409', // FCMB BETA
+  'FCMBEASYACCOUNT': '100031', // FCMB Easy Account
+  'FCTMICROFINANCEBANK': '090290', // FCT Microfinance Bank
+  'FEDERALPOLYTECHNICNEKEDEMICROFINANCEBANK': '090398', // Federal Polytechnic Nekede Microfinance Bank
+  'FEDERALUNIVERSITYDUTSEMICROFINANCEBANK': '090318', // Federal University Dutse Microfinance Bank
+  'FEDETHMICROFINANCEBANK': '090482', // Fedeth Microfinance Bank
+  'FEDPOLYNASARAWAMICROFINANCEBANK': '090298', // FedPoly Nasarawa Microfinance Bank
+  'FET': '100001', // FET
+  'FEWCHOREFINANCECOMPANYLIMITED': '050002', // FEWCHORE FINANCE COMPANY LIMITED
+  'FFSMICROFINANCEBANK': '090153', // FFS Microfinance Bank
+  'FHAMORTGAGEBANK': '070026', // FHA Mortgage Bank
+  'FIDELITYBANK': '000007', // Fidelity Bank
+  'FIDELITYMOBILE': '100019', // Fidelity Mobile
+  'FIDFUNDMICROFINANCEBANK': '090126', // Fidfund Microfinance Bank
+  'FIMSMFB': '090507', // FIMS MFB
+  'FINATRUSTMICROFINANCEBANK': '090111', // FinaTrust Microfinance Bank
+  'FIRMUSMICROFINANCEBANK': '090366', // Firmus Microfinance Bank
+  'FIRSTAPPLELIMITED': '110004', // First Apple Limited
+  'FIRSTBANKOFNIGERIA': '000016', // First Bank of Nigeria
+  'FIRSTGENERATIONMORTGAGEBANK': '070014', // First Generation Mortgage Bank
+  'FIRSTMIDASMICROFINANCEBANK': '090575', // First Midas Microfinance Bank
+  'FIRSTOPTIONMICROFINANCEBANK': '090285', // First Option Microfinance Bank
+  'FIRSTROYALMICROFINANCEBANK': '090164', // First Royal Microfinance Bank
+  'FLOURISHMFB': '090614', // Flourish MFB
+  'FLUTTERWAVETECHNOLOGYSOLUTIONSLIMITED': '110002', // Flutterwave Technology Solutions Limited
+  'FORTISMICROFINANCEBANK': '070002', // Fortis Microfinance Bank
+  'FORTISMOBILE': '100016', // FortisMobile
+  'FSDHMERCHANTBANK': '400001', // FSDH Merchant Bank
+  'FULLRANGEMICROFINANCEBANK': '090145', // Fullrange Microfinance Bank
+  'FUNDQUESTFINANCIALSERVICESLIMITED': '050010', // Fundquest Financial Services Limited
+  'FUTOMICROFINANCEBANK': '090158', // Futo Microfinance Bank
+  'GABASAWAMFB': '090582', // Gabasawa MFB
+  'GABSYNMICROFINANCEBANKLIMITED': '090591', // Gabsyn Microfinance Bank Limited
+  'GASHUAMICROFINANCEBANK': '090168', // Gashua Microfinance Bank
+  'GATEWAYMORTGAGEBANK': '070009', // Gateway Mortgage Bank
+  'GBEDEMICROFINANCEBANK': '090579', // Gbede Microfinance Bank
+  'GIANTSTRIDEMICROFINANCEBANK': '090475', // Giant Stride Microfinance Bank
+  'GIDAUNIYARALHERIMFB': '090621', // Gidauniyar Alheri MFB
+  'GIGINYAMICROFINANCEBANK': '090411', // Giginya Microfinance bank
+  'GIREIMICROFINANCEBANK': '090186', // Girei Microfinance Bank
+  'GLOBALINITIATIVEMFB': '090639', // Global Initiative MFB
+  'GLOBUSBANK': '000027', // Globus Bank
+  'GLORYMICROFINANCEBANK': '090278', // Glory Microfinance Bank
+  'GMBMICROFINANCEBANK': '090408', // GMB Microfinance Bank
+  'GOLDMANMFB': '090574', // GOLDMAN MFB
+  'GOMBEMFB': '090586', // Gombe MFB
+  'GOMONEY': '100022', // GoMoney
+  'GOODNEIGBOURSMICROFINANCEBANK': '090467', // Good Neigbours Microfinance Bank
+  'GOODNEWSMICROFINANCEBANK': '090495', // Goodnews Microfinance Bank
+  'GOWANSMICROFINANCEBANK': '090122', // Gowans Microfinance Bank
+  'GREENBANKMICROFINANCEBANK': '090178', // GreenBank Microfinance Bank
+  'GREENENERGYMICROFINANCEBANK': '090550', // Green Energy Microfinance Bank
+  'GREENVILLEMICROFINANCEBANK': '090269', // Greenville Microfinance Bank
+  'GREENWICHMERCHANTBANK': '060004', // Greenwich Merchant Bank
+  'GROOMINGMICROFINANCEBANK': '090195', // Grooming Microfinance Bank
+  'GTBANKPLC': '000013', // GTBank Plc
+  'GTIMICROFINANCEBANK': '090385', // GTI Microfinance Bank
+  'GTMOBILE': '100009', // GTMobile
+  'HACKMANMICROFINANCEBANK': '090147', // Hackman Microfinance Bank
+  'HAGGAIMORTGAGEBANKLIMITED': '070017', // Haggai Mortgage Bank Limited
+  'HALALCREDITMICROFINANCEBANK': '090291', // Halal Credit Microfinance Bank
+  'HASALMICROFINANCEBANK': '090121', // Hasal Microfinance Bank
+  'HEADWAYMICROFINANCEBANK': '090363', // Headway Microfinance Bank
+  'HEDONMARK': '100017', // Hedonmark
+  'HERITAGEBANK': '000020', // Heritage Bank
+  'HIGHSTREETMICROFINANCEBANK': '090175', // HighStreet Microfinance Bank
+  'HOMEBASEMORTGAGEBANK': '070024', // Homebase Mortgage Bank
+  'HOPEPSB': '120002', // HopePSB
+  'IBAMICROFINANCEBANK': '090598', // IBA Microfinance Bank
+  'IBILEMICROFINANCEBANK': '090118', // IBILE Microfinance Bank
+  'IBOLOMICROFINANCEBANK': '090532', // IBOLO Microfinance Bank
+  'IBOMAFADAMAMICROFINANCEBANK': '090519', // Iboma Fadama Microfinance Bank
+  'IBUAJEMICROFINANCEBANK': '090488', // Ibu-Aje Microfinance Bank
+  'IJEBUIFEMICROFINANCEBANK': '090546', // Ijebu-Ife Microfinance Bank
+  'IKENNEMICROFINANCEBANK': '090324', // Ikenne Microfinance Bank
+  'IKIREMICROFINANCEBANK': '090279', // Ikire Microfinance Bank
+  'IKOYIOSUNMICROFINANCEBANK': '090536', // Ikoyi-Osun Microfinance Bank
+  'ILAROPOLYMICROFINANCEBANK': '090571', // Ilaro Poly Microfinance Bank
+  'ILISANMICROFINANCEBANK': '090370', // Ilisan Microfinance Bank
+  'IMOSTATEMICROFINANCEBANK': '090258', // Imo State Microfinance Bank
+  'IMPERIALHOMESMORTGAGEBANK': '100024', // Imperial Homes Mortgage Bank
+  'INFINITYMICROFINANCEBANK': '090157', // Infinity Microfinance Bank
+  'INFINITYTRUSTMORTGAGEBANK': '070016', // Infinity Trust Mortgage Bank
+  'INNOVECTIVESKESH': '100029', // Innovectives Kesh
+  'INTELLIFIN': '100027', // Intellifin
+  'INTERLANDMICROFINANCEBANK': '090386', // Interland Microfinance Bank
+  'INTERSWITCHLIMITED': '110003', // Interswitch Limited
+  'IRLMICROFINANCEBANK': '090149', // IRL Microfinance Bank
+  'ISALEOYOMICROFINANCEBANK': '090377', // Isaleoyo Microfinance Bank
+  'ISLANDMICROFINANCEBANK': '090584', // Island Microfinance Bank
+  'IWADEMFBLTD': '090578', // Iwade MFB Ltd
+  'IWOAMAMICROFINANCEBANK': '090543', // Iwoama Microfinance Bank
+  'IYAMOYEMICROFINANCEBANK': '090570', // Iyamoye Microfinance Bank
+  'IYERUOKINMICROFINANCEBANK': '090337', // Iyeru Okin Microfinance Bank
+  'IYINEKITIMFB': '090620', // Iyin Ekiti MFB
+  'JAIZBANK': '000006', // JAIZ Bank
+  'JESSEFIELDMICROFINANCEBANK': '090352', // Jessefield Microfinance Bank
+  'JUBILEELIFEMORTGAGEBANK': '090003', // Jubilee-Life Mortgage Bank
+  'KADPOLYMICROFINANCEBANK': '090320', // KadPoly Microfinance Bank
+  'KAYVEEMICROFINANCEBANK': '090554', // Kayvee Microfinance Bank
+  'KCMBMICROFINANCEBANK': '090191', // KCMB Microfinance Bank
+  'KCMICROFINANCEBANK': '090549', // KC Microfinance Bank
+  'KEGOWCHAMSMOBILE': '100036', // Kegow (Chamsmobile)
+  'KENECHUKWUMICROFINANCEBANK': '090602', // Kenechukwu Microfinance Bank
+  'KEYSTONEBANK': '000002', // Keystone Bank
+  'KKUMFB': '090606', // KKU MFB
+  'KONTAGORAMICROFINANCEBANK': '090299', // Kontagora Microfinance Bank
+  'KOPOKOPEMFB': '090617', // Kopo Kope MFB
+  'KUDAMICROFINANCEBANK': '090267', // Kuda Microfinance Bank
+  'LAGOSBUILDINGINVESTMENTCOMPANY': '070012', // Lagos Building Investment Company
+  'LAPOMICROFINANCEBANK': '090177', // Lapo Microfinance Bank
+  'LAVENDERMICROFINANCEBANK': '090271', // Lavender Microfinance Bank
+  'LEADCITYMFB': '090650', // Leadcity MFB
+  'LEADREMITLIMITED': '110044', // Leadremit Limited
+  'LEGENDMICROFINANCEBANK': '090372', // Legend Microfinance Bank
+  'LIFEGATEMICROFINANCEBANK': '090557', // Lifegate Microfinance Bank
+  'LIGHTMFB': '090477', // Light MFB
+  'LOBREMMICROFINANCEBANK': '090537', // Lobrem Microfinance Bank
+  'LOTUSBANK': '000029', // Lotus Bank
+  'LOVONUSMICROFINANCEBANK': '090265', // Lovonus Microfinance Bank
+  'LUKEFIELDFINANCECOMPANYLIMITED': '050015', // Lukefield Finance Company Limited
+  'M36': '100035', // M36
+  'MABALLIANZMFB': '090623', // MAB Allianz MFB
+  'MABINASMFB': '090630', // Mabinas MFB
+  'MACRODMFB': '090603', // Macrod MFB
+  'MADOBIMFB': '090605', // Madobi MFB
+  'MAINLANDMICROFINANCEBANK': '090323', // Mainland Microfinance Bank
+  'MAINSTREETMICROFINANCEBANK': '090171', // Mainstreet Microfinance Bank
+  'MAINTRUSTMICROFINANCEBANK': '090465', // Maintrust Microfinance Bank
+  'MALACHYMICROFINANCEBANK': '090174', // Malachy Microfinance Bank
+  'MARITIMEMICROFINANCEBANK': '090410', // Maritime Microfinance Bank
+  'MAYFAIRMICROFINANCEBANK': '090321', // MayFair Microfinance Bank
+  'MAYFRESHMORTGAGEBANK': '070019', // MayFresh Mortgage Bank
+  'MEDEFMICROFINANCEBANK': '090612', // Medef Microfinance Bank
+  'MEGAPRAISEMICROFINANCEBANK': '090280', // Megapraise Microfinance Bank
+  'MERCURYMFB': '090589', // Mercury MFB
+  'MGBIDIMICROFINANCEBANK': '090528', // Mgbidi Microfinance Bank
+  'MICHAELOKPARAUNIAGRICMICROFINANCEBANK': '090659', // MICHAEL OKPARA UNIAGRIC MICROFINANCE BANK
+  'MICROBIZMFB': '090587', // Microbiz MFB
+  'MICROCREDMICROFINANCEBANK': '090136', // Microcred Microfinance Bank
+  'MIDLANDMICROFINANCEBANK': '090192', // Midland Microfinance Bank
+  'MINJIBIRMFB': '090607', // MINJIBIR MFB
+  'MINTFINEXMICROFINANCEBANK': '090281', // MintFinex Microfinance Bank
+  'MKOBOMICROFINANCEBANK': '090455', // Mkobo Microfinance Bank
+  'MKUDI': '100011', // Mkudi
+  'MOLUSIMICROFINANCEBANK': '090362', // Molusi Microfinance Bank
+  'MOMOPSB': '120003', // MoMo PSB
+  'MONEYBOX': '100020', // MoneyBox
+  'MONEYTRUSTMICROFINANCEBANK': '090129', // Money Trust Microfinance Bank
+  'MONIEPOINTMICROFINANCEBANK': '090405', // Moniepoint Microfinance Bank
+  'MOYOFADEMICROFINANCEBANK': '090448', // Moyofade Microfinance Bank
+  'MUTUALBENEFITSMICROFINANCEBANK': '090190', // Mutual Benefits Microfinance Bank
+  'MUTUALTRUSTMICROFINANCEBANK': '090151', // Mutual Trust Microfinance Bank
+  'NAGARTAMICROFINANCEBANK': '090152', // Nagarta Microfinance Bank
+  'NASSARAWAMICROFINANCEBANK': '090349', // Nassarawa Microfinance Bank
+  'NAVYMICROFINANCEBANK': '090263', // Navy Microfinance Bank
+  'NDIORAHMICROFINANCEBANK': '090128', // Ndiorah Microfinance Bank
+  'NEPTUNEMICROFINANCEBANK': '090329', // Neptune Microfinance Bank
+  'NEWDAWNMICROFINANCEBANK': '090205', // New Dawn Microfinance Bank
+  'NEWGOLDENPASTURESMICROFINANCEBANK': '090378', // New Golden Pastures Microfinance Bank
+  'NEWPRUDENTIALBANK': '090108', // New Prudential Bank
+  'NEXIMBANK': '030001', // NEXIM Bank
+  'NIGERIANPRISONSMICROFINANCEBANK': '090505', // Nigerian Prisons Microfinance Bank
+  'NIPVIRTUALBANK': '999999', // NIP Virtual Bank
+  'NIRSALMICROFINANCEBANK': '090194', // NIRSAL Microfinance Bank
+  'NKPOLUUSTMFB': '090535', // Nkpolu-Ust MFB
+  'NNEWWOMENMICROFINANCEBANK': '090283', // Nnew Women Microfinance Bank
+  'NOVAMERCHANTBANK': '060003', // Nova Merchant Bank
+  'NPFMICROFINANCEBANK': '070001', // NPF MicroFinance Bank
+  'NSEHEMFB': '090628', // Nsehe MFB
+  'NSUKMFB': '090491', // Nsuk MFB
+  'NUMOMICROFINANCEBANK': '090516', // Numo Microfinance Bank
+  'NUTUREMICROFINANCEBANK': '090364', // Nuture Microfinance Bank
+  'NWANNEGADIMICROFINANCEBANK': '090399', // Nwannegadi Microfinance Bank
+  'OAUMICROFINANCEBANK': '090345', // OAU Microfinance Bank
+  'OCHEMICROFINANCEBANK': '090333', // Oche Microfinance Bank
+  'OCTOPUSMICROFINANCEBANK': '090576', // Octopus Microfinance Bank
+  'ODOAKPUMFB': '090654', // Odoakpu MFB
+  'OHAFIAMICROFINANCEBANK': '090119', // Ohafia Microfinance Bank
+  'OHHAMFB': '090626', // Ohha MFB
+  'OJOKOROMICROFINANCEBANK': '090527', // Ojokoro Microfinance Bank
+  'OKEAROOREDEGBEMICROFINANCEBANK': '090565', // Oke-Aro Oredegbe Microfinance Bank
+  'OKENGWEMFB': '090646', // Okengwe MFB
+  'OKPOGAMICROFINANCEBANK': '090161', // Okpoga Microfinance Bank
+  'OKUKUMICROFINANCEBANK': '090566', // Okuku Microfinance Bank
+  'OLABISIONABANJOUNIVERSITYMICROFINANCEBANK': '090272', // Olabisi Onabanjo University Microfinance Bank
+  'OLOFINOWENAMICROFINANCEBANK': '090468', // OLOFIN OWENA Microfinance Bank
+  'OLOWOLAGBAMICROFINANCEBANK': '090404', // Olowolagba Microfinance Bank
+  'OLUCHUKWUMICROFINANCEBANK': '090471', // Oluchukwu Microfinance Bank
+  'OMIYEMICROFINANCEBANK': '090295', // Omiye Microfinance Bank
+  'OMOLUABISAVINGSANDLOANS': '070007', // Omoluabi savings and loans
+  'ONEFINANCE': '100026', // One Finance
+  'OPTIMUSBANK': '000036', // Optimus Bank
+  'ORAUKWUMFB': '090492', // Oraukwu MFB
+  'ORISUNMFB': '090588', // Orisun MFB
+  'OROKAMMICROFINANCEBANK': '090567', // Orokam Microfinance Bank
+  'OSCOTECHMICROFINANCEBANK': '090396', // Oscotech Microfinance Bank
+  'OTECHMICROFINANCEBANK': '090580', // Otech Microfinance Bank
+  'OTUOMICROFINANCEBANK': '090542', // Otuo Microfinance Bank
+  'OYANMFB': '090635', // Oyan MFB
+  'PAGA': '100002', // Paga
+  'PAGEFINANCIALS': '070008', // Page Financials
+  'PALMPAYLIMITED': '100033', // PalmPay Limited
+  'PARALLEXBANK': '000030', // Parallex Bank
+  'PARKWAYREADYCASH': '100003', // Parkway-ReadyCash
+  'PARRALEXMICROFINANCEBANK': '090004', // Parralex Microfinance bank
+  'PATRICKGOLDMICROFINANCEBANK': '090317', // PatrickGold Microfinance Bank
+  'PAYATTITUDEONLINE': '110001', // PayAttitude Online
+  'PAYCOMOPAY': '100004', // Paycom(Opay)
+  'PAYSTACKPAYMENTLIMITED': '110006', // Paystack Payment Limited
+  'PECANTRUSTMICROFINANCEBANK': '090137', // PecanTrust Microfinance Bank
+  'PENNYWISEMICROFINANCEBANK': '090196', // Pennywise Microfinance Bank
+  'PERSONALTRUSTMICROFINANCEBANK': '090135', // Personal Trust Microfinance Bank
+  'PETRAMICROFINANCEBANK': '090165', // Petra Microfinance Bank
+  'PILLARMICROFINANCEBANK': '090289', // Pillar Microfinance Bank
+  'PLATINUMMORTGAGEBANK': '070013', // Platinum Mortgage Bank
+  'POLARISBANK': '000008', // Polaris Bank
+  'POLYBADANMICROFINANCEBANK': '090534', // Polybadan Microfinance Bank
+  'POLYUNWANAMICROFINANCEBANK': '090296', // Polyunwana Microfinance Bank
+  'PREEMINENTMICROFINANCEBANK': '090412', // Preeminent Microfinance Bank
+  'PREMIUMTRUSTBANK': '000031', // Premium Trust Bank
+  'PRESTIGEMICROFINANCEBANK': '090274', // Prestige Microfinance Bank
+  'PRISTINEDIVITISMICROFINANCEBANK': '090499', // Pristine Divitis Microfinance Bank
+  'PROJECTSMICROFINANCEBANK': '090503', // Projects Microfinance Bank
+  'PROPHIUS': '110032', // Prophius
+  'PROSPERITYMFB': '090642', // Prosperity MFB
+  'PROVIDUSBANK': '000023', // Providus Bank
+  'PURPLEMONEYMICROFINANCEBANK': '090303', // Purplemoney Microfinance Bank
+  'PYRAMIDMFB': '090657', // Pyramid MFB
+  'QUBEMICROFINANCEBANK': '090569', // Qube Microfinance Bank
+  'QUICKFUNDMICROFINANCEBANK': '090261', // Quickfund Microfinance Bank
+  'RANDALPHAMICROFINANCEBANK': '090496', // Randalpha Microfinance Bank
+  'RANDMERCHANTBANK': '000024', // Rand Merchant Bank
+  'RAYYANMFB': '090616', // Rayyan MFB
+  'REFUGEMORTGAGEBANK': '070011', // Refuge Mortgage Bank
+  'REGENTMICROFINANCEBANK': '090125', // Regent Microfinance Bank
+  'REHOBOTHMICROFINANCEBANK': '090463', // Rehoboth Microfinance Bank
+  'RELIANCEMICROFINANCEBANK': '090173', // Reliance Microfinance Bank
+  'RENMONEYMICROFINANCEBANK': '090198', // RenMoney Microfinance Bank
+  'REPHIDIMMICROFINANCEBANK': '090322', // Rephidim Microfinance Bank
+  'RICHWAYMICROFINANCEBANK': '090132', // Richway Microfinance Bank
+  'RIGOMICROFINANCEBANK': '090433', // Rigo Microfinance Bank
+  'RIMAGROWTHPATHWAYMICROFINANCEBANK': '090515', // RIMA Growth Pathway Microfinance Bank
+  'ROCKSHIELDMICROFINANCEBANK': '090547', // Rockshield Microfinance Bank
+  'ROYALBLUEMFB': '090622', // Royal Blue MFB
+  'ROYALEXCHANGEMICROFINANCEBANK': '090138', // Royal Exchange Microfinance Bank
+  'SAFEHAVENMICROFINANCEBANK': '090286', // Safe Haven Microfinance Bank
+  'SAFETRUST': '090006', // SafeTrust
+  'SAGAMUMICROFINANCEBANK': '090140', // Sagamu Microfinance Bank
+  'SAGEGREYFINANCELIMITED': '050003', // SageGrey Finance Limited
+  'SEAPMICROFINANCEBANK': '090513', // SEAP Microfinance Bank
+  'SEEDCAPITALMICROFINANCEBANK': '090112', // Seed Capital Microfinance Bank
+  'SEEDVESTMICROFINANCEBANK': '090369', // Seedvest Microfinance Bank
+  'SHALOMMICROFINANCEBANK': '090502', // Shalom Microfinance Bank
+  'SHEPHERDTRUSTMICROFINANCEBANK': '090401', // Shepherd Trust Microfinance Bank
+  'SHIELDMICROFINANCEBANK': '090559', // Shield Microfinance Bank
+  'SHONGOMMICROFINANCEBANK': '090558', // Shongom Microfinance Bank
+  'SIGNATUREBANK': '000034', // Signature Bank
+  'SIMPLEFINANCELIMITED': '050008', // Simple Finance Limited
+  'SMARTCASHPSB': '120004', // SmartCash PSB
+  'SNOWMFB': '090573', // Snow MFB
+  'SOLIDALLIANZEMFB': '090506', // Solid Allianze MFB
+  'SOLIDROCKMICROFINANCEBANK': '090524', // Solidrock microfinance Bank
+  'SOURCEMFB': '090641', // Source MFB
+  'SPARKLE': '090325', // Sparkle
+  'STANBICIBTCBANK': '000012', // StanbicIBTC Bank
+  'STANBICIBTCEASEWALLET': '100007', // Stanbic IBTC @ease wallet
+  'STANDARDCHARTERED': '000021', // StandardChartered
+  'STANFORDMICROFINANCEBAK': '090162', // Stanford Microfinance Bak
+  'STATESIDEMICROFINANCEBANK': '090583', // Stateside Microfinance Bank
+  'STBMORTGAGEBANK': '070022', // STB Mortgage Bank
+  'STELLASMICROFINANCEBANK': '090262', // Stellas Microfinance Bank
+  'STERLINGBANK': '000001', // Sterling Bank
+  'SULSPAPMICROFINANCEBANK': '090305', // Sulspap Microfinance Bank
+  'SUNTOPMFB': '090644', // Suntop MFB
+  'SUNTRUSTBANK': '000022', // Suntrust Bank
+  'SUPREMEMICROFINANCEBANK': '090564', // Supreme Microfinance Bank
+  'TAGPAY': '100023', // TagPay
+  'TAJBANK': '000026', // Taj Bank
+  'TAJPINSPAY': '080002', // Taj_Pinspay
+  'TANADIMICROFINANCEBANK': '090560', // Tanadi Microfinance Bank
+  'TANGALEMFB': '090638', // Tangale MFB
+  'TASUEDMICROFINANCEBANK': '090593', // Tasued Microfinance Bank
+  'TCFMFB': '090115', // TCF MFB
+  'TEAMAPTLIMITED': '110007', // Teamapt Limited
+  'TEASYMOBILE': '100010', // TeasyMobile
+  'TEKLAFINANCELIMITED': '050007', // Tekla Finance Limited
+  'THINKFINANCEMICROFINANCEBANK': '090373', // Think Finance Microfinance Bank
+  'TITANPAYSTACK': '100039', // TitanPaystack
+  'TITANTRUSTBANK': '000025', // Titan Trust Bank
+  'TOTALTRUSTMFB': '090613', // Total Trust MFB
+  'TRIDENTMICROFINANCEBANK': '090146', // Trident Microfinance Bank
+  'TRINITYFINANCIALSERVICESLIMITED': '050014', // Trinity Financial Services Limited
+  'TRIPLEAMICROFINANCEBANK': '090525', // TripleA Microfinance Bank
+  'TRUSTBONDMORTGAGEBANK': '090005', // Trustbond Mortgage Bank
+  'TRUSTFUNDMICROFINANCEBANK': '090276', // Trustfund Microfinance Bank
+  'TRUSTMICROFINANCEBANK': '090327', // Trust Microfinance Bank
+  'UCMICROFINANCEBANK': '090315', // U & C Microfinance Bank
+  'UDAMICROFINANCEBANK': '090403', // UDA Microfinance Bank
+  'UHURUMICROFINANCEBANK': '090517', // Uhuru Microfinance Bank
+  'UMMAHMICROFINANCEBANK': '090609', // Ummah Microfinance Bank
+  'UMUCHUKWUMFB': '090632', // Umuchukwu MFB
+  'UNAABMICROFINANCEBANK': '090331', // UNAAB Microfinance Bank
+  'UNIBENMICROFINANCEBANK': '090266', // Uniben Microfinance Bank
+  'UNICALMICROFINANCEBANK': '090193', // Unical Microfinance Bank
+  'UNIFUNDMFB': '090637', // Unifund MFB
+  'UNIMAIDMICROFINANCEBANK': '090464', // Unimaid Microfinance Bank
+  'UNIONBANK': '000018', // Union Bank
+  'UNITEDBANKFORAFRICA': '000004', // United Bank for Africa
+  'UNITYBANK': '000011', // Unity Bank
+  'UNIUYOMICROFINANCEBANK': '090338', // UniUyo Microfinance Bank
+  'UNNMFB': '090251', // UNN MFB
+  'VALEFINANCELIMITED': '110071', // Vale Finance Limited
+  'VAS2NETSLIMITED': '110015', // Vas2nets Limited
+  'VERDANTMICROFINANCEBANK': '090474', // Verdant Microfinance Bank
+  'VERITEMICROFINANCEBANK': '090123', // Verite Microfinance Bank
+  'VFDMFB': '090110', // VFD MFB
+  'VIRTUEMICROFINANCEBANK': '090150', // Virtue Microfinance Bank
+  'VISAMICROFINANCEBANK': '090139', // Visa Microfinance Bank
+  'VTNETWORKS': '100012', // VTNetworks
+  'WAYAMICROFINANCEBANK': '090950', // Waya Microfinance Bank
+  'WEMABANK': '000017', // Wema Bank
+  'WETLANDMICROFINANCEBANK': '090120', // Wetland Microfinance Bank
+  'XPRESSWALLET': '100040', // Xpresswallet
+  'XSLNCEMICROFINANCEBANK': '090124', // Xslnce Microfinance Bank
+  'YCTMICROFINANCEBANK': '090466', // YCT Microfinance Bank
+  'YESMICROFINANCEBANK': '090142', // Yes Microfinance Bank
+  'YOBEMICROFINANCEBANK': '090252', // Yobe Microfinance Bank
+  'ZENITHBANKPLC': '000015', // Zenith Bank Plc
+  'ZENITHEAZYWALLET': '100034', // Zenith Eazy Wallet
+  'ZENITHMOBILE': '100018', // ZenithMobile
+  'ZIKORAMICROFINANCEBANK': '090504', // Zikora Microfinance Bank
+  'ZINTERNETNIGERALIMITED': '100025', // Zinternet Nigera Limited
+
+};
+
+// Strict normaliser for the NIBSS_CODE_BY_NAME lookup — exact match only
+// (case/punctuation-insensitive), unlike normaliseBank()'s fuzzy prefixes.
+function nibssKey(raw) {
+  return String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
 // Nigerian NUBAN account numbers are exactly 10 digits. Anything else will
 // bounce at the bank, so it is worth naming before the file is submitted
 // rather than after a failed batch.
@@ -1838,7 +2347,11 @@ async function bankXlsxBuffer(run) {
         r2(l.bags_loaded || 0),
         r2(l.bags_bagged || 0),
         bank,
-        BANK_CODES[bank] || '',
+        // Curated 23-bank table first (matches the canon BANK_ALIASES just
+        // grouped by); if that misses, try an exact match of what was
+        // actually typed against the full NIBSS directory — covers a bank
+        // nobody has hard-coded an alias for yet without guessing at one.
+        BANK_CODES[bank] || NIBSS_CODE_BY_NAME[nibssKey(l.bank_name)] || '',
         String(l.bank_account || '').trim(),
         r2(l.gross),
         r2(l.deductions),

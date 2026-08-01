@@ -1722,6 +1722,14 @@ const BANK_ALIASES = [
   [/^keystone/, 'KEYSTONE'],
   [/^union/, 'UNION'],
   [/^wema/, 'WEMA'],
+  [/^provid/, 'PROVIDUS'],
+  [/^globus/, 'GLOBUS'],
+  [/^kuda/, 'KUDA'],
+  [/^unity/, 'UNITY'],
+  [/^heritage/, 'HERITAGE'],
+  [/^polaris/, 'POLARIS'],
+  [/^jaiz/, 'JAIZ'],
+  [/^titan/, 'TITANTRUST'],
 ];
 
 function normaliseBank(raw) {
@@ -1732,22 +1740,37 @@ function normaliseBank(raw) {
   return t.toUpperCase();
 }
 
-// Canonical bank name → 6-digit CBN institution code, used only for the bank
-// payment workbook below. Seeded from the codes visible in the accountant's
-// own reference file (data/final_Bank_Payroll_Month <Month> <Year> after
-// file.xls) — a bank not seen there yet exports with a blank code rather
-// than a guessed one. Add to this map as new banks turn up on a real run.
+// Canonical bank name → 6-digit NIP institution code (NIBSS interbank
+// transfer code — NOT the old 3-digit CBN clearing code), used only for the
+// bank payment workbook below. The first 12 came from the accountant's own
+// reference file (data/final_Bank_Payroll_Month <Month> <Year> after
+// file.xls); the rest were added from NIBSS's public code list (2026-08) to
+// cover every canonical name BANK_ALIASES recognises. A bank not in this map
+// exports with a blank code rather than a guessed one — add to this map
+// (and to BANK_ALIASES if it's a new alias) as new banks turn up on a run.
 const BANK_CODES = {
   ACCESS: '000014',
   ECOBANK: '000010',
   FCMB: '000003',
   FIDELITY: '000007',
   FIRSTBANK: '000016',
+  GLOBUS: '000027',
   GTBANK: '000013',
+  HERITAGE: '000020',
   IBTC: '000012',
+  JAIZ: '000006',
+  KEYSTONE: '000002',
+  KUDA: '090267',
   MONIEPOINT: '090405',
   OPAY: '100004',
+  PALMPAY: '100033',
+  POLARIS: '000008',
+  PROVIDUS: '000023',
+  STERLING: '000001',
+  TITANTRUST: '000025',
   UBA: '000004',
+  UNION: '000018',
+  UNITY: '000011',
   WEMA: '000017',
   ZENITH: '000015',
 };

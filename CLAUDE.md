@@ -86,3 +86,15 @@ git push
 - Collections likely: sales/orders, expenses, customers, staff, products
 - Script to write once old schema is confirmed
 → Details: memory/data-migration.md
+
+## Mobile shell layout (fixed 2026-08-01 — do not regress)
+- #root height uses `var(--appvh)` set from window.innerHeight in main.jsx
+  (refreshed on resize/visualViewport). 100vh/100dvh over-measure in in-app
+  webviews and edge-to-edge standalone — never size the shell with them alone.
+- .bottom-nav is IN-FLOW (position: static, order: 99, flex-shrink: 0) inside
+  the #root flex column, NOT position: fixed — fixed pinned it below the
+  visible edge in WhatsApp/IG webviews.
+- Standalone PWA floors (Android edge-to-edge reports env() = 0 on many
+  devices): header padding-top max(28px, env(safe-area-inset-top)); bottom-nav
+  padding-bottom max(24px, env(safe-area-inset-bottom)); offline-pill likewise.
+- After deploy, phone QA needs a full app close/reopen (sw.js caches CSS/JS).

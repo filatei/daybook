@@ -18,7 +18,7 @@ const { v4: uuid } = require('uuid');
 // In-memory upload for the payroll Excel import (parsed, never written to disk).
 const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
 const { qone, qall, qrun, withTransaction, clientQ } = require('./db');
-const { requireAuth, contextFor, requestedTenant, atLeast, siteBound, groupContexts } = require('./auth');
+const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
 
 const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -37,11 +37,19 @@ async function audit(tenant_id, user_id, action, entity, entity_id, meta) {
 // resolve it rather than 403.
 const GROUP_ID = '__group__';
 
-// groupContexts now lives in auth.js (shared with the attendance and staff
-// routes) and carries the finance-tier whole-business rule: SNR_ACCOUNTANT+
-// anywhere = every active tenant. Membership tenants order first, so the
-// anchor tenant a combined run is recorded against stays stable between
-// compute and save, and is always one the user really belongs to.
+// Every ACTIVE tenant where this user holds minRole (superadmin: all of them).
+// Ordered by name so the anchor tenant is stable across requests — a combined
+// run is recorded against the anchor, and it must not drift between compute and
+// save, or the draft would land in a different workspace than it was previewed in.
+async function groupContexts(user, minRole) {
+  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE' ORDER BY name, id");
+  const out = [];
+  for (const t of rows) {
+    const c = await contextFor(user, t.id);
+    if (c && atLeast(c.role, minRole)) out.push(c);
+  }
+  return out;
+}
 
 // Payroll compute/config/approve is restricted to the finance tier: SNR
 // ACCOUNTANT / GENERAL MANAGER / ADMIN (rank ≥ 7). Operational routes (recording
@@ -451,7 +459,7 @@ router.get('/pay-config', requireAuth, async (req, res) => {
   const sc = scopeSql(c);   // Group roll-up lists the roster of every workspace
   const where = [sc.sql, "status='ACTIVE'"], args = [...sc.args];
   if (req.query.site) { where.push('site_id=?'); args.push(req.query.site); }
-  res.json(await qall(`SELECT id, ext_people_id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
+  res.json(await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
     FROM staff WHERE ${where.join(' AND ')} ORDER BY full_name`, args));
 });
 router.patch('/pay-config/:id', requireAuth, async (req, res) => {
@@ -709,7 +717,7 @@ async function overrideForPeriod(from, to, kind) {
     ORDER BY created_at DESC, id DESC LIMIT 1`, [from, to, k]);
 }
 
-async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false, prorateMonthly = true) {
+async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false) {
   // Default follows the run kind: a piece-only run is a mid-month run.
   rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const sWhere = ['tenant_id=?', "status='ACTIVE'", "UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'",
@@ -724,9 +732,6 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false,
   const { by: prodBy, override, sourceIds } = await bagsForPeriod(tenant_id, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   // Per-site split behind each worker's total (where the bags were actually done).
   const bySite = await siteSplit(tenant_id, from, to, override);
-  // Site attribution inputs: clock-in days per site + site names (see primarySiteId).
-  const attSites = await attendanceSiteSplit(tenant_id, from, to);
-  const siteNames = await siteNamesFor(tenant_id);
   // Outstanding (unsettled) advances up to the period end.
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id=? AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [tenant_id, to]);
@@ -739,17 +744,12 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false,
     const pt = (s.pay_type || '').toUpperCase();
     let gross;
     if (pt === 'PIECE') gross = pb.l * rates.loaded + pb.g * rates.bagged;
-    // Monthly staff earn a FIXED salary — prorated by attendance over the
-    // period's Mon-Sat working days, unless this run pays full salaries
-    // (prorate_monthly=false, chosen on the Run tab).
-    else if (pt === 'MONTHLY') gross = prorateMonthly ? (s.daily_rate || 0) * (days / periodDays) : (s.daily_rate || 0);
+    // Monthly staff earn a FIXED salary, prorated by attendance over the period.
+    else if (pt === 'MONTHLY') gross = (s.daily_rate || 0) * (days / periodDays);
     else gross = days * (s.daily_rate || 0);   // daily wage
-    const primary = primarySiteId(bySite[s.id], attSites[s.id], s.site_id);
     return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
-      zero_reason: zeroReason(gross, pt, pb, days, s.daily_rate, rates),
       days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
       by_site: bySite[s.id] || [],
-      site_id: primary, site_name: primary ? (siteNames[primary] || null) : null,
       bags_source: sourceIds.has(s.id) ? 'SHEET' : 'PRODUCTION',
       member_ids: [s.id],
       advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
@@ -820,76 +820,11 @@ async function siteSplit(tenant_id, from, to, override = null) {
   return by;
 }
 
-// Clock-in days per worker PER SITE for a period — the second leg of the site
-// attribution rule below (bags decide first; days decide when there are none).
-async function attendanceSiteSplit(tenantIds, from, to) {
-  const ids = tenantList(tenantIds);
-  if (!ids.length) return {};
-  const ph = ids.map(() => '?').join(',');
-  const rows = await qall(`SELECT staff_id, site_id, COUNT(DISTINCT work_date) days
-    FROM attendance WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL
-      AND work_date BETWEEN ? AND ? AND site_id IS NOT NULL
-    GROUP BY staff_id, site_id`, [...ids, from, to]);
-  const by = {};
-  for (const r of rows) (by[r.staff_id] = by[r.staff_id] || []).push({ site_id: r.site_id, days: Number(r.days) });
-  return by;
-}
-
-// id → name for every site in scope, for labelling payroll lines.
-async function siteNamesFor(tenantIds) {
-  const ids = tenantList(tenantIds);
-  if (!ids.length) return {};
-  const ph = ids.map(() => '?').join(',');
-  const rows = await qall(`SELECT id, name FROM sites WHERE tenant_id IN (${ph})`, ids);
-  const m = {}; for (const r of rows) m[r.id] = r.name;
-  return m;
-}
-
-// Why did this person compute to zero? Answered PER LINE so the "Not paid
-// this period — review" list is a work queue instead of a mystery. The July
-// 2026 combined run put every Fiafia REGULAR staffer here with nothing to say
-// why — the answer (no clock-ins captured, or no daily rate configured) was
-// invisible without SQL. Returns null when the person was actually paid.
-function zeroReason(gross, pt, bags, days, dailyRate, rates) {
-  if (gross > 0) return null;
-  const isPiece = pt === 'PIECE';
-  if (isPiece) {
-    if ((bags.l + bags.g) <= 0) return 'NO_BAGS';
-    return 'RATE_ZERO'; // bags exist but the shared per-bag rates are zero
-  }
-  const parts = [];
-  if (days <= 0) parts.push('NO_CLOCKINS');
-  if ((Number(dailyRate) || 0) <= 0) parts.push('NO_RATE');
-  return parts.length ? parts.join('+') : 'ZERO';
-}
-
-// SITE ATTRIBUTION RULE (business decision, 2026-07-29): every payroll line
-// must belong to a site. When a person worked at more than one, the site with
-// the most BAGS wins (that is where their pay was earned); with no bags at
-// all (salaried/daily staff), the site with the most clock-in DAYS; and only
-// when neither exists, the staff record's home site. Keeps the payroll's
-// per-site grouping meaningful instead of piling everyone under "no site".
-function primarySiteId(bagSplit, attSplit, homeSiteId) {
-  let best = null, bestBags = 0;
-  for (let i = 0; i < (bagSplit || []).length; i++) {
-    const s = bagSplit[i];
-    const b = (Number(s.loaded) || 0) + (Number(s.bagged) || 0);
-    if (s.site_id && b > bestBags) { bestBags = b; best = s.site_id; }
-  }
-  if (best) return best;
-  let bestDays = 0;
-  for (let i = 0; i < (attSplit || []).length; i++) {
-    const a = attSplit[i];
-    if (a.site_id && a.days > bestDays) { bestDays = a.days; best = a.site_id; }
-  }
-  return best || homeSiteId || null;
-}
-
 // Combined payroll across MULTIPLE tenants (e.g. Fido + Fiafia), merging the same
 // person into one payslip. Identity = normalized name + bank account (name-only
 // when no account on file). Piece pay uses the shared per-bag rates; monthly pay
 // is prorated by DISTINCT days clocked-in across all the person's tenants.
-async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = false, prorateMonthly = true) {
+async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = false) {
   rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (!tenantIds.length) return [];
   const ph = tenantIds.map(() => '?').join(',');
@@ -902,14 +837,7 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [...tenantIds, from, to]);
   const daysByStaff = {};
   for (const a of att) (daysByStaff[a.staff_id] = daysByStaff[a.staff_id] || new Set()).add(a.work_date);
-  const { by: prodBy, sourceIds, override } = await bagsForPeriod(tenantIds, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
-  // Site attribution inputs (see primarySiteId): per-site bags behind each
-  // worker's total, per-site clock-in days, and site names across ALL tenants
-  // in scope. The combined run previously carried no site information at all,
-  // which piled every line under "No production site" in the UI.
-  const bagSites = await siteSplit(tenantIds, from, to, override);
-  const attSites = await attendanceSiteSplit(tenantIds, from, to);
-  const siteNames = await siteNamesFor(tenantIds);
+  const { by: prodBy, sourceIds } = await bagsForPeriod(tenantIds, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id IN (${ph}) AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [...tenantIds, to]);
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
@@ -943,38 +871,16 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
       advance += advBy[id] || 0;
     }
     for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; g += pb.g; } }
-    // Merge the members' per-site bag splits (same bagIds as the totals, so
-    // the breakdown always adds up to the figure being paid) and their
-    // per-site clock-in days, then attribute the person to ONE site.
-    const siteBags = {};
-    for (const id of bagIds) {
-      for (const s of (bagSites[id] || [])) {
-        const k = String(s.site_id || '');
-        const acc = siteBags[k] || (siteBags[k] = { site_id: s.site_id, site_name: s.site_name, loaded: 0, bagged: 0 });
-        acc.loaded = round2(acc.loaded + (Number(s.loaded) || 0));
-        acc.bagged = round2(acc.bagged + (Number(s.bagged) || 0));
-      }
-    }
-    const bySiteMerged = Object.values(siteBags).sort((a, b) => String(a.site_name).localeCompare(String(b.site_name)));
-    const siteDays = {};
-    for (const id of memberIds) {
-      for (const a of (attSites[id] || [])) siteDays[a.site_id] = (siteDays[a.site_id] || 0) + a.days;
-    }
-    const attMerged = Object.keys(siteDays).map((sid) => ({ site_id: sid, days: siteDays[sid] }));
-    const primary = primarySiteId(bySiteMerged, attMerged, head.site_id);
     const days = dayset.size;
     const pt = (head.pay_type || '').toUpperCase();
     let gross;
     if (pt === 'PIECE') gross = l * rates.loaded + g * rates.bagged;
-    else if (pt === 'MONTHLY') gross = prorateMonthly ? (head.daily_rate || 0) * (days / periodDays) : (head.daily_rate || 0);
+    else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
     else gross = days * (head.daily_rate || 0);
     const line = {
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
-      zero_reason: zeroReason(round2(gross), pt, { l, g }, days, head.daily_rate, rates),
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
       bags_loaded: l, bags_bagged: g, gross: round2(gross), advance: round2(advance),
-      by_site: bySiteMerged,
-      site_id: primary, site_name: primary ? (siteNames[primary] || null) : null,
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
       tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
     };
@@ -993,18 +899,15 @@ router.post('/compute2', requireAuth, async (req, res) => {
   // Mid-month pays per-bag commission only — REGULAR (monthly-salary) staff have
   // nothing to earn in it and must not appear. They are paid at month-end.
   const pieceOnly = (req.body || {}).piece_only === true;
-  // Monthly salaries prorate by clock-in days unless the accountant unticks
-  // it for this run (pay full salary regardless of attendance).
-  const prorateMonthly = (req.body || {}).prorate_monthly !== false;
   // Rate pair must match the run: mid-month = ₦1 incentive, month-end = ₦6 full.
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (combined) {
     const group = await payrollGroup(req.user, c.tenant_id, c);
-    const lines = await computeCombinedLines(group, from, to, rates, pieceOnly, prorateMonthly);
-    return res.json({ from, to, combined: true, piece_only: pieceOnly, prorate_monthly: prorateMonthly, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+    const lines = await computeCombinedLines(group, from, to, rates, pieceOnly);
+    return res.json({ from, to, combined: true, piece_only: pieceOnly, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
   }
-  const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly, prorateMonthly);
-  res.json({ from, to, piece_only: pieceOnly, prorate_monthly: prorateMonthly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+  const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly);
+  res.json({ from, to, piece_only: pieceOnly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
 });
 
 // ── Excel template download (Fido-shaped: REGULAR / BAGGERS / LOADERS) ─────────
@@ -1017,11 +920,10 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   const combined = req.query.combined === '1' || req.query.combined === 'true';
   // Mid-month: piece workers only, so the REGULAR sheet is omitted entirely.
   const pieceOnly = req.query.piece_only === '1' || req.query.piece_only === 'true';
-  const prorateMonthly = !(req.query.prorate_monthly === '0' || req.query.prorate_monthly === 'false');
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly, prorateMonthly)
-    : await computeLines(c.tenant_id, from, to, null, rates, pieceOnly, prorateMonthly);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
+    : await computeLines(c.tenant_id, from, to, null, rates, pieceOnly);
   const ids = lines.map((l) => l.staff_id).filter(Boolean);
   const sBy = {};
   if (ids.length) {
@@ -1141,8 +1043,7 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
       if (!siteId) { skippedNoSite.push(full || id); return; }
       await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,staff_type,pay_type,daily_rate,bank_name,bank_account,ext_people_id,status)
         VALUES (?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE')`,
-        [uuid(), c.tenant_id, siteId, full, designation, staffType, payType, baseSalary, bankName, bankAcct,
-          id || ('S' + uuid().replace(/-/g, '').slice(0, 8).toUpperCase())]);
+        [uuid(), c.tenant_id, siteId, full, designation, staffType, payType, baseSalary, bankName, bankAcct, id || null]);
       created += 1;
     }
   };
@@ -1154,142 +1055,6 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
     for (const r of rows) await upsert(r, staffType);
   }
   res.json({ created, updated, sites_unmatched: Array.from(noSite), skipped_no_site: skippedNoSite });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MONTH-END STREAMLINING — bulk sheets keyed by STAFF ID (2026-07-29)
-//
-// The Staff ID (ext_people_id — every staff row has one since the Phase 10
-// backfill; it is printed on every template) is the ONLY matching key in these
-// sheets. Names are a SAFETY CHECK, never a matcher: a row whose NAME clearly
-// disagrees with the record behind its Staff ID is rejected for review instead
-// of silently paying the wrong person.
-// ═══════════════════════════════════════════════════════════════════════════════
-const normPersonName = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
-const nameClash = (sheetName, dbName) => {
-  const a = normPersonName(sheetName), b = normPersonName(dbName);
-  if (!a) return false;                       // no name supplied -> trust the ID
-  return a !== b && a.indexOf(b) < 0 && b.indexOf(a) < 0;
-};
-function firstSheetRows(buffer) {
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  const name = wb.SheetNames[0];
-  return name ? XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '' }) : [];
-}
-const cellOf = (row) => {
-  const norm = (k) => String(k || '').trim().toUpperCase();
-  return (names) => { for (const k of Object.keys(row)) if (names.includes(norm(k))) return row[k]; return undefined; };
-};
-const numCell = (v) => { if (v == null || v === '') return null; const n = parseFloat(String(v).replace(/[, ]/g, '')); return isNaN(n) ? null : n; };
-
-// Resolve one Staff ID within the request's tenant scope. Returns
-// { staff } | { error: 'unmatched' | 'ambiguous' }.
-async function staffByExtId(c, extId) {
-  const idv = String(extId ?? '').replace(/\.0$/, '').trim();
-  if (!idv) return { error: 'unmatched' };
-  const sc = scopeSql(c);
-  const rows = await qall(`SELECT * FROM staff WHERE ${sc.sql} AND ext_people_id=?`, [...sc.args, idv]);
-  if (rows.length === 0) return { error: 'unmatched' };
-  if (rows.length > 1) return { error: 'ambiguous' };
-  return { staff: rows[0] };
-}
-
-// ── Salaries template: current roster, prefilled, ready to edit ────────────────
-// Group-aware: one workbook covers Fido + Fiafia. Piece workers are excluded -
-// they are paid per bag, not a salary.
-router.get('/salaries-template.xlsx', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
-  const sc = scopeSql(c, 's.tenant_id');
-  const staff = await qall(`SELECT s.ext_people_id, s.full_name, s.pay_type, s.daily_rate,
-      si.name site_name, t.name tenant_name
-    FROM staff s LEFT JOIN sites si ON si.id=s.site_id JOIN tenants t ON t.id=s.tenant_id
-    WHERE ${sc.sql} AND s.status='ACTIVE' AND ${PAYROLL_ELIGIBLE_S}
-      AND NOT ${PIECE_WORKER_S}
-    ORDER BY t.name, s.full_name`, sc.args);
-  const rows = staff.map((st, i) => ({
-    'S/N': i + 1,
-    'STAFF ID': st.ext_people_id || '',
-    NAME: st.full_name,
-    COMPANY: st.tenant_name,
-    SITE: st.site_name || '',
-    'MONTHLY SALARY': String(st.pay_type || '').toUpperCase() === 'MONTHLY' ? (Number(st.daily_rate) || 0) : '',
-  }));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows,
-    { header: ['S/N', 'STAFF ID', 'NAME', 'COMPANY', 'SITE', 'MONTHLY SALARY'] }), 'SALARIES');
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename="salaries-template.xlsx"');
-  res.send(buf);
-});
-
-// ── Bulk salary upload: STAFF ID + MONTHLY SALARY, updates only ────────────────
-// Never creates staff (that is staff-import's job) and never touches piece
-// workers, so it is safe under the Group roll-up: a unique Staff ID names one
-// person in one workspace, wherever the accountant happens to be.
-router.post('/salaries-import', requireAuth, xlsUpload.single('file'), async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
-  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
-  let rows;
-  try { rows = firstSheetRows(req.file.buffer); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
-
-  let updated = 0, unchanged = 0;
-  const unmatched = [], nameMismatch = [], skippedPiece = [], ambiguous = [];
-  for (const row of rows) {
-    const get = cellOf(row);
-    const extId = String(get(['STAFF ID', 'ID', 'EXT ID', 'STAFFID']) ?? '').replace(/\.0$/, '').trim();
-    const salary = numCell(get(['MONTHLY SALARY', 'SALARY', 'BASE SALARY', 'AMOUNT']));
-    if (!extId && salary == null) continue;    // blank row
-    if (!extId || salary == null || salary < 0) { unmatched.push(extId || '(no id)'); continue; }
-    const r = await staffByExtId(c, extId);
-    if (r.error === 'unmatched') { unmatched.push(extId); continue; }
-    if (r.error === 'ambiguous') { ambiguous.push(extId); continue; }
-    const st = r.staff;
-    if (isPieceWorker(st)) { skippedPiece.push(`${extId} ${st.full_name}`); continue; }
-    const sheetName = get(['NAME', 'FULL NAME', 'STAFF NAME']);
-    if (nameClash(sheetName, st.full_name)) {
-      nameMismatch.push(`${extId}: sheet says "${String(sheetName).trim()}", record is "${st.full_name}"`);
-      continue;                                // wrong ID until a human says otherwise
-    }
-    if (String(st.pay_type || '').toUpperCase() === 'MONTHLY' && Number(st.daily_rate) === salary) { unchanged++; continue; }
-    await qrun("UPDATE staff SET pay_type='MONTHLY', daily_rate=? WHERE id=?", [salary, st.id]);
-    updated++;
-  }
-  await audit(c.tenant_id, req.user.id, 'PAYROLL_SALARIES_IMPORT', 'staff', null,
-    { updated, unchanged, unmatched: unmatched.length, name_mismatch: nameMismatch.length, skipped_piece: skippedPiece.length });
-  res.json({ updated, unchanged, unmatched, ambiguous, name_mismatch: nameMismatch, skipped_piece: skippedPiece });
-});
-
-// ── Deductions sheet: STAFF ID + DEDUCTION, parsed for a run in progress ───────
-// PARSE ONLY - nothing is written here. The Run tab applies the amounts to the
-// computed lines on screen, the accountant reviews them, and Save persists the
-// draft. Money only moves through the same reviewed path it always did.
-router.post('/deductions-parse', requireAuth, xlsUpload.single('file'), async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
-  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
-  let rows;
-  try { rows = firstSheetRows(req.file.buffer); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
-
-  const items = [];
-  const unmatched = [], nameMismatch = [], ambiguous = [];
-  for (const row of rows) {
-    const get = cellOf(row);
-    const extId = String(get(['STAFF ID', 'ID', 'EXT ID', 'STAFFID']) ?? '').replace(/\.0$/, '').trim();
-    const amount = numCell(get(['DEDUCTION', 'DEDUCTIONS', 'AMOUNT', 'SALARY ADV', 'ADVANCE']));
-    if (!extId && amount == null) continue;
-    if (!extId || amount == null || amount < 0) { unmatched.push(extId || '(no id)'); continue; }
-    const r = await staffByExtId(c, extId);
-    if (r.error === 'unmatched') { unmatched.push(extId); continue; }
-    if (r.error === 'ambiguous') { ambiguous.push(extId); continue; }
-    const st = r.staff;
-    const sheetName = get(['NAME', 'FULL NAME', 'STAFF NAME']);
-    if (nameClash(sheetName, st.full_name)) {
-      nameMismatch.push(`${extId}: sheet says "${String(sheetName).trim()}", record is "${st.full_name}"`);
-      continue;
-    }
-    items.push({ staff_id: st.id, ext_id: extId, full_name: st.full_name, amount: round2(amount) });
-  }
-  res.json({ items, unmatched, ambiguous, name_mismatch: nameMismatch });
 });
 
 // ── Per-staff payroll breakdown (drill-down) — Snr Accountant+ ─────────────────
@@ -1373,26 +1138,11 @@ router.post('/runs2', requireAuth, async (req, res) => {
   // Must mirror the compute2 call the accountant previewed, or the saved draft
   // would quietly differ from what they approved on screen.
   const pieceOnly = b.piece_only === true;
-  const prorateMonthly = b.prorate_monthly !== false;
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly, prorateMonthly)
-    : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly, prorateMonthly);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
+    : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly);
   const runId = uuid();
-  // replace_draft: delete any existing DRAFT for this period+kind first, so
-  // re-running month-end replaces the working copy instead of stacking
-  // duplicates. Approved/paid runs are never touched.
-  if (b.replace_draft === true) {
-    const scope = ctxTenants(c);
-    const ph2 = scope.map(() => '?').join(',');
-    const olds = await qall(`SELECT id FROM pay_runs WHERE tenant_id IN (${ph2}) AND period_from=? AND period_to=? AND kind=? AND status='DRAFT'`,
-      [...scope, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR']);
-    for (const o of olds) {
-      await qrun('UPDATE staff_advances SET run_id=NULL WHERE run_id=?', [o.id]);
-      await qrun('DELETE FROM pay_runs WHERE id=?', [o.id]);
-      await audit(c.tenant_id, req.user.id, 'PAYROLL_RUN_DELETE', 'pay_runs', o.id, { period: `${from}→${to}`, replaced_by: runId });
-    }
-  }
   // Which override batch (if any) fed this run. Recorded ON THE RUN because the
   // batch can later be removed, and an approved payroll whose numbers cannot be
   // explained afterwards is worse than one that was never saved.
@@ -1402,9 +1152,9 @@ router.post('/runs2', requireAuth, async (req, res) => {
     // Persist WHICH run this is. Without it the draft looks REGULAR, and any later
     // line edit or Excel re-import would recompute a ₦1 mid-month run at the ₦6
     // full rate — a silent 6x overpay.
-    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,prorate_monthly,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?,?,?)`,
+    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?,?)`,
       [runId, c.tenant_id, combined ? null : site, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR',
-        usedOverride ? usedOverride.id : null, prorateMonthly, req.user.id]);
+        usedOverride ? usedOverride.id : null, req.user.id]);
     for (const l of lines) {
       if (l.gross <= 0) continue; // never save a zero payslip line
       const d = Math.min(l.gross, Math.max(0, ded[l.staff_id] != null ? +ded[l.staff_id] : l.advance));
@@ -1478,11 +1228,7 @@ router.patch('/runs2/:id/lines/:lineId', requireAuth, async (req, res) => {
   const periodDays = workingDays(run.period_from, run.period_to); // Mon–Sat working days
   let gross;
   if (pt === 'PIECE') gross = loaded * rates.loaded + bagged * rates.bagged;
-  // Honour the run's own proration choice — a full-salary run must not be
-  // silently re-prorated by a later line edit.
-  else if (pt === 'MONTHLY') gross = (run.prorate_monthly === false)
-    ? (Number(st?.daily_rate) || 0)
-    : (Number(st?.daily_rate) || 0) * (days / periodDays);
+  else if (pt === 'MONTHLY') gross = (Number(st?.daily_rate) || 0) * (days / periodDays);
   else gross = days * (Number(st?.daily_rate) || 0);
   gross = round2(gross);
   const ded = Math.min(gross, deduction);
@@ -1562,9 +1308,7 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
         const st = await qone('SELECT daily_rate FROM staff WHERE id=?', [staffId]);
         rate = Number(st?.daily_rate) || 0;
       }
-      gross = pt === 'MONTHLY'
-        ? (run.prorate_monthly === false ? rate : rate * (days / periodDays))
-        : days * rate;
+      gross = pt === 'MONTHLY' ? rate * (days / periodDays) : days * rate;
     }
     gross = round2(gross);
     const d2 = Math.min(gross, Math.max(0, ded != null ? ded : Number(line.deductions) || 0));
@@ -1636,14 +1380,11 @@ router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
   if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be recomputed' });
   const pieceOnly = run.kind === 'MIDMONTH';
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
-  // Honour the run's own proration choice, exactly like the line-edit and
-  // Excel-import paths — a full-salary draft must recompute as full-salary.
-  const prorateMonthly = run.prorate_monthly !== false;
   // site_id NULL on a saved run means it was combined across the group.
   const combined = !run.site_id;
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, run.tenant_id, c), run.period_from, run.period_to, rates, pieceOnly, prorateMonthly)
-    : await computeLines(run.tenant_id, run.period_from, run.period_to, run.site_id, rates, pieceOnly, prorateMonthly);
+    ? await computeCombinedLines(await payrollGroup(req.user, run.tenant_id, c), run.period_from, run.period_to, rates, pieceOnly)
+    : await computeLines(run.tenant_id, run.period_from, run.period_to, run.site_id, rates, pieceOnly);
   let tg = 0, td = 0, tn = 0, n = 0;
   await withTransaction(async () => {
     await qrun('UPDATE staff_advances SET run_id=NULL WHERE run_id=?', [run.id]);
@@ -1991,6 +1732,26 @@ function normaliseBank(raw) {
   return t.toUpperCase();
 }
 
+// Canonical bank name → 6-digit CBN institution code, used only for the bank
+// payment workbook below. Seeded from the codes visible in the accountant's
+// own reference file (data/final_Bank_Payroll_Month <Month> <Year> after
+// file.xls) — a bank not seen there yet exports with a blank code rather
+// than a guessed one. Add to this map as new banks turn up on a real run.
+const BANK_CODES = {
+  ACCESS: '000014',
+  ECOBANK: '000010',
+  FCMB: '000003',
+  FIDELITY: '000007',
+  FIRSTBANK: '000016',
+  GTBANK: '000013',
+  IBTC: '000012',
+  MONIEPOINT: '090405',
+  OPAY: '100004',
+  UBA: '000004',
+  WEMA: '000017',
+  ZENITH: '000015',
+};
+
 // Nigerian NUBAN account numbers are exactly 10 digits. Anything else will
 // bounce at the bank, so it is worth naming before the file is submitted
 // rather than after a failed batch.
@@ -2017,46 +1778,72 @@ async function bankLines(run) {
     WHERE pl.run_id=? ORDER BY st.name, s.full_name`, [run.id]);
 }
 
-async function bankCsv(run) {
+// BANK PAYMENT WORKBOOK — grouped by bank (A→Z), then by staff name within
+// each bank, mirroring the layout the Snr Accountant has always built by
+// hand (data/final_Bank_Payroll_Month <Month> <Year> after file.xls) so this
+// replaces that manual step without changing the shape the bank is used to
+// seeing. Column order and the blank spacer row after the header are copied
+// from that reference workbook verbatim — do not "tidy" them without
+// checking against a real upload first (see the CSV-era note above).
+async function bankXlsxBuffer(run) {
   const lines = await bankLines(run);
-  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const payType = String(run.kind || '').toUpperCase() === 'MIDMONTH' ? 'MID-MONTH' : 'MONTH-END';
-  const status = String(run.status || '').toUpperCase() === 'PAID' ? 'PAID' : 'UNPAID';
 
-  const header = ['payeeName', 'payee_id', 'bankAccount', 'bankName', 'accountNo', 'jobName',
-    'grossPay', 'netPay', 'status', 'siteName', 'payType', 'salaryAdvance',
-    'deductions', 'daysAbsent', 'daysWorked', 'totalWorkDaysInMonth'];
+  const grouped = {};
+  for (const l of lines) {
+    const bank = normaliseBank(l.bank_name) || '(NO BANK)';
+    (grouped[bank] = grouped[bank] || []).push(l);
+  }
+  const banks = Object.keys(grouped).sort((a, b) => a.localeCompare(b));
+  for (const bank of banks) {
+    grouped[bank].sort((a, b) =>
+      String(a.full_name || a.staff_name || '').localeCompare(String(b.full_name || b.staff_name || '')));
+  }
 
-  const rows = lines.map((l) => {
-    const bank = normaliseBank(l.bank_name);
-    const acct = String(l.bank_account || '').trim();
-    return [
-      l.full_name || l.staff_name || '',
-      l.ext_people_id || '',
-      [bank, acct].filter(Boolean).join('-'),   // legacy kept the combined form too
-      bank,
-      acct,
-      String(l.pay_type || '').toUpperCase(),
-      r2(l.gross), r2(l.net ?? l.gross),
-      status,
-      (l.site_name || '').toUpperCase(),
-      payType,
-      0, r2(l.deductions), 0, r2(l.days_present || 0), 0,
-    ];
-  });
+  const HEADER = ['', 'Staff', 'ID', 'Site', 'Pay type', 'Days', 'Bags loaded', 'Bags bagged',
+    'Bank', '', 'Account number', 'Gross', 'Deductions', 'Net', 'Bags from'];
+  const aoa = [HEADER, []];
 
-  return [header, ...rows].map((r) => r.map(q).join(',')).join('\r\n');
+  for (const bank of banks) {
+    for (const l of grouped[bank]) {
+      aoa.push([
+        '',
+        l.full_name || l.staff_name || '',
+        l.ext_people_id || '',
+        l.site_name || '',
+        String(l.pay_type || '').toUpperCase(),
+        r2(l.days_present || 0),
+        r2(l.bags_loaded || 0),
+        r2(l.bags_bagged || 0),
+        bank,
+        BANK_CODES[bank] || '',
+        String(l.bank_account || '').trim(),
+        r2(l.gross),
+        r2(l.deductions),
+        r2(l.net ?? l.gross),
+        l.bags_source === 'SHEET' ? "accountant's sheet" : 'recorded production',
+      ]);
+    }
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 2 }, { wch: 28 }, { wch: 14 }, { wch: 14 }, { wch: 9 }, { wch: 6 },
+    { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 7 }, { wch: 14 }, { wch: 11 }, { wch: 11 },
+    { wch: 11 }, { wch: 20 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'BANK PAYMENT');
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
-// The CSV itself always generates — a payroll must not be blocked by one bad
-// record. The issues ride alongside so the UI can warn before submission.
-router.get('/runs2/:id/bank.csv', requireAuth, async (req, res) => {
+// The workbook itself always generates — a payroll must not be blocked by
+// one bad record. The issues ride alongside (bank-check, below) so the UI
+// can warn before submission.
+router.get('/runs2/:id/bank.xlsx', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).end();
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="bank-payment-${run.period_from}_${run.period_to}.csv"`);
-  res.send(await bankCsv(run));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="bank-payment-${run.period_from}_${run.period_to}.xlsx"`);
+  res.send(await bankXlsxBuffer(run));
 });
 
 // Pre-flight: who in this run cannot be paid as recorded.
@@ -2147,16 +1934,7 @@ async function emailMidMonth(tenant_id, runId, tenants) {
 
 const OVERRIDE_FLAG = 'sheet_override_enabled';
 
-// TEMPORARY (owner decision, 2026-07-30): the Admin enable gate is OFF — the
-// sheet override is always available to SNR_ACCOUNTANT+. Two reasons: the
-// Group workspace's synthetic GM role was hiding the enable button from real
-// Admins, and the saved-DRAFT approval step is the actual control before any
-// money moves. To restore the gate, set OVERRIDE_GATE_ENFORCED = true; all
-// the flag machinery below is intact.
-const OVERRIDE_GATE_ENFORCED = false;
-
 async function overrideEnabled() {
-  if (!OVERRIDE_GATE_ENFORCED) return true;
   const r = await qone('SELECT value FROM payroll_settings WHERE key=?', [OVERRIDE_FLAG]);
   return Number(r?.value) > 0;
 }
@@ -2213,11 +1991,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
   // accountant can check a sheet parses and matches BEFORE asking for the gate to
   // be opened — otherwise the one enable gets burnt on a typo.
   const dryRun = String(req.body?.dry_run || '') === '1' || req.body?.dry_run === true;
-  // An ADMIN uploading is the approval itself — the enable gate exists so a
-  // Snr Accountant's override gets an Admin's eyes first, not to make the
-  // Admin approve their own click twice.
-  const isAdminUpload = atLeast(c.role, 'ADMIN');
-  if (!dryRun && !isAdminUpload && !await overrideEnabled()) {
+  if (!dryRun && !await overrideEnabled()) {
     return res.status(403).json({
       error: 'Spreadsheet override is switched off. An Admin must enable it for this upload.',
       code: 'OVERRIDE_DISABLED',
@@ -2423,7 +2197,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
       // Admin enable would both pass it. This UPDATE is the real gate: whoever
       // flips 1→0 owns the upload, and the loser is told to ask again.
       const gate = await tx.qrun('UPDATE payroll_settings SET value=0, updated_at=? WHERE key=? AND value>0', [nowS(), OVERRIDE_FLAG]);
-      if (OVERRIDE_GATE_ENFORCED && !gate.rowCount && !isAdminUpload) { const e = new Error('OVERRIDE_TAKEN'); e.code = 'OVERRIDE_TAKEN'; throw e; }
+      if (!gate.rowCount) { const e = new Error('OVERRIDE_TAKEN'); e.code = 'OVERRIDE_TAKEN'; throw e; }
 
       // One live batch per period+kind. Re-uploading a corrected sheet replaces
       // the previous attempt rather than stacking a second set of numbers on it.

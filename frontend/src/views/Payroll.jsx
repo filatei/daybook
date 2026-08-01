@@ -57,10 +57,6 @@ function AdvanceForm({ staff, onSaved, onClose }) {
     <div>
       <div className="grip" />
       <h3>Advance — {staff.full_name}</h3>
-      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '4px 0 10px' }}>
-        An advance is money given to this person <b>now</b>. It is automatically proposed as a
-        <b> deduction</b> on their next computed payroll (you can still adjust it before saving).
-      </p>
       <p className="sub">Deducted from their next payroll automatically.</p>
       <label className="fl">Amount (₦)</label>
       <input type="number" className="input" value={amount} onChange={(e) => setAmount(e.target.value)} />
@@ -162,9 +158,6 @@ function RunTab({ sites, onSaved }) {
   // workspace to fall back to, so the toggle is forced on and hidden.
   const [combinedRaw, setCombined] = useState(true); // Fido + Fiafia in one run
   const combined = isGroup ? true : combinedRaw;
-  // Monthly salaries: prorate by clock-in days over Mon-Sat working days
-  // (default), or pay the full salary regardless of attendance.
-  const [prorate, setProrate] = useState(true);
   const [lines, setLines] = useState(null);
   // The override batch behind this period, if any — shown as a banner so the run
   // cannot be approved without knowing the bags came from a spreadsheet.
@@ -188,19 +181,12 @@ function RunTab({ sites, onSaved }) {
   // `err` is kept on screen. A toast alone is missed: a failed compute answers in
   // ~40ms, so the spinner never registers and the page looks like nothing happened.
   const [err, setErr] = useState(null);
-  const run = async (fromArg, toArg, opts) => {
-    // Explicit args beat state: the one-shot flow computes for the period it
-    // just read off the sheet, before React state has re-rendered. Guarded to
-    // strings because onClick={run} passes the click event as the first arg.
-    const F = typeof fromArg === 'string' ? fromArg : from;
-    const T = typeof toArg === 'string' ? toArg : to;
-    const prorateNow = opts && typeof opts.prorate === 'boolean' ? opts.prorate : prorate;
-    const pieceNow = opts && typeof opts.pieceOnly === 'boolean' ? opts.pieceOnly : pieceOnly;
-    if (!F || !T) return toast('Pick both dates first', 'err');
-    if (F > T) return toast('“From” is after “To”', 'err');
+  const run = async () => {
+    if (!from || !to) return toast('Pick both dates first', 'err');
+    if (from > to) return toast('“From” is after “To”', 'err');
     setBusy(true); setErr(null); setLines(null); setOverride(null);
     try {
-      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from: F, to: T, site: combined ? undefined : (site || undefined), combined, piece_only: pieceNow, prorate_monthly: prorateNow } });
+      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 })));
       setOverride(r.override || null);
       if (!r.lines.length) toast('No one to pay for this period', 'err');
@@ -211,101 +197,6 @@ function RunTab({ sites, onSaved }) {
     setBusy(false);
   };
   const setDedById = (id, v) => setLines((p) => p.map((l) => (l.staff_id === id ? { ...l, deduction: v } : l)));
-  // Deductions sheet (STAFF ID + DEDUCTION): server resolves IDs, we apply the
-  // amounts to the computed lines on screen. Combined lines are matched through
-  // their member_ids, so a person merged across Fido + Fiafia still resolves.
-  const [uploadingDed, setUploadingDed] = useState(false);
-  // ── Month-end in ONE upload ────────────────────────────────────────────────
-  // One workbook (REGULAR + BAGGERS + LOADERS) drives the whole close:
-  //   1. REGULAR sheet -> monthly salaries (by Staff ID)
-  //   2. BAGGERS/LOADERS -> the bags override for the period the sheet states
-  //   3. old DRAFT for that period replaced, payroll computed (full salaries,
-  //      no proration) and saved as a fresh draft for review
-  // Every step's outcome lands in a PERSISTENT panel — no vanishing toasts.
-  const [oneShot, setOneShot] = useState(null);   // { steps: [{label, ok, detail}], busy, file }
-  const oneShotStep = (label, ok, detail) =>
-    setOneShot((p) => ({ ...(p || {}), steps: [...((p && p.steps) || []), { label, ok, detail }] }));
-  const runOneShot = async (file, retryFile) => {
-    const f = file || retryFile;
-    if (!f) return;
-    setOneShot({ steps: [], busy: true, file: f });
-    try {
-      // 1. Salaries from the REGULAR sheet.
-      const fd1 = new FormData(); fd1.append('file', f);
-      const r1 = await api(scopedAny('/payroll/salaries-import'), { method: 'POST', form: fd1 });
-      oneShotStep('Salaries', true,
-        `${r1.updated} updated, ${r1.unchanged} already current`
-        + (r1.unmatched?.length ? ` · ⚠ ${r1.unmatched.length} unknown ID(s)` : '')
-        + (r1.name_mismatch?.length ? ` · ⚠ ${r1.name_mismatch.length} name/ID mismatch(es)` : '')
-        + (r1.skipped_piece?.length ? ` · ${r1.skipped_piece.length} bagger/loader rows skipped (paid per bag)` : ''));
-
-      // 2. Bags override — dry-run first to read the period/kind off the sheet.
-      const fdD = new FormData(); fdD.append('file', f); fdD.append('dry_run', '1');
-      const dry = await api(scopedAny('/payroll/production-override/import'), { method: 'POST', form: fdD });
-      if (dry.kind !== 'MONTHEND') {
-        oneShotStep('Bags', false, `sheet reads as ${dry.kind} — this button is for MONTH-END workbooks`);
-        setOneShot((p) => ({ ...p, busy: false }));
-        return;
-      }
-      const fd2 = new FormData(); fd2.append('file', f);
-      let applied;
-      try {
-        applied = await api(scopedAny('/payroll/production-override/import'), { method: 'POST', form: fd2 });
-      } catch (e) {
-        if (e.code === 'OVERRIDE_DISABLED' || e.code === 'OVERRIDE_TAKEN') {
-          oneShotStep('Bags', false, 'needs the Admin to enable the sheet override (Rates tab) — then press Resume');
-          setOneShot((p) => ({ ...p, busy: false, resume: true }));
-          return;
-        }
-        throw e;
-      }
-      oneShotStep('Bags override', true,
-        `${applied.matched} staff, ${ngn(applied.total_amount)} at ₦${applied.rates?.loaded ?? 6}/bag`
-        + ` for ${applied.period_from} → ${applied.period_to}`
-        + (applied.unmatched ? ` · ⚠ ${applied.unmatched} row(s) NOT matched (will not be paid)` : ''));
-
-      // 3. Replace the draft: full salaries (no proration), combined, month-end.
-      const save = await api(scopedAny('/payroll/runs2'), { method: 'POST', body: {
-        from: dry.period_from, to: dry.period_to, combined: true,
-        piece_only: false, prorate_monthly: false, replace_draft: true, deductions: {},
-      } });
-      oneShotStep('Payroll draft', true, 'computed with FULL salaries (no proration) and saved — review it in the Saved tab');
-
-      // 4. Show the result of the compute on this same screen too.
-      setFrom(dry.period_from); setTo(dry.period_to); setPieceOnly(false); setProrate(false);
-      setOneShot((p) => ({ ...p, busy: false, done: true, run_id: save.id }));
-      run(dry.period_from, dry.period_to, { prorate: false, pieceOnly: false });
-    } catch (e) {
-      oneShotStep('Stopped', false, e.message || 'failed');
-      setOneShot((p) => ({ ...p, busy: false }));
-    }
-  };
-  const uploadDeductions = async (file) => {
-    if (!file || !lines) return;
-    setUploadingDed(true);
-    try {
-      const fd = new FormData(); fd.append('file', file);
-      const r = await api(scopedAny('/payroll/deductions-parse'), { method: 'POST', form: fd });
-      const byStaff = {};
-      for (const it of (r.items || [])) byStaff[it.staff_id] = (byStaff[it.staff_id] || 0) + it.amount;
-      let applied = 0, noLine = 0;
-      setLines((prev) => prev.map((l) => {
-        const ids = Array.isArray(l.member_ids) && l.member_ids.length ? l.member_ids : [l.staff_id];
-        let sum = 0, hit = false;
-        for (const id of ids) if (byStaff[id] != null) { sum += byStaff[id]; hit = true; delete byStaff[id]; }
-        if (!hit) return l;
-        applied++;
-        return { ...l, deduction: Math.round(sum * 100) / 100 };
-      }));
-      noLine = Object.keys(byStaff).length;
-      const problems = [];
-      if (r.unmatched?.length) problems.push(`${r.unmatched.length} unknown Staff ID(s): ${r.unmatched.slice(0, 5).join(', ')}${r.unmatched.length > 5 ? '…' : ''}`);
-      if (r.name_mismatch?.length) problems.push(`${r.name_mismatch.length} name/ID mismatch(es): ${r.name_mismatch[0]}${r.name_mismatch.length > 1 ? ' …' : ''}`);
-      if (noLine) problems.push(`${noLine} staff not in this computed run`);
-      toast(`Deductions applied to ${applied} line(s)${problems.length ? ' · ⚠ ' + problems.join(' · ') : ''}`, problems.length ? 'err' : 'ok');
-    } catch (e) { toast(e.message, 'err'); }
-    setUploadingDed(false);
-  };
   const net = (l) => Math.max(0, (l.gross || 0) - (+l.deduction || 0));
   const openDetail = (l) => openModal(
     <StaffPayDetail line={l} from={from} to={to} onClose={closeModal} onDeduction={(amt) => setDedById(l.staff_id, amt)} />);
@@ -327,7 +218,7 @@ function RunTab({ sites, onSaved }) {
     setBusy(true);
     try {
       const deductions = {}; lines.forEach((l) => { deductions[l.staff_id] = +l.deduction || 0; });
-      await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly, prorate_monthly: prorate } });
+      await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly } });
       toast('Payroll saved as draft ✓', 'ok'); setLines(null); setOverride(null); onSaved && onSaved();
     } catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -368,39 +259,6 @@ function RunTab({ sites, onSaved }) {
           <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px', marginLeft: 8 }} onClick={run}>Retry</button>
         </div>
       )}
-      <div className="card" style={{ padding: '12px 14px', marginBottom: 12, border: '1.5px solid #bfdbfe' }}>
-        <strong style={{ display: 'block' }}>Month-end in one upload</strong>
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-          Upload the salary schedule workbook (REGULAR / BAGGERS / LOADERS). In one go: salaries are set from
-          the REGULAR sheet, the bag sheets become the commission payroll for the period written in the file,
-          and a fresh draft is computed with <b>full salaries</b> and saved for review. Nothing is paid until
-          the draft is approved.
-        </span>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <label className="btn" style={{ width: 'auto', padding: '8px 16px', cursor: 'pointer' }}>
-            {oneShot?.busy ? <span className="spin" /> : '⬆ Upload month-end workbook'}
-            <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={oneShot?.busy}
-              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; runOneShot(f); }} />
-          </label>
-          {oneShot?.resume && (
-            <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 16px' }}
-              onClick={() => runOneShot(null, oneShot.file)}>▶ Resume</button>
-          )}
-        </div>
-        {oneShot?.steps?.length > 0 && (
-          <div style={{ marginTop: 10, borderTop: '1px solid var(--line)', paddingTop: 8 }}>
-            {oneShot.steps.map((st, i) => (
-              <div key={i} style={{ fontSize: 12.5, margin: '3px 0' }}>
-                {st.ok ? '✅' : '⛔'} <b>{st.label}:</b> {st.detail}
-              </div>
-            ))}
-            {oneShot.done && <div style={{ fontSize: 12.5, marginTop: 6, fontWeight: 700, color: '#166534' }}>
-              Done — the computed lines are below; the saved draft is in the Saved tab.
-            </div>}
-          </div>
-        )}
-      </div>
-
       {busy && <div className="skel" style={{ marginBottom: 10 }} />}
       {isGroup ? (
         <div style={{ marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
@@ -412,12 +270,8 @@ function RunTab({ sites, onSaved }) {
           Combined payroll (Fido + Fiafia in one run; same person merged)
         </label>
       )}
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 600 }}>
-        <input type="checkbox" checked={prorate} onChange={(e) => setProrate(e.target.checked)} />
-        Prorate monthly salaries by clock-in days (Mon–Sat working days) — untick to pay full salaries regardless of attendance
-      </label>
       <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
-        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}&prorate_monthly=${prorate ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
         ⬇ Excel template (Regular / Baggers / Loaders)
       </button>
 
@@ -426,14 +280,10 @@ function RunTab({ sites, onSaved }) {
       {lines && (() => {
         if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
         const term = q.trim().toLowerCase();
-        // The server attributes every line to ONE site (site_name): most bags,
-        // else most clock-in days, else the staff record's home site. The
-        // production-split reduce below survives only as a fallback for runs
-        // saved before site_name existed.
-        const sitesOf = (l) => Array.from(new Set(
-          [l.site_name, ...(l.by_site || []).map((s) => s.site_name)].filter(Boolean)));
+        // A worker's site(s) come from their production split. The one with the most
+        // bags is their primary site; regular staff with no bags group under "—".
+        const sitesOf = (l) => (l.by_site || []).map((s) => s.site_name).filter(Boolean);
         const primarySite = (l) => {
-          if (l.site_name) return l.site_name;
           const bs = l.by_site || [];
           if (!bs.length) return '—';
           return (bs.reduce((a, b) => ((b.loaded + b.bagged) > (a.loaded + a.bagged) ? b : a)).site_name) || '—';
@@ -445,25 +295,11 @@ function RunTab({ sites, onSaved }) {
         const paid = lines.filter((l) => (l.gross || 0) > 0 && match(l));
         const others = lines.filter((l) => (l.gross || 0) <= 0 && match(l));
 
-        // Why a zero line is zero, in the accountant's language — turns the
-        // review list into a work queue (fix rates vs fix clock-ins vs bags).
-        const ZERO_LABELS = {
-          NO_BAGS: 'no bags recorded',
-          RATE_ZERO: 'per-bag rate is zero',
-          NO_CLOCKINS: 'no clock-ins in period',
-          NO_RATE: 'no daily rate set',
-          ZERO: 'computed to zero',
-        };
-        const zeroLabel = (l) => (l.zero_reason
-          ? l.zero_reason.split('+').map((r) => ZERO_LABELS[r] || r.toLowerCase()).join(' · ')
-          : null);
-
         const rowBtn = (l) => {
           // title · site line: the primary production site (or home site fallback).
           const site = primarySite(l);
           const title = (l.role_title || l.pay_type || '').toString();
-          const reason = (l.gross || 0) <= 0 ? zeroLabel(l) : null;
-          const meta = [title, site !== '—' ? site : null, reason].filter(Boolean).join(' · ');
+          const meta = [title, site !== '—' ? site : null].filter(Boolean).join(' · ');
           return (
             <button key={l.staff_id} onClick={() => openDetail(l)}
               style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--line)', background: 'transparent', border: 'none', borderBottomStyle: 'solid', textAlign: 'left', cursor: 'pointer' }}>
@@ -492,12 +328,6 @@ function RunTab({ sites, onSaved }) {
             </div>
 
             <div style={{ display: 'flex', gap: 8, margin: '8px 0', flexWrap: 'wrap' }}>
-              <label className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '8px 14px', cursor: 'pointer' }}
-                title="Excel with STAFF ID + DEDUCTION columns — amounts are applied to the lines below for review before saving">
-                {uploadingDed ? <span className="spin" /> : '⬆ Deductions (Excel)'}
-                <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={uploadingDed}
-                  onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadDeductions(f); }} />
-              </label>
               <input className="input" style={{ flex: '1 1 180px' }} placeholder="Search name or site (e.g. Mbiama)…" value={q} onChange={(e) => setQ(e.target.value)} />
               <button className={`btn btn-sm ${bySiteView ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '8px 14px' }}
                 onClick={() => { setBySiteView((v) => !v); if (!bySiteView) setOpenSites(Object.fromEntries(siteNames.map((s) => [s, true]))); }}>
@@ -535,39 +365,14 @@ function RunTab({ sites, onSaved }) {
                 })
                 : <div className="card" style={{ padding: 0, overflow: 'hidden' }}>{paid.map(rowBtn)}</div>}
 
-            {others.length > 0 && (() => {
-              // The review list is a WORK QUEUE (fix rates / fix clock-ins), so it
-              // gets the same tools as the paid list: the search box above already
-              // filters it, searching auto-opens it, and it groups by site with
-              // the same toggle. Group keys are prefixed so collapsing a review
-              // site doesn't collapse the same site's paid group.
-              const reviewOpen = showOthers || !!term;
-              const reviewSites = Array.from(new Set(others.map((l) => primarySite(l))))
-                .sort((a, b) => (a === '—' ? 1 : b === '—' ? -1 : String(a).localeCompare(String(b))));
-              return (
-                <div style={{ marginTop: 10 }}>
-                  <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setShowOthers((v) => !v)}>
-                    {reviewOpen ? '▾' : '▸'} Not paid this period ({others.length}) — review
-                    {term && !showOthers ? ' · matching your search' : ''}
-                  </button>
-                  {reviewOpen && (bySiteView
-                    ? reviewSites.map((s) => {
-                      const rows = others.filter((l) => primarySite(l) === s);
-                      const open = openSites[`r:${s}`] ?? true;
-                      return (
-                        <div key={`r:${s}`} className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 6 }}>
-                          <button onClick={() => toggleSite(`r:${s}`)}
-                            style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', border: 'none', background: '#f8fafc', padding: '11px 14px', cursor: 'pointer', textAlign: 'left', borderBottom: open ? '1px solid var(--line)' : 'none' }}>
-                            <strong>{open ? '▾' : '▸'} {s === '—' ? 'No site' : s} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {rows.length}</span></strong>
-                          </button>
-                          {open && rows.map(rowBtn)}
-                        </div>
-                      );
-                    })
-                    : <div className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 6 }}>{others.map(rowBtn)}</div>)}
-                </div>
-              );
-            })()}
+            {others.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setShowOthers((v) => !v)}>
+                  {showOthers ? '▾' : '▸'} Not paid this period ({others.length}) — review
+                </button>
+                {showOthers && <div className="card" style={{ padding: 0, overflow: 'hidden', marginTop: 6 }}>{others.map(rowBtn)}</div>}
+              </div>
+            )}
 
             {paid.length > 0 && (
               <button className="btn" style={{ marginTop: 10 }} onClick={save} disabled={busy}>{busy ? <span className="spin" /> : '💾'} Save payroll (draft)</button>
@@ -755,8 +560,8 @@ function RunsTab() {
                 </button>
               )}
               <button className="btn btn-ghost" style={{ flex: 1, ...(bankCheck?.at_risk ? { color: '#b45309' } : {}) }}
-                onClick={() => dl(`/payroll/runs2/${open.id}/bank.csv?tenant=${tenant}`, `bank_payment_${open.period_from}.csv`)}
-                title="CSV for upload to the bank — payee, bank, account number and net pay">
+                onClick={() => dl(`/payroll/runs2/${open.id}/bank.xlsx?tenant=${tenant}`, `bank_payment_${open.period_from}.xlsx`)}
+                title="Workbook for upload to the bank — grouped by bank, payee, account number and net pay">
                 🏦 Bank file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
               </button>
             </div>
@@ -1409,23 +1214,6 @@ function SetupTab({ sites }) {
   };
 
   const [importingStaff, setImportingStaff] = useState(false);
-  const [importingSalaries, setImportingSalaries] = useState(false);
-  const importSalaries = async (file) => {
-    if (!file) return;
-    setImportingSalaries(true);
-    try {
-      const fd = new FormData(); fd.append('file', file);
-      const r = await api(scopedAny('/payroll/salaries-import'), { method: 'POST', form: fd });
-      const problems = [];
-      if (r.unmatched?.length) problems.push(`${r.unmatched.length} unknown Staff ID(s): ${r.unmatched.slice(0, 5).join(', ')}${r.unmatched.length > 5 ? '…' : ''}`);
-      if (r.name_mismatch?.length) problems.push(`${r.name_mismatch.length} name/ID mismatch(es): ${r.name_mismatch[0]}${r.name_mismatch.length > 1 ? ' …' : ''}`);
-      if (r.skipped_piece?.length) problems.push(`${r.skipped_piece.length} bagger/loader row(s) skipped (paid per bag, not salary)`);
-      toast(`Salaries: ${r.updated} updated, ${r.unchanged} already current${problems.length ? ' · ⚠ ' + problems.join(' · ') : ''}`,
-            problems.length ? 'err' : 'ok');
-      load();
-    } catch (e) { toast(e.message, 'err'); }
-    setImportingSalaries(false);
-  };
   const importStaff = async (file) => {
     if (!file) return;
     setImportingStaff(true);
@@ -1514,25 +1302,6 @@ function SetupTab({ sites }) {
         );
       })()}
       <SheetOverrideCard />
-      {/* Bulk MONTHLY salaries by Staff ID. Update-only and keyed by the unique
-          Staff ID, so unlike the roster import it works under Group too. */}
-      <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
-        <strong style={{ display: 'block', marginBottom: 2 }}>Monthly salaries (Excel)</strong>
-        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-          Download the prefilled sheet (every regular staff with their <b>Staff ID</b> and current salary),
-          edit the <b>MONTHLY SALARY</b> column, and upload. Staff ID is the only matching key — a row whose
-          name doesn't match its ID is rejected for review, never guessed.
-        </span>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <button className="btn btn-ghost btn-sm" style={{ flex: 1 }}
-            onClick={() => downloadFile(scopedAny('/payroll/salaries-template.xlsx'), 'salaries-template.xlsx').catch((e) => toast(e.message || 'Download failed', 'err'))}>⬇ Salaries sheet</button>
-          <label className="btn btn-sm" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
-            {importingSalaries ? <span className="spin" /> : '⬆ Upload salaries'}
-            <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importingSalaries}
-              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importSalaries(f); }} />
-          </label>
-        </div>
-      </div>
       {/* Import creates staff in ONE workspace — the Group roll-up has no single
           workspace to own them, so it is offered only inside Fido or Fiafia. */}
       <div className="card" style={{ padding: '12px 14px', marginBottom: 12 }}>
@@ -1566,7 +1335,7 @@ function SetupTab({ sites }) {
         .map(({ r, i }) => (
         <div key={r.id} className="card" style={{ padding: '10px 14px', marginBottom: 8 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <strong>{r.full_name} {r.ext_people_id ? <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>· ID {r.ext_people_id}</span> : null}</strong>
+            <strong>{r.full_name}</strong>
             <select className="input" style={{ width: 'auto', padding: '4px 8px' }} value={r.pay_type || 'DAILY'} onChange={(e) => setVal(i, 'pay_type', e.target.value)}>
               <option value="DAILY">Daily (regular)</option>
               <option value="MONTHLY">Monthly (fixed salary)</option>
@@ -1582,9 +1351,7 @@ function SetupTab({ sites }) {
           )}
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
             <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 14px' }} onClick={() => save(r)}>Save</button>
-            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
-              title="Money given to this person now — automatically proposed as a deduction on their next payroll"
-              onClick={() => openModal(<AdvanceForm staff={r} onClose={closeModal} />)}>+ Advance (deducts from next pay)</button>
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={() => openModal(<AdvanceForm staff={r} onClose={closeModal} />)}>+ Advance</button>
           </div>
         </div>
       ))}

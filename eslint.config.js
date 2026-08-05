@@ -89,6 +89,20 @@ module.exports = [
     rules: { 'no-unused-vars': 'warn' },
   },
 
+  // ── Root build/config files — Node context, ESM ────────────────────────────
+  // vite.config.js runs in Node at build time (reads process.env.GIT_SHA for
+  // the footer build stamp) but isn't matched by the backend or frontend
+  // blocks above, so js.configs.recommended linted it with NO globals and
+  // flagged `process` as undefined (CI failure 2026-08-05).
+  {
+    files: ['vite.config.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+  },
+
   // ── High-value correctness rules everywhere ────────────────────────────────
   {
     files: ['backend/**/*.js', 'frontend/src/**/*.{js,jsx}', 'frontend/sw.js'],

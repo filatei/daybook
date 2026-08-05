@@ -51,6 +51,8 @@ function GroupTotals({ from, to, rangeLabel }) {
             orders: p?.totals?.orders || 0,
             bagsSold: p?.totals?.bags_sold ?? null,   // null = no bagged product configured
             packingBags,
+            prevPacking,
+            prevDay,
             stockStale: packingBags != null && prevPacking != null && packingBags === prevPacking,
             noOps: packingBags == null,
             sites,
@@ -67,7 +69,11 @@ function GroupTotals({ from, to, rangeLabel }) {
   if (groups.length < 2) return null;
   const totalSales = (rows || []).reduce((s, r) => s + r.sales, 0);
   const totalOrders = (rows || []).reduce((s, r) => s + r.orders, 0);
-  const totalPacking = (rows || []).reduce((s, r) => s + (r.packingBags || 0), 0);
+  // Header stock total prefers today's counts, falls back to yesterday's per
+  // tenant (early morning: ops reports not filed yet — 0 would be a lie).
+  const totalPacking = (rows || []).reduce((s, r) => s + (r.packingBags ?? r.prevPacking ?? 0), 0);
+  const anyFallback = (rows || []).some((r) => r.packingBags == null && r.prevPacking != null);
+  const allUnknown = rows && rows.length > 0 && rows.every((r) => r.packingBags == null && r.prevPacking == null);
   const totalBagsSold = (rows || []).some((r) => r.bagsSold != null)
     ? (rows || []).reduce((s, r) => s + (r.bagsSold || 0), 0)
     : null;
@@ -88,7 +94,9 @@ function GroupTotals({ from, to, rangeLabel }) {
         </span>
       </div>
       <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 2 }}>
-        Empty pack-bags in stock (morning ops): <b style={{ color: 'var(--ink)' }}>{totalPacking.toLocaleString()}</b>
+        Empty pack-bags in stock (morning ops):{' '}
+        <b style={{ color: 'var(--ink)' }}>{allUnknown ? '—' : totalPacking.toLocaleString()}</b>
+        {anyFallback && !allUnknown && <span> (includes yesterday&apos;s counts — today&apos;s ops not all in yet)</span>}
       </div>
       {rows && (
         <div style={{ marginTop: 8 }}>
@@ -104,14 +112,20 @@ function GroupTotals({ from, to, rangeLabel }) {
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, fontSize: 11.5, color: 'var(--muted)' }}>
-                {r.noOps
-                  ? <span style={{ color: 'var(--warn)', fontWeight: 600 }}>⚠ no ops report for this date — stock unknown</span>
-                  : <>
-                      <span>pack-bag stock {r.packingBags.toLocaleString()}</span>
-                      {r.stockStale && (
-                        <span style={{ color: 'var(--warn)', fontWeight: 600 }}>⚠ unchanged since yesterday</span>
-                      )}
-                    </>}
+                {!r.noOps ? (
+                  <>
+                    <span>pack-bag stock {r.packingBags.toLocaleString()}</span>
+                    {r.stockStale && (
+                      <span style={{ color: 'var(--warn)', fontWeight: 600 }}>⚠ unchanged since yesterday</span>
+                    )}
+                  </>
+                ) : r.prevPacking != null ? (
+                  // Early morning: today's ops report isn't in yet — show the last
+                  // known count rather than a scary unknown, clearly dated.
+                  <span>pack-bag stock {r.prevPacking.toLocaleString()} <i>(yesterday&apos;s count — no ops report yet today)</i></span>
+                ) : (
+                  <span style={{ color: 'var(--warn)', fontWeight: 600 }}>⚠ no ops report for this date — stock unknown</span>
+                )}
               </div>
             </div>
           ))}

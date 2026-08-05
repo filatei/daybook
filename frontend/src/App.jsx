@@ -129,7 +129,7 @@ function Inner() {
     setToken(saved);
     api('/auth/me')
       .then((me) => {
-        login(me.user, saved, me.tenants, me.group_tenants);
+        login(me.user, saved, me.tenants);
         setBooting(false);
         refreshPushIfGranted();
       })
@@ -151,7 +151,7 @@ function Inner() {
       try {
         const data = await api('/auth/google', { method: 'POST', body: { credential: resp.credential } });
         localStorage.setItem('daybook_token', data.token);
-        login(data.user, data.token, data.tenants, data.group_tenants);
+        login(data.user, data.token, data.tenants);
         toast('Welcome back!', 'ok');
         refreshPushIfGranted();
       } catch (e) {
@@ -165,7 +165,7 @@ function Inner() {
     try {
       const data = await api('/auth/dev-login', { method: 'POST', body: {} });
       localStorage.setItem('daybook_token', data.token);
-      login(data.user, data.token, data.tenants, data.group_tenants);
+      login(data.user, data.token, data.tenants);
     } catch (e) { toast(e.message, 'err'); }
   }, []);
 
@@ -228,6 +228,12 @@ function Inner() {
           <a role="button" tabIndex={0} style={{ cursor: 'pointer' }} onClick={() => openModal(<ContactForm onClose={closeModal} />)}>Contact us</a> ·{' '}
           <a href="/privacy.html" target="_blank" rel="noopener noreferrer">Privacy</a> ·{' '}
           <a href="/terms.html" target="_blank" rel="noopener noreferrer">Terms</a>
+          {/* Build stamp — instantly answers "which build is this phone running?"
+              (the recurring stale-service-worker debugging pain). Values baked
+              in at build time via vite define + the GIT_SHA docker build arg. */}
+          <div style={{ marginTop: 4, opacity: 0.75 }}>
+            build {__GIT_SHA__} · {__BUILD_TIME__.slice(0, 16).replace('T', ' ')} UTC
+          </div>
         </footer>
       </main>
       <Modal />

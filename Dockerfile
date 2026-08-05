@@ -8,6 +8,10 @@ COPY package.json package-lock.json* ./
 RUN npm install
 COPY frontend/ ./frontend/
 COPY vite.config.js ./
+# Git SHA baked into the footer build stamp (vite define) — passed by the
+# deploy workflow; defaults to "dev" for local docker builds without it.
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
 RUN npm run build
 # Output is in /build/frontend/dist
 

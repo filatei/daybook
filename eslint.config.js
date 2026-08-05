@@ -47,7 +47,11 @@ module.exports = [
       ecmaVersion: 2022,
       sourceType: 'module',
       parserOptions: { ecmaFeatures: { jsx: true } },
-      globals: { ...globals.browser, ...globals.es2021, google: 'readonly', Chart: 'readonly' },
+      globals: {
+        ...globals.browser, ...globals.es2021, google: 'readonly', Chart: 'readonly',
+        // Build stamp constants injected by vite define (vite.config.js)
+        __BUILD_TIME__: 'readonly', __GIT_SHA__: 'readonly',
+      },
     },
     settings: { react: { version: '18' } },
     rules: {

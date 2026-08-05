@@ -784,6 +784,25 @@ async function siteProdExp(ctx, site, date) {
 // [as_of_date .. yesterday]; Available = B/F + produced(today) − deductions(today).
 // Deductions = POS sales + incentive + day-ops extra/staff/leakage. This avoids
 // subtracting years of imported sales from only recent production.
+// Range total of the tenant's bagged (pure-water) product sold, matched by the
+// configured bagged_product_id's name against a per-product qty rollup. Used by
+// /pos/range so the dashboard can show "bags sold" for the SAME range as the
+// ₦ totals (the daily report's bagTotals.sold is single-date only). Returns
+// null when the tenant has no bagged product configured — callers hide the
+// figure rather than showing a misleading 0.
+async function baggedQtySold(tenantId, productRows, nameKey, qtyKey) {
+  const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [tenantId]);
+  if (!t || !t.bagged_product_id) return null;
+  const pr = await qone('SELECT name FROM products WHERE id=?', [t.bagged_product_id]);
+  if (!pr || !pr.name) return null;
+  const want = pr.name.trim().toLowerCase();
+  let qty = 0;
+  for (const r of productRows || []) {
+    if (String(r[nameKey] || '').trim().toLowerCase() === want) qty += Number(r[qtyKey]) || 0;
+  }
+  return qty;
+}
+
 async function bagDayReport(ctx, siteId, date) {
   const t = await qone('SELECT bagged_product_id FROM tenants WHERE id=?', [ctx.tenant_id]);
   const baggedId = t && t.bagged_product_id;
@@ -2514,9 +2533,10 @@ router.get('/pos/range', requireAuth, async (req, res) => {
       const salesTot = byMethodR.reduce((a, r) => a + (r.amount || 0), 0);
       const cash = byMethodR.filter((r) => isCash(r.group)).reduce((a, r) => a + (r.amount || 0), 0);
       const inc = await sales.incentiveTotal({ from, to, sites }).catch(() => ({ amount: 0, orders: 0 }));
+      const bagsSold = await baggedQtySold(s.ctx.tenant_id, byProductR, 'group', 'qty').catch(() => null);
       return res.json({
         live: true,
-        totals: { sales: salesTot, orders, cash, transfer: salesTot - cash, incentive: inc.amount, incentive_orders: inc.orders },
+        totals: { sales: salesTot, orders, cash, transfer: salesTot - cash, incentive: inc.amount, incentive_orders: inc.orders, bags_sold: bagsSold },
         bySite: bySiteR.map((r) => ({ site: r.group || '—', code: r.group, sales: r.amount, orders: r.orders })),
         byDay: byDayR.map((r) => ({ day: r.group, sales: r.amount })).sort((a, b) => (a.day < b.day ? -1 : 1)),
         byMethod: byMethodR.map((r) => ({ method: r.group || '—', sales: r.amount, orders: r.orders })),
@@ -2562,6 +2582,9 @@ router.get('/pos/range', requireAuth, async (req, res) => {
     }
   }
   const byProduct = Object.values(prod).sort((a, b) => b.sales - a.sales).slice(0, 30);
+  // Bags sold over the SAME range as the ₦ totals (match on the full product
+  // rollup, not the top-30 slice, so a long tail can't drop the bag product).
+  const bagsSold = await baggedQtySold(s.ctx.tenant_id, Object.values(prod), 'product', 'qty').catch(() => null);
   const byCustomerRows = await qall(`SELECT COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') customer, COALESCE(SUM(total),0) sales, COUNT(*) orders
     FROM pos_sales ${Wn} GROUP BY COALESCE(NULLIF(TRIM(customer_name),''),'Walk-in') ORDER BY sales DESC LIMIT 30`, args);
   // Single-day view → sales by hour-of-day (business timezone).
@@ -2571,7 +2594,7 @@ router.get('/pos/range', requireAuth, async (req, res) => {
       .map((r) => ({ hour: Number(r.hr), sales: Number(r.sales) }))
     : [];
   res.json({
-    totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer), incentive: Number(totals.incentive) },
+    totals: { sales: Number(totals.sales), orders: parseInt(totals.orders, 10), cash: Number(totals.cash), transfer: Number(totals.transfer), incentive: Number(totals.incentive), bags_sold: bagsSold },
     bySite: bySite.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),
     byDay: byDay.reverse().map((r) => ({ ...r, sales: Number(r.sales) })),
     byMethod: byMethod.map((r) => ({ ...r, sales: Number(r.sales), orders: Number(r.orders) })),

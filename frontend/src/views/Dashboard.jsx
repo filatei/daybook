@@ -23,21 +23,36 @@ function GroupTotals({ from, to, rangeLabel }) {
     (async () => {
       setLoading(true);
       try {
+        // Day before the range end — for the pack-bag staleness check below.
+        const prev = new Date(`${to}T00:00:00Z`);
+        prev.setUTCDate(prev.getUTCDate() - 1);
+        const prevDay = prev.toISOString().slice(0, 10);
         const res = await Promise.all(groups.map(async (t) => {
-          // Sales for the range + packing bags as of the range end date (bags are
-          // a daily stock snapshot). Both endpoints are scoped by ?tenant=.
+          // Sales + bags SOLD for the range (/pos/range, totals.bags_sold is the
+          // tenant's bagged product summed over the same from–to as the ₦ figure);
+          // pack-bag STOCK as of the range end date (a daily ops snapshot), plus
+          // yesterday's snapshot so an unchanged count can be flagged — a site
+          // consuming bags all day should not report the same stock two days
+          // running. All endpoints are scoped by ?tenant=.
           const cb = Date.now();   // cache-bust: never serve a stale per-tenant rollup
-          const [p, c] = await Promise.all([
+          const [p, c, cPrev] = await Promise.all([
             api(`/pos/range?from=${from}&to=${to}&tenant=${t.id}&_=${cb}`).catch(() => null),
             api(`/reports/consolidated?date=${to}&tenant=${t.id}&_=${cb}`).catch(() => null),
+            api(`/reports/consolidated?date=${prevDay}&tenant=${t.id}&_=${cb}`).catch(() => null),
           ]);
           const st = c?.auto?.summary?.stockTotals;
+          const stPrev = cPrev?.auto?.summary?.stockTotals;
           const sites = (p?.bySite || []).map((x) => ({ site: x.site, sales: Number(x.sales) || 0, tenant: t.name }));
+          const packingBags = st ? Number(st.packing_available) || 0 : null;   // null = no ops report for the date
+          const prevPacking = stPrev ? Number(stPrev.packing_available) || 0 : null;
           return {
             id: t.id, name: t.name,
             sales: p?.totals?.sales || 0,
             orders: p?.totals?.orders || 0,
-            packingBags: Number(st?.packing_available) || 0,
+            bagsSold: p?.totals?.bags_sold ?? null,   // null = no bagged product configured
+            packingBags,
+            stockStale: packingBags != null && prevPacking != null && packingBags === prevPacking,
+            noOps: packingBags == null,
             sites,
           };
         }));
@@ -52,7 +67,10 @@ function GroupTotals({ from, to, rangeLabel }) {
   if (groups.length < 2) return null;
   const totalSales = (rows || []).reduce((s, r) => s + r.sales, 0);
   const totalOrders = (rows || []).reduce((s, r) => s + r.orders, 0);
-  const totalPacking = (rows || []).reduce((s, r) => s + r.packingBags, 0);
+  const totalPacking = (rows || []).reduce((s, r) => s + (r.packingBags || 0), 0);
+  const totalBagsSold = (rows || []).some((r) => r.bagsSold != null)
+    ? (rows || []).reduce((s, r) => s + (r.bagsSold || 0), 0)
+    : null;
 
   return (
     <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid var(--brand-d)' }}>
@@ -64,17 +82,37 @@ function GroupTotals({ from, to, rangeLabel }) {
       </div>
       <div style={{ fontSize: 26, fontWeight: 800, marginTop: 4 }}>
         {loading && !rows ? '₦…' : ngn(totalSales)}
-        <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}> · {totalOrders.toLocaleString()} orders</span>
+        <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600 }}>
+          {' '}· {totalOrders.toLocaleString()} orders
+          {totalBagsSold != null ? ` · ${totalBagsSold.toLocaleString()} bags sold` : ''}
+        </span>
       </div>
       <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 2 }}>
-        Packing bags available: <b style={{ color: 'var(--ink)' }}>{totalPacking.toLocaleString()}</b>
+        Empty pack-bags in stock (morning ops): <b style={{ color: 'var(--ink)' }}>{totalPacking.toLocaleString()}</b>
       </div>
       {rows && (
         <div style={{ marginTop: 8 }}>
           {rows.map((r) => (
-            <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '3px 0', color: 'var(--ink)' }}>
-              <span style={{ color: 'var(--muted)' }}>{r.name}</span>
-              <span style={{ fontWeight: 700 }}>{ngn(r.sales)} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {r.packingBags.toLocaleString()} bags</span></span>
+            <div key={r.id} style={{ padding: '4px 0' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--ink)' }}>
+                <span style={{ color: 'var(--muted)' }}>{r.name}</span>
+                <span style={{ fontWeight: 700 }}>
+                  {ngn(r.sales)}
+                  {r.bagsSold != null && (
+                    <span style={{ color: 'var(--muted)', fontWeight: 600 }}> · {r.bagsSold.toLocaleString()} bags sold</span>
+                  )}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, fontSize: 11.5, color: 'var(--muted)' }}>
+                {r.noOps
+                  ? <span style={{ color: 'var(--warn)', fontWeight: 600 }}>⚠ no ops report for this date — stock unknown</span>
+                  : <>
+                      <span>pack-bag stock {r.packingBags.toLocaleString()}</span>
+                      {r.stockStale && (
+                        <span style={{ color: 'var(--warn)', fontWeight: 600 }}>⚠ unchanged since yesterday</span>
+                      )}
+                    </>}
+              </div>
             </div>
           ))}
         </div>

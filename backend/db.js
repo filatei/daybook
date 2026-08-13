@@ -672,6 +672,12 @@ async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_genlogs_extid    ON generator_logs(tenant_id, ext_id) WHERE ext_id IS NOT NULL;
   `);
 
+  // Structured generator maintenance (Fido parity: oil/filters/radiator checkboxes + photo).
+  await pool.query(`
+    ALTER TABLE generator_logs ADD COLUMN IF NOT EXISTS maintenance_items TEXT;
+    ALTER TABLE generator_logs ADD COLUMN IF NOT EXISTS image TEXT;
+  `);
+
   // Face recognition: a 128-D descriptor enrolled per staff; match score on clock.
   await pool.query(`
     ALTER TABLE staff      ADD COLUMN IF NOT EXISTS face_descriptor TEXT;

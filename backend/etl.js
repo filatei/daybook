@@ -636,18 +636,32 @@ async function etlGenerators(mongoDB, { oidMap, nameMap, norm }) {
       const logDate = dateStr(d.date);
       if (!g || !logDate) { stats.skipped++; continue; }
       try {
+        const maintItems = fields.maintenance_items ? fields.maintenance_items(d) : null;
         const r = await qrun(
-          `INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,runtime_hours,detail,ext_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+          `INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,runtime_hours,detail,maintenance_items,image,ext_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT (tenant_id, ext_id) WHERE ext_id IS NOT NULL DO NOTHING`,
-          [uuid(), g.tenant_id, g.id, g.site_id, logDate, type, fields.litres(d), fields.hours(d), fields.detail(d), String(d._id)]);
+          [uuid(), g.tenant_id, g.id, g.site_id, logDate, type, fields.litres(d), fields.hours(d), fields.detail(d),
+            maintItems ? JSON.stringify(maintItems) : null, fields.image ? fields.image(d) : null, String(d._id)]);
         if (r.rowCount) stats.logs++;
       } catch (e) { stats.errors++; if (stats.errors <= 5) console.warn(`\n[ETL] ${coll} error:`, e.message.slice(0, 140)); }
       progress('gen-logs', stats.logs, 0);
     }
   };
-  await importLogs('gendiesels', 'DIESEL', { litres: (d) => num(d.diesel_litres) || null, hours: (d) => num(d.diesel_hours) || null, detail: (d) => clean(d.remarks) });
-  await importLogs('genmaints',  'MAINTENANCE', { litres: () => null, hours: (d) => num(d.maintenance_hour) || null, detail: (d) => clean(d.remarks) });
+  await importLogs('gendiesels', 'DIESEL', {
+    litres: (d) => num(d.diesel_litres) || null, hours: (d) => num(d.diesel_hours) || null,
+    detail: (d) => clean(d.remarks), image: (d) => clean(d.image) || null,
+  });
+  await importLogs('genmaints', 'MAINTENANCE', {
+    litres: () => null, hours: (d) => num(d.maintenance_hour) || null, detail: (d) => clean(d.remarks),
+    image: (d) => clean(d.image) || null,
+    maintenance_items: (d) => {
+      const keys = ['oil', 'oilfilters', 'fuelfilters', 'radiator', 'rings', 'pistons', 'turboCharger', 'fuelPump', 'crankShaft', 'metals'];
+      const out = {};
+      for (const k of keys) if (d[k]) out[k] = true;
+      return Object.keys(out).length ? out : null;
+    },
+  });
   done('generators', stats);
   return stats;
 }

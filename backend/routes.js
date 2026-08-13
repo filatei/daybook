@@ -2195,6 +2195,21 @@ router.patch('/generators/:id', requireAuth, needTenant('SECRETARY'), async (req
     [f.name ?? g.name, f.fuel_type ?? g.fuel_type, f.make_model ?? g.make_model, num(f.capacity_kva, g.capacity_kva), f.serial_no ?? g.serial_no, f.purchase_date ?? g.purchase_date, num(f.purchase_cost, g.purchase_cost), f.status ?? g.status, f.notes ?? g.notes, g.id]);
   res.json(await qone('SELECT * FROM generators WHERE id=?', [g.id]));
 });
+// Structured maintenance items — mirrors legacy Fido genmaints schema.
+const GEN_MAINT_KEYS = ['oil', 'oilfilters', 'fuelfilters', 'radiator', 'rings', 'pistons', 'turboCharger', 'fuelPump', 'crankShaft', 'metals'];
+const parseMaintItems = (raw) => {
+  const obj = typeof raw === 'string' ? J(raw, null) : raw;
+  if (!obj || typeof obj !== 'object') return null;
+  const out = {};
+  for (const k of GEN_MAINT_KEYS) if (obj[k]) out[k] = true;
+  return Object.keys(out).length ? out : null;
+};
+const hydrateGenLog = (row) => {
+  if (!row) return row;
+  const maintenance_items = parseMaintItems(row.maintenance_items);
+  return { ...row, maintenance_items };
+};
+
 router.get('/generators/:id/logs', requireAuth, async (req, res) => {
   const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
   if (!g) return res.status(404).json({ error: 'not found' });
@@ -2203,7 +2218,7 @@ router.get('/generators/:id/logs', requireAuth, async (req, res) => {
   const { from, to } = req.query; const where = ['generator_id=?'], args = [g.id];
   if (from) { where.push('log_date>=?'); args.push(from); }
   if (to) { where.push('log_date<=?'); args.push(to); }
-  const logs = await qall(`SELECT * FROM generator_logs WHERE ${where.join(' AND ')} ORDER BY log_date DESC, created_at DESC LIMIT 500`, args);
+  const logs = (await qall(`SELECT * FROM generator_logs WHERE ${where.join(' AND ')} ORDER BY log_date DESC, created_at DESC LIMIT 500`, args)).map(hydrateGenLog);
   const tot = await qone(`SELECT COALESCE(SUM(litres),0) litres, COALESCE(SUM(cost),0) cost FROM generator_logs WHERE ${where.join(' AND ')} AND type='DIESEL'`, args);
   res.json({ logs, diesel_total: tot });
 });
@@ -2212,7 +2227,7 @@ router.post('/generators/:id/logs', requireAuth, needTenant('SECRETARY'), async 
   if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
   if (siteBound(req.ctx) && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
   const b = req.body || {}; const type = (b.type || 'DIESEL').toUpperCase();
-  if (!['DIESEL', 'MAINTENANCE', 'NOTE'].includes(type)) return res.status(400).json({ error: 'invalid type' });
+  if (!['DIESEL', 'NOTE'].includes(type)) return res.status(400).json({ error: 'invalid type — use /generators/:id/maintenance for maintenance' });
   // Empty form fields arrive as '' — coerce to NULL so numeric columns don't
   // reject the insert (this blocked MAINTENANCE/NOTE logs, which leave litres/cost blank).
   const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v))) ? null : Number(v);
@@ -2220,7 +2235,37 @@ router.post('/generators/:id/logs', requireAuth, needTenant('SECRETARY'), async 
   await qrun(`INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,litres,cost,runtime_hours,detail,recorded_by)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
     [id, g.tenant_id, g.id, g.site_id, b.log_date || new Date().toISOString().slice(0, 10), type, num(b.litres), num(b.cost), num(b.runtime_hours), b.detail || null, req.user.id]);
-  res.status(201).json(await qone('SELECT * FROM generator_logs WHERE id=?', [id]));
+  res.status(201).json(hydrateGenLog(await qone('SELECT * FROM generator_logs WHERE id=?', [id])));
+});
+// Structured maintenance log — hour reading required; optional photo attachment.
+router.post('/generators/:id/maintenance', requireAuth, needTenant('SECRETARY'), upload.single('image'), async (req, res) => {
+  const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
+  if (!g || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (siteBound(req.ctx) && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  const b = req.body || {};
+  const num = (v) => (v === '' || v === null || v === undefined || Number.isNaN(Number(v))) ? null : Number(v);
+  const runtime_hours = num(b.runtime_hours);
+  if (runtime_hours == null) return res.status(400).json({ error: 'hour reading required' });
+  const maintenance_items = parseMaintItems(b.maintenance_items);
+  const id = uuid();
+  await qrun(`INSERT INTO generator_logs (id,tenant_id,generator_id,site_id,log_date,type,cost,runtime_hours,detail,maintenance_items,image,recorded_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, g.tenant_id, g.id, g.site_id, b.log_date || new Date().toISOString().slice(0, 10), 'MAINTENANCE',
+      num(b.cost), runtime_hours, (b.detail || '').trim() || null,
+      maintenance_items ? JSON.stringify(maintenance_items) : null,
+      req.file ? req.file.filename : null, req.user.id]);
+  res.status(201).json(hydrateGenLog(await qone('SELECT * FROM generator_logs WHERE id=?', [id])));
+});
+router.get('/generators/:id/logs/:logId/image', requireAuth, async (req, res) => {
+  const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
+  const l = await qone('SELECT * FROM generator_logs WHERE id=? AND generator_id=?', [req.params.logId, req.params.id]);
+  if (!g || !l || !l.image) return res.status(404).end();
+  const c = await contextFor(req.user, g.tenant_id);
+  if (!c || (siteBound(c) && g.site_id && g.site_id !== c.site_id)) return res.status(404).end();
+  if (/^https?:\/\//.test(l.image)) return res.redirect(l.image);
+  const p = path.join(UPLOAD_DIR, l.image);
+  if (!fs.existsSync(p)) return res.status(404).end();
+  res.sendFile(p);
 });
 
 // ── IN-APP POS ────────────────────────────────────────────────────────────────

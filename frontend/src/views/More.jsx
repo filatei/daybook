@@ -3,7 +3,7 @@ import { useStore, useRole, useActiveTenant, atLeast } from '../store.jsx';
 
 /**
  * More — launcher for secondary / operational screens that don't warrant a
- * primary tab.  Role-gated: Payroll is GM+; Generators is manager+ (SITE_MANAGER+).
+ * primary tab.  Role-gated: Payroll is GM+; Generators is Secretary+.
  */
 export default function More() {
   const { go } = useStore();

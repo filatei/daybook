@@ -3,6 +3,21 @@ import { api, scoped, ngn, today } from '../api.js';
 import { useStore, useRole, atLeast, useBackHandler } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
 
+// Structured maintenance checklist — matches legacy Fido genmaints fields.
+const MAINT_ITEMS = [
+  { key: 'oil', label: 'Oil changed' },
+  { key: 'oilfilters', label: 'Oil filter' },
+  { key: 'fuelfilters', label: 'Fuel filter' },
+  { key: 'radiator', label: 'Radiator cleaned' },
+  { key: 'rings', label: 'Rings' },
+  { key: 'pistons', label: 'Pistons' },
+  { key: 'turboCharger', label: 'Turbo charger' },
+  { key: 'fuelPump', label: 'Fuel pump' },
+  { key: 'crankShaft', label: 'Crank shaft' },
+  { key: 'metals', label: 'Metals' },
+];
+const emptyMaint = () => Object.fromEntries(MAINT_ITEMS.map(({ key }) => [key, false]));
+
 function GeneratorForm({ gen, sites, onSave, onClose }) {
   const { toast } = useStore();
   const [saving, setSaving] = useState(false);
@@ -60,7 +75,7 @@ function GeneratorForm({ gen, sites, onSave, onClose }) {
   );
 }
 
-function LogForm({ gen, onSave, onClose }) {
+function DieselLogForm({ gen, onSave, onClose }) {
   const { toast } = useStore();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState({ log_date: today(), type: 'DIESEL', litres: '', cost: '', runtime_hours: '', detail: '' });
@@ -69,36 +84,24 @@ function LogForm({ gen, onSave, onClose }) {
     setSaving(true);
     try {
       await api(scoped(`/generators/${gen.id}/logs`), { method: 'POST', body: f });
-      toast('Logged ✓', 'ok'); onSave(); onClose();
+      toast('Diesel logged ✓', 'ok'); onSave(); onClose();
     } catch (e) { toast(e.message, 'err'); }
     setSaving(false);
   };
   return (
     <div>
       <div className="grip" />
-      <h3>Log — {gen.name}</h3>
+      <h3>⛽ Add diesel — {gen.name}</h3>
+      <label className="fl">Date</label>
+      <input type="date" className="input" value={f.log_date} max={today()} onChange={(e) => set('log_date', e.target.value)} />
       <div className="grid2">
-        <div>
-          <label className="fl">Date</label>
-          <input type="date" className="input" value={f.log_date} max={today()} onChange={(e) => set('log_date', e.target.value)} />
-        </div>
-        <div>
-          <label className="fl">Type</label>
-          <select className="input" value={f.type} onChange={(e) => set('type', e.target.value)}>
-            <option>DIESEL</option><option>MAINTENANCE</option><option>NOTE</option>
-          </select>
-        </div>
+        <div><label className="fl">Litres</label><input type="number" className="input" value={f.litres} onChange={(e) => set('litres', e.target.value)} /></div>
+        <div><label className="fl">Cost (₦)</label><input type="number" className="input" value={f.cost} onChange={(e) => set('cost', e.target.value)} /></div>
       </div>
-      {f.type === 'DIESEL' && (
-        <div className="grid2">
-          <div><label className="fl">Litres</label><input type="number" className="input" value={f.litres} onChange={(e) => set('litres', e.target.value)} /></div>
-          <div><label className="fl">Cost (₦)</label><input type="number" className="input" value={f.cost} onChange={(e) => set('cost', e.target.value)} /></div>
-        </div>
-      )}
-      <label className="fl">Runtime hours</label>
+      <label className="fl">Runtime hours (optional)</label>
       <input type="number" className="input" value={f.runtime_hours} onChange={(e) => set('runtime_hours', e.target.value)} />
-      <label className="fl">Detail</label>
-      <input className="input" value={f.detail} onChange={(e) => set('detail', e.target.value)} placeholder="optional note" />
+      <label className="fl">Remarks (optional)</label>
+      <input className="input" value={f.detail} onChange={(e) => set('detail', e.target.value)} />
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
         <button className="btn" onClick={save} disabled={saving}>{saving ? <span className="spin" /> : null} Save</button>
@@ -107,15 +110,139 @@ function LogForm({ gen, onSave, onClose }) {
   );
 }
 
+function NoteLogForm({ gen, onSave, onClose }) {
+  const { toast } = useStore();
+  const [saving, setSaving] = useState(false);
+  const [f, setF] = useState({ log_date: today(), type: 'NOTE', detail: '' });
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const save = async () => {
+    if (!f.detail.trim()) return toast('Enter a note', 'err');
+    setSaving(true);
+    try {
+      await api(scoped(`/generators/${gen.id}/logs`), { method: 'POST', body: f });
+      toast('Note saved ✓', 'ok'); onSave(); onClose();
+    } catch (e) { toast(e.message, 'err'); }
+    setSaving(false);
+  };
+  return (
+    <div>
+      <div className="grip" />
+      <h3>📝 Add note — {gen.name}</h3>
+      <label className="fl">Date</label>
+      <input type="date" className="input" value={f.log_date} max={today()} onChange={(e) => set('log_date', e.target.value)} />
+      <label className="fl">Note *</label>
+      <textarea className="input" rows={3} value={f.detail} onChange={(e) => set('detail', e.target.value)} placeholder="Observation or follow-up" />
+      <div className="cap-bar">
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={save} disabled={saving}>{saving ? <span className="spin" /> : null} Save</button>
+      </div>
+    </div>
+  );
+}
+
+function MaintenanceForm({ gen, onSave, onClose }) {
+  const { toast } = useStore();
+  const [saving, setSaving] = useState(false);
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState('');
+  const [f, setF] = useState({ log_date: today(), runtime_hours: '', cost: '', detail: '', items: emptyMaint() });
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const toggle = (key) => setF((p) => ({ ...p, items: { ...p.items, [key]: !p.items[key] } }));
+
+  const onFile = (e) => {
+    const img = e.target.files?.[0] || null;
+    setFile(img);
+    setPreview(img ? URL.createObjectURL(img) : '');
+  };
+
+  const save = async () => {
+    if (!f.runtime_hours && f.runtime_hours !== 0) return toast('Hour reading required', 'err');
+    setSaving(true);
+    try {
+      const done = Object.fromEntries(Object.entries(f.items).filter(([, v]) => v));
+      const fd = new FormData();
+      fd.append('log_date', f.log_date);
+      fd.append('runtime_hours', f.runtime_hours);
+      if (f.cost) fd.append('cost', f.cost);
+      if (f.detail.trim()) fd.append('detail', f.detail.trim());
+      if (Object.keys(done).length) fd.append('maintenance_items', JSON.stringify(done));
+      if (file) fd.append('image', file);
+      await api(scoped(`/generators/${gen.id}/maintenance`), { method: 'POST', form: fd });
+      toast('Maintenance logged ✓', 'ok'); onSave(); onClose();
+    } catch (e) { toast(e.message, 'err'); }
+    setSaving(false);
+  };
+
+  return (
+    <div>
+      <div className="grip" />
+      <h3>🔧 Log maintenance — {gen.name}</h3>
+      <div className="grid2">
+        <div>
+          <label className="fl">Date</label>
+          <input type="date" className="input" value={f.log_date} max={today()} onChange={(e) => set('log_date', e.target.value)} />
+        </div>
+        <div>
+          <label className="fl">Hour reading on gen *</label>
+          <input type="number" inputMode="decimal" className="input" value={f.runtime_hours} onChange={(e) => set('runtime_hours', e.target.value)} placeholder="Meter reading" />
+        </div>
+      </div>
+      <div style={{ fontWeight: 800, fontSize: 13, margin: '12px 0 6px' }}>Work done</div>
+      <div className="card" style={{ padding: '4px 0', marginBottom: 10 }}>
+        {MAINT_ITEMS.map(({ key, label }) => (
+          <label key={key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', borderBottom: '1px solid var(--line)', cursor: 'pointer' }}>
+            <span style={{ fontSize: 14 }}>{label}</span>
+            <input type="checkbox" checked={!!f.items[key]} onChange={() => toggle(key)} />
+          </label>
+        ))}
+      </div>
+      <label className="fl">Remarks (optional)</label>
+      <textarea className="input" rows={3} value={f.detail} onChange={(e) => set('detail', e.target.value)} placeholder="What was done / still required" />
+      <label className="fl">Cost (₦, optional)</label>
+      <input type="number" inputMode="decimal" className="input" value={f.cost} onChange={(e) => set('cost', e.target.value)} />
+      <label className="fl">Photo (optional)</label>
+      <input type="file" accept="image/*" className="input" onChange={onFile} />
+      {preview && <img src={preview} alt="Preview" style={{ maxWidth: '100%', maxHeight: 160, marginTop: 8, borderRadius: 8 }} />}
+      <div className="cap-bar">
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={save} disabled={saving}>{saving ? <span className="spin" /> : null} Save maintenance</button>
+      </div>
+    </div>
+  );
+}
+
 const LOG_ICON = { DIESEL: '⛽', MAINTENANCE: '🔧', NOTE: '📝' };
+
+function maintSummary(items) {
+  if (!items || typeof items !== 'object') return '';
+  const done = MAINT_ITEMS.filter(({ key }) => items[key]).map(({ label }) => label);
+  return done.length ? done.join(', ') : '';
+}
+
+function MaintenanceItemsTable({ items }) {
+  if (!items) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>Work done</div>
+      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+        {MAINT_ITEMS.map(({ key, label }) => (
+          <div key={key} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 14px', borderBottom: '1px solid var(--line)', fontSize: 13 }}>
+            <span>{label}</span>
+            <span style={{ fontWeight: 700 }}>{items[key] ? '✓ Changed' : '—'}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function Generators() {
   const { openModal, closeModal, tenant, sites, go } = useStore();
   const role = useRole();
   const canEdit = role && atLeast(role, 'SECRETARY');
   const [gens, setGens] = useState([]);
-  const [sel, setSel] = useState(null);          // selected generator (logs view)
-  const [selLog, setSelLog] = useState(null);    // selected log record (detail view)
+  const [sel, setSel] = useState(null);
+  const [selLog, setSelLog] = useState(null);
   const [logs, setLogs] = useState([]);
   const [dieselTotal, setDieselTotal] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -133,16 +260,13 @@ export default function Generators() {
     catch { setLogs([]); }
   }, [tenant]);
 
-  // Hardware/gesture Back steps UP one level (detail → logs → generator list)
-  // instead of jumping straight back to the "More" tab.
   useBackHandler(!!sel && !selLog, () => { setSel(null); setLogs([]); });
   useBackHandler(!!selLog, () => setSelLog(null));
 
   if (!canEdit) {
-    return <div className="empty"><div className="ic">🔒</div><p>Generators are available to managers and above.</p></div>;
+    return <div className="empty"><div className="ic">🔒</div><p>Generators are available to Secretary and above.</p></div>;
   }
 
-  // Single maintenance/log record — detail view
   if (selLog) {
     const l = selLog;
     const row = (k, v) => v == null || v === '' ? null : (
@@ -151,6 +275,7 @@ export default function Generators() {
         <span style={{ fontWeight: 700, textAlign: 'right', maxWidth: '60%' }}>{v}</span>
       </div>
     );
+    const imgUrl = l.image ? `/generators/${sel.id}/logs/${l.id}/image` : null;
     return (
       <div>
         <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px', marginBottom: 12 }} onClick={() => setSelLog(null)}>← {sel?.name || 'Logs'}</button>
@@ -166,14 +291,22 @@ export default function Generators() {
           {row('Type', l.type)}
           {l.litres != null && row('Litres', `${l.litres} L`)}
           {l.cost != null && row('Cost', ngn(l.cost))}
-          {l.runtime_hours != null && row('Runtime', `${l.runtime_hours} h`)}
-          {row('Details', l.detail)}
+          {l.runtime_hours != null && row(l.type === 'MAINTENANCE' ? 'Hour reading' : 'Runtime', `${l.runtime_hours} h`)}
+          {row('Remarks', l.detail)}
         </div>
+        {l.type === 'MAINTENANCE' && <MaintenanceItemsTable items={l.maintenance_items} />}
+        {imgUrl && (
+          <div className="card" style={{ marginTop: 12 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Attachment</div>
+            <a href={`/api${imgUrl}`} target="_blank" rel="noreferrer">
+              <img src={`/api${imgUrl}`} alt="Maintenance" style={{ maxWidth: '100%', borderRadius: 8 }} />
+            </a>
+          </div>
+        )}
       </div>
     );
   }
 
-  // Logs detail view
   if (sel) {
     return (
       <div>
@@ -189,29 +322,39 @@ export default function Generators() {
             </div>
           )}
         </div>
+        <div className="grid2" style={{ margin: '10px 0' }}>
+          <button className="btn btn-sm" onClick={() => openModal(<DieselLogForm gen={sel} onSave={() => openLogs(sel)} onClose={closeModal} />)}>⛽ Add diesel</button>
+          <button className="btn btn-sm" onClick={() => openModal(<MaintenanceForm gen={sel} onSave={() => openLogs(sel)} onClose={closeModal} />)}>🔧 Maintenance</button>
+        </div>
+        <button className="btn btn-ghost btn-sm" style={{ marginBottom: 10 }} onClick={() => openModal(<NoteLogForm gen={sel} onSave={() => openLogs(sel)} onClose={closeModal} />)}>📝 Add note</button>
         {logs.length === 0 ? (
           <div className="empty"><div className="ic">⛽</div><p>No logs yet</p></div>
         ) : (
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-            {logs.map((l) => (
-              <button key={l.id} onClick={() => setSelLog(l)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer' }}>
-                <div style={{ fontSize: 20 }}>{LOG_ICON[l.type] || '📝'}</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700 }}>{l.type}{l.litres ? ` · ${l.litres} L` : ''}{l.runtime_hours ? ` · ${l.runtime_hours}h` : ''}</div>
-                  <div style={{ fontSize: 12, color: 'var(--muted)' }}>{l.log_date}{l.detail ? ` · ${l.detail}` : ''}</div>
-                </div>
-                {l.cost != null && <div style={{ fontWeight: 700 }}>{ngn(l.cost)}</div>}
-                <div style={{ color: 'var(--muted)' }}>›</div>
-              </button>
-            ))}
+            {logs.map((l) => {
+              const sub = l.type === 'MAINTENANCE'
+                ? [maintSummary(l.maintenance_items), l.detail].filter(Boolean).join(' · ')
+                : l.detail;
+              return (
+                <button key={l.id} onClick={() => setSelLog(l)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: 'pointer' }}>
+                  <div style={{ fontSize: 20 }}>{LOG_ICON[l.type] || '📝'}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700 }}>
+                      {l.type === 'MAINTENANCE' ? 'Maintenance' : l.type}{l.litres ? ` · ${l.litres} L` : ''}{l.runtime_hours ? ` · ${l.runtime_hours}h` : ''}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--muted)' }}>{l.log_date}{sub ? ` · ${sub}` : ''}</div>
+                  </div>
+                  {l.cost != null && <div style={{ fontWeight: 700 }}>{ngn(l.cost)}</div>}
+                  <div style={{ color: 'var(--muted)' }}>›</div>
+                </button>
+              );
+            })}
           </div>
         )}
-        <button className="fab" onClick={() => openModal(<LogForm gen={sel} onSave={() => openLogs(sel)} onClose={closeModal} />)}>+</button>
       </div>
     );
   }
 
-  // List view
   return (
     <div>
       <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px', marginBottom: 12 }} onClick={() => go('more')}>← More</button>

@@ -18,6 +18,14 @@ const MAINT_ITEMS = [
 ];
 const emptyMaint = () => Object.fromEntries(MAINT_ITEMS.map(({ key }) => [key, false]));
 
+function maintFormMissing(f) {
+  const missing = [];
+  if (!f.log_date) missing.push('Date');
+  const hrs = String(f.runtime_hours ?? '').trim();
+  if (!hrs || Number.isNaN(Number(hrs))) missing.push('Hour reading on gen');
+  return missing;
+}
+
 function GeneratorForm({ gen, sites, onSave, onClose }) {
   const { toast } = useStore();
   const [saving, setSaving] = useState(false);
@@ -148,6 +156,8 @@ function MaintenanceForm({ gen, onSave, onClose }) {
   const [f, setF] = useState({ log_date: today(), runtime_hours: '', cost: '', detail: '', items: emptyMaint() });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const toggle = (key) => setF((p) => ({ ...p, items: { ...p.items, [key]: !p.items[key] } }));
+  const missing = maintFormMissing(f);
+  const ready = missing.length === 0;
 
   const onFile = (e) => {
     const img = e.target.files?.[0] || null;
@@ -156,7 +166,6 @@ function MaintenanceForm({ gen, onSave, onClose }) {
   };
 
   const save = async () => {
-    if (!f.runtime_hours && f.runtime_hours !== 0) return toast('Hour reading required', 'err');
     setSaving(true);
     try {
       const done = Object.fromEntries(Object.entries(f.items).filter(([, v]) => v));
@@ -173,13 +182,21 @@ function MaintenanceForm({ gen, onSave, onClose }) {
     setSaving(false);
   };
 
+  const trySave = () => {
+    if (!ready) {
+      toast(missing.length === 1 ? `Missing: ${missing[0]}` : `Missing: ${missing.join(', ')}`, 'err');
+      return;
+    }
+    save();
+  };
+
   return (
     <div>
       <div className="grip" />
       <h3>🔧 Log maintenance — {gen.name}</h3>
       <div className="grid2">
         <div>
-          <label className="fl">Date</label>
+          <label className="fl">Date *</label>
           <input type="date" className="input" value={f.log_date} max={today()} onChange={(e) => set('log_date', e.target.value)} />
         </div>
         <div>
@@ -203,9 +220,22 @@ function MaintenanceForm({ gen, onSave, onClose }) {
       <label className="fl">Photo (optional)</label>
       <input type="file" accept="image/*" className="input" onChange={onFile} />
       {preview && <img src={preview} alt="Preview" style={{ maxWidth: '100%', maxHeight: 160, marginTop: 8, borderRadius: 8 }} />}
+      {!ready && !saving && (
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
+          Required: {missing.join(', ')}
+        </div>
+      )}
       <div className="cap-bar">
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" onClick={save} disabled={saving}>{saving ? <span className="spin" /> : null} Save maintenance</button>
+        <button
+          className="btn"
+          onClick={trySave}
+          disabled={saving}
+          aria-disabled={!ready}
+          style={!ready && !saving ? { opacity: 0.45, cursor: 'not-allowed' } : undefined}
+        >
+          {saving ? <span className="spin" /> : null} Save maintenance
+        </button>
       </div>
     </div>
   );
@@ -237,9 +267,10 @@ function MaintenanceItemsTable({ items }) {
 }
 
 export default function Generators() {
-  const { openModal, closeModal, tenant, sites, go } = useStore();
+  const { openModal, closeModal, tenant, sites, go, toast, confirm } = useStore();
   const role = useRole();
   const canEdit = role && atLeast(role, 'SECRETARY');
+  const canDeleteMaint = role && atLeast(role, 'SNR_ACCOUNTANT');
   const [gens, setGens] = useState([]);
   const [sel, setSel] = useState(null);
   const [selLog, setSelLog] = useState(null);
@@ -259,6 +290,22 @@ export default function Generators() {
     try { const r = await api(scoped(`/generators/${g.id}/logs`)); setLogs(r.logs || []); setDieselTotal(r.diesel_total || null); }
     catch { setLogs([]); }
   }, [tenant]);
+
+  const deleteMaint = async (log) => {
+    if (!sel || log.type !== 'MAINTENANCE') return;
+    if (!await confirm({
+      title: 'Delete maintenance record?',
+      message: `${log.log_date}${log.runtime_hours != null ? ` · ${log.runtime_hours}h reading` : ''} — this cannot be undone.`,
+      confirmText: 'Delete',
+      danger: true,
+    })) return;
+    try {
+      await api(scoped(`/generators/${sel.id}/logs/${log.id}`), { method: 'DELETE' });
+      toast('Maintenance record deleted', 'ok');
+      setSelLog(null);
+      openLogs(sel);
+    } catch (e) { toast(e.message, 'err'); }
+  };
 
   useBackHandler(!!sel && !selLog, () => { setSel(null); setLogs([]); });
   useBackHandler(!!selLog, () => setSelLog(null));
@@ -302,6 +349,11 @@ export default function Generators() {
               <img src={`/api${imgUrl}`} alt="Maintenance" style={{ maxWidth: '100%', borderRadius: 8 }} />
             </a>
           </div>
+        )}
+        {canDeleteMaint && l.type === 'MAINTENANCE' && (
+          <button className="btn btn-ghost btn-sm" style={{ marginTop: 12, color: 'var(--err)' }} onClick={() => deleteMaint(l)}>
+            Delete maintenance record
+          </button>
         )}
       </div>
     );

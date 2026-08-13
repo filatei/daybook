@@ -2267,6 +2267,19 @@ router.get('/generators/:id/logs/:logId/image', requireAuth, async (req, res) =>
   if (!fs.existsSync(p)) return res.status(404).end();
   res.sendFile(p);
 });
+router.delete('/generators/:id/logs/:logId', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const g = await qone('SELECT * FROM generators WHERE id=?', [req.params.id]);
+  const l = await qone('SELECT * FROM generator_logs WHERE id=? AND generator_id=?', [req.params.logId, req.params.id]);
+  if (!g || !l || g.tenant_id !== req.ctx.tenant_id) return res.status(404).json({ error: 'not found' });
+  if (l.type !== 'MAINTENANCE') return res.status(400).json({ error: 'only maintenance records can be deleted' });
+  if (siteBound(req.ctx) && g.site_id && g.site_id !== req.ctx.site_id) return res.status(403).json({ error: 'forbidden' });
+  if (l.image && !/^https?:\/\//.test(l.image)) {
+    try { fs.unlinkSync(path.join(UPLOAD_DIR, l.image)); } catch {}
+  }
+  await qrun('DELETE FROM generator_logs WHERE id=?', [l.id]);
+  await audit(req.ctx.tenant_id, req.user.id, 'DELETE', 'generator_log', l.id, { type: 'MAINTENANCE', generator_id: g.id });
+  res.json({ ok: true });
+});
 
 // ── IN-APP POS ────────────────────────────────────────────────────────────────
 router.get('/products', requireAuth, async (req, res) => {

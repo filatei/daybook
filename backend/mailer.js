@@ -82,9 +82,17 @@ const isTransient = (e) => {
     || /try again later|4\.7\.0|421|too many|rate/i.test((e && e.message) || '');
 };
 
+function normalizeTo(to) {
+  if (!to) return [];
+  const parts = Array.isArray(to)
+    ? to.flatMap((x) => String(x).split(/[,;]+/))
+    : String(to).split(/[,;]+/);
+  return [...new Set(parts.map((s) => s.trim()).filter(Boolean))];
+}
+
 async function enqueueEmail({ to, subject, html, replyTo, tenant_id, kind }) {
   const { v4: uuid } = require('uuid');
-  const addrs = Array.isArray(to) ? to.join(',') : String(to || '');
+  const addrs = normalizeTo(to).join(',');
   if (!addrs) return { skipped: true };
   await db().qrun(
     `INSERT INTO email_outbox (id,to_addrs,subject,html,reply_to,tenant_id,kind,next_at) VALUES (?,?,?,?,?,?,?,?)`,
@@ -95,8 +103,11 @@ async function enqueueEmail({ to, subject, html, replyTo, tenant_id, kind }) {
 // Try once (with deliver()'s own quick retry); if it still fails transiently,
 // queue it for the background worker. Permanent errors are reported to the caller.
 async function sendOrQueue({ to, subject, html, replyTo, tenant_id, kind, attachments }) {
-  if (MAIL_DISABLED) { await getTransporter().sendMail({ from: FROM, to, subject, html }); return { ok: true, disabled: true }; }
-  const opts = { from: FROM, to, subject, html, replyTo: replyTo || undefined, attachments };
+  if (MAIL_DISABLED) { await getTransporter().sendMail({ from: FROM, to: normalizeTo(to), subject, html }); return { ok: true, disabled: true }; }
+  const addrs = normalizeTo(to);
+  if (!addrs.length) return { skipped: true };
+  const opts = { from: FROM, to: addrs, subject, html, replyTo: replyTo || undefined };
+  if (attachments && attachments.length) opts.attachments = attachments;
   try {
     // deliver() retries transient 421/throttle inline (≈1s, 2s, 4s) so the mail
     // almost always goes out within the same request — instant, like otuburu —
@@ -104,9 +115,12 @@ async function sendOrQueue({ to, subject, html, replyTo, tenant_id, kind, attach
     const info = await deliver(opts);
     return { ok: true, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected, response: info.response };
   } catch (e) {
-    // Still failing after the inline retries — only now fall back to the durable
-    // queue (can't persist file attachments, so those surface the error instead).
-    if (isTransient(e) && !attachments) { await enqueueEmail({ to, subject, html, replyTo, tenant_id, kind }); return { ok: true, queued: true }; }
+    // Still failing after the inline retries — queue the HTML. File attachments
+    // can't live in the outbox, so those are dropped and the body still goes.
+    if (isTransient(e)) {
+      await enqueueEmail({ to: addrs, subject, html, replyTo, tenant_id, kind });
+      return { ok: true, queued: true, droppedAttachments: !!(attachments && attachments.length) };
+    }
     throw e;
   }
 }
@@ -123,7 +137,7 @@ async function drainOutbox() {
   if (!rows || !rows.length) return;
   const m = rows[0];
   try {
-    await getTransporter().sendMail({ from: FROM, to: m.to_addrs.split(','), subject: m.subject, html: m.html, replyTo: m.reply_to || undefined });
+    await deliver({ from: FROM, to: normalizeTo(m.to_addrs), subject: m.subject, html: m.html, replyTo: m.reply_to || undefined });
     await qrun(`UPDATE email_outbox SET status='SENT', sent_at=? WHERE id=?`, [now, m.id]);
     if (m.tenant_id) await qrun('INSERT INTO email_log (id,tenant_id,to_addrs,subject,status) VALUES (?,?,?,?,?)', [require('uuid').v4(), m.tenant_id, m.to_addrs, m.subject || '', 'SENT']).catch(() => {});
   } catch (e) {
@@ -223,22 +237,11 @@ async function sendDailyReport({ tenant, site, report, ops = null, to, attachmen
     </div>
   </div>`;
 
-  // No attachments → route through the persistent outbox queue so a relay
-  // throttle (421) is retried for hours rather than lost. With attachments we
-  // must send inline (the queue can't persist file payloads) but `deliver`
-  // still retries transient failures a few times.
-  if (!attachments.length) {
-    const r = await sendOrQueue({ to: to.join(', '), subject, html, tenant_id: tenant && tenant.id, kind: 'report' });
-    return { messageId: r.messageId, queued: r.queued, subject, to };
-  }
-  const info = await deliver({
-    from: FROM,
-    to: to.join(', '),
-    subject,
-    html,
-    attachments: attachments.map((a) => ({ filename: a.filename || path.basename(a.path), path: a.path })),
-  });
-  return { messageId: info.messageId, subject, to };
+  const attach = attachments.length
+    ? attachments.map((a) => ({ filename: a.filename || path.basename(a.path), path: a.path }))
+    : undefined;
+  const r = await sendOrQueue({ to, subject, html, tenant_id: tenant && tenant.id, kind: 'report', attachments: attach });
+  return { messageId: r.messageId, queued: r.queued, subject, to };
 }
 
 /**
@@ -514,17 +517,10 @@ async function sendGeneratedReport({ tenant, date, report, incidents, to, attach
       <p style="color:#9ca3af;font-size:12px;margin-top:18px">Auto-generated from Daybook sales, production and expenses for ${esc(date)}.</p>
     </div>
   </div>`;
-  // With file attachments → send inline (the queue can't persist file payloads),
-  // deliver() still retries transient failures. Without → use the durable outbox
-  // so a relay throttle (421) is retried for hours instead of failing.
-  if (attachments && attachments.length) {
-    const info = await deliver({
-      from: FROM, to: Array.isArray(to) ? to.join(', ') : to, subject, html,
-      attachments: attachments.map((a) => ({ filename: a.filename || path.basename(a.path), path: a.path })),
-    });
-    return { messageId: info.messageId, subject, to };
-  }
-  const r = await sendOrQueue({ to: Array.isArray(to) ? to.join(', ') : to, subject, html, tenant_id: tenant && tenant.id, kind: 'report' });
+  const attach = attachments && attachments.length
+    ? attachments.map((a) => ({ filename: a.filename || path.basename(a.path), path: a.path }))
+    : undefined;
+  const r = await sendOrQueue({ to, subject, html, tenant_id: tenant && tenant.id, kind: 'report', attachments: attach });
   return { messageId: r.messageId, queued: r.queued, subject, to };
 }
 

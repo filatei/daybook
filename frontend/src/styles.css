@@ -116,6 +116,18 @@ a { color: var(--brand-d); text-decoration: none; }
   font-size: 24px; width: 46px; height: 46px; flex: 0 0 auto;
   display: grid; place-items: center; border-radius: 12px; background: var(--brand-l, #e0f2fe);
 }
+
+/* ── Push opt-in banner ────────────────────────────────────────────────────── */
+.push-banner {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin: 10px 0 4px; padding: 12px 14px;
+  background: var(--brand-l, #e0f2fe); border: 1px solid #bae6fd; border-radius: 14px;
+}
+.push-banner-ic { font-size: 22px; line-height: 1; flex: none; margin-top: 2px; }
+.push-banner-copy { flex: 1; min-width: 0; }
+.push-banner-t { font-weight: 800; font-size: 14px; }
+.push-banner-s { font-size: 12.5px; color: var(--muted); margin-top: 2px; line-height: 1.35; }
+.push-banner-actions { display: flex; flex-direction: column; gap: 6px; flex: none; }
 .nav-tabs {
   display: flex; gap: 8px;
   padding: 0 16px 10px; scrollbar-width: none;

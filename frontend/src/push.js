@@ -27,8 +27,9 @@ async function subscribeAndRegister() {
   const reg = await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
   if (!sub) {
-    const { key } = await api('/push/vapid-public-key');
+    const { key, enabled } = await api('/push/vapid-public-key');
     if (!key) throw new Error('Push is not configured on the server yet');
+    if (enabled === false) console.warn('[push] VAPID_PRIVATE_KEY is not set on the server — this device will subscribe but will not receive pushes until it is.');
     sub = await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(key),

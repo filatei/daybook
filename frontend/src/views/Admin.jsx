@@ -165,6 +165,7 @@ function ReportEmailsTab() {
       .finally(() => setLoading(false));
   }, [tenant]);
 
+  const [newEmail, setNewEmail] = useState('');
   const setSite = (id, v) => setData((p) => ({ ...p, sites: p.sites.map((s) => s.id === id ? { ...s, report_email: v } : s) }));
   const startEdit = () => { setSnapshot(JSON.parse(JSON.stringify(data))); setEditing(true); };
   const cancel = () => { if (snapshot) setData(snapshot); setEditing(false); };
@@ -181,6 +182,25 @@ function ReportEmailsTab() {
     setSaving(false);
   };
 
+  const addList = async () => {
+    const email = newEmail.trim();
+    if (!email) return;
+    try {
+      await api(scoped('/recipients'), { method: 'POST', body: { email } });
+      const r = await api(scoped('/report-recipients'));
+      setData({ ...r, sites: r.sites || [] });
+      setNewEmail('');
+      toast('Added to every report ✓', 'ok');
+    } catch (e) { toast(e.message || 'Could not add', 'err'); }
+  };
+  const removeList = async (id) => {
+    if (!await confirm({ title: 'Remove this address?', message: 'They will no longer receive daily reports.', confirmText: 'Remove' })) return;
+    try {
+      await api(scoped(`/recipients/${id}`), { method: 'DELETE' });
+      setData((p) => ({ ...p, list: (p.list || []).filter((x) => x.id !== id) }));
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
   if (loading) return <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>;
   if (!data) return <div className="empty"><div className="ic">📧</div><p>Could not load report emails</p></div>;
 
@@ -188,7 +208,7 @@ function ReportEmailsTab() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <p style={{ fontSize: 13, color: 'var(--muted)', marginTop: 0, flex: 1 }}>
-          Each site's daily report is emailed to its address below — the person who generated the report is always copied automatically. Separate multiple addresses with commas.
+          Each site's daily report is emailed to its address below, plus everyone on the company distribution list. The person who generated the report is always copied. Separate multiple addresses with commas.
         </p>
         {!editing && (
           <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', whiteSpace: 'nowrap' }} onClick={startEdit}>✎ Edit</button>
@@ -199,14 +219,37 @@ function ReportEmailsTab() {
         {data.sites.map((s) => (
           <div key={s.id} style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
             <label className="fl" style={{ marginTop: 0 }}>{s.name} <span style={{ color: 'var(--muted)', fontWeight: 400 }}>· {s.code}</span></label>
-            <input className="input" type="email" inputMode="email" placeholder={editing ? 'e.g. site@torama.money' : '—'} disabled={!editing}
+            <input className="input" type="text" inputMode="email" placeholder={editing ? 'e.g. site@torama.money, ops@torama.money' : '—'} disabled={!editing}
               value={s.report_email || ''} onChange={(e) => setSite(s.id, e.target.value)} />
           </div>
         ))}
         <div style={{ padding: '10px 14px', background: 'var(--brand-l)' }}>
           <label className="fl" style={{ marginTop: 0 }}>🌍 All-sites roll-up report</label>
-          <input className="input" type="email" inputMode="email" placeholder={data.default_all || 'dailyreports@torama.money'} disabled={!editing}
+          <input className="input" type="text" inputMode="email" placeholder={data.default_all || 'dailyreports@torama.money'} disabled={!editing}
             value={data.all_sites || ''} onChange={(e) => setData((p) => ({ ...p, all_sites: e.target.value }))} />
+        </div>
+      </div>
+
+      <div style={{ fontSize: 13, fontWeight: 800, margin: '18px 0 8px' }}>Always send to</div>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 8px' }}>Company-wide list — every daily report (every site) is copied here, in addition to the per-site addresses above.</p>
+      <div className="card" style={{ padding: '4px 0', overflow: 'hidden' }}>
+        {(data.list || []).map((r) => (
+          <div key={r.id} className="list-item" style={{ padding: '10px 14px' }}>
+            <div className="av">✉️</div>
+            <div className="meta">
+              <div className="t">{r.email}</div>
+              {!!r.name && <div className="s">{r.name}</div>}
+            </div>
+            <button type="button" className="x" style={{ background: '#fee2e2', color: 'var(--err)', border: 'none', width: 34, height: 34, borderRadius: 9 }}
+              onClick={() => removeList(r.id)} aria-label="Remove">×</button>
+          </div>
+        ))}
+        {!(data.list || []).length && <div style={{ padding: '12px 14px', color: 'var(--muted)', fontSize: 13 }}>No extra addresses yet</div>}
+        <div style={{ display: 'flex', gap: 8, padding: '10px 14px' }}>
+          <input className="input" type="email" inputMode="email" placeholder="name@company.com" value={newEmail}
+            onChange={(e) => setNewEmail(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addList(); } }} />
+          <button type="button" className="btn btn-sm" style={{ width: 'auto', flex: 'none' }} onClick={addList} disabled={!newEmail.trim()}>Add</button>
         </div>
       </div>
 

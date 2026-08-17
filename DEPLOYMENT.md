@@ -96,6 +96,28 @@ Identical to otuburu. The server IP is already whitelisted in
 needed** — leave `SMTP_USER`/`SMTP_PASS` blank. (If you prefer an App Password,
 set both and it switches to credential auth automatically.)
 
+If reports stopped arriving, check the container logs for `[emailReportOnSubmit]`
+and `[Mailer]`, and that `MAIL_DISABLED` is not `1` in `/opt/daybook/backend/.env`.
+Admin → a test send is `POST /api/email/test`. Auto-submit now always includes
+the company distribution list **and** the per-site / all-sites addresses.
+
+## 4b. PWA notifications (Web Push)
+
+Native alerts (reports, expenses, chat) need a VAPID key pair in the server `.env`.
+Generate once and paste **both** keys from the same pair:
+
+```bash
+npx web-push generate-vapid-keys
+# then on the server, in /opt/daybook/backend/.env:
+#   VAPID_PUBLIC_KEY=...
+#   VAPID_PRIVATE_KEY=...
+#   VAPID_SUBJECT=mailto:support@torama.money
+# restart: daybook-deploy
+```
+
+CI does **not** rewrite `.env`. If `VAPID_PRIVATE_KEY` is blank, in-app
+notifications still work but the phone never gets a native push.
+
 ## 5. Deploy
 
 Push to `main` → GitHub Actions builds the image, pushes to GHCR, SSHes in,

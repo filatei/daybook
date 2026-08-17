@@ -8,6 +8,7 @@ import ConfirmDialog from './components/ConfirmDialog.jsx';
 import Toast from './components/Toast.jsx';
 import InstallLanding, { isStandalone } from './components/InstallLanding.jsx';
 import { refreshPushIfGranted } from './push.js';
+import PushPrompt from './components/PushPrompt.jsx';
 import './chatOutbox.js';   // registers offline-message auto-flush on app boot
 
 // Views (lazy-ish — just plain imports for now; split later if bundle grows)
@@ -139,6 +140,15 @@ function Inner() {
       });
   }, []);
 
+  // Re-sync the push subscription when the PWA comes back to the foreground
+  // (keeps the endpoint fresh after the OS recycles it).
+  useEffect(() => {
+    if (!user) return;
+    const onVis = () => { if (document.visibilityState === 'visible') refreshPushIfGranted(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [user]);
+
   // ── load sites whenever tenant changes ───────────────────────────────────────
   useEffect(() => {
     if (!tenant) return;
@@ -181,6 +191,7 @@ function Inner() {
     <>
       <Nav />
       <main className="main-content" ref={mainRef}>
+        <PushPrompt />
         <div className="ptr" style={{ height: ptr, opacity: ptr ? 1 : 0 }}>
           <span className={`ptr-ic ${refreshing || ptr >= 70 ? 'go' : ''}`}>↻</span>
         </div>

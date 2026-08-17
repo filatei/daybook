@@ -1,5 +1,35 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useStore, useRole, useActiveTenant, atLeast } from '../store.jsx';
+import { pushSupported, pushPermission, enablePush } from '../push.js';
+
+function NotificationsMoreCard() {
+  const { toast } = useStore();
+  const [perm, setPerm] = useState(() => pushPermission());
+  if (!pushSupported()) return null;
+  const on = perm === 'granted';
+  const denied = perm === 'denied';
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.6px', textTransform: 'uppercase', color: 'var(--muted)', margin: '0 2px 8px' }}>Account</div>
+      <div className="more-grid">
+        <button className="more-card" onClick={async () => {
+          if (on) { toast('Notifications are on for this device', 'ok'); return; }
+          if (denied) { toast('Notifications are blocked — enable them in the browser or phone settings', 'err'); return; }
+          try { await enablePush(); setPerm('granted'); toast('Notifications enabled', 'ok'); }
+          catch (e) { toast(e.message || 'Could not enable notifications', 'err'); }
+        }}>
+          <div className="more-ic">🔔</div>
+          <div>
+            <div style={{ fontWeight: 800 }}>Notifications</div>
+            <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+              {on ? 'On for this device' : (denied ? 'Blocked in browser settings' : 'Alerts for reports, expenses and chat')}
+            </div>
+          </div>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * More — launcher for secondary / operational screens that don't warrant a
@@ -42,6 +72,7 @@ export default function More() {
   return (
     <div>
       <div className="section-title" style={{ marginTop: 0 }}>More</div>
+      <NotificationsMoreCard />
       {sections.map((s) => (
         <div key={s.group} style={{ marginBottom: 18 }}>
           <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '.6px', textTransform: 'uppercase', color: 'var(--muted)', margin: '0 2px 8px' }}>{s.group}</div>
@@ -58,7 +89,7 @@ export default function More() {
           </div>
         </div>
       ))}
-      {items.length === 0 && <div className="empty"><div className="ic">⋯</div><p>Nothing here for your role yet</p></div>}
+      {items.length === 0 && !pushSupported() && <div className="empty"><div className="ic">⋯</div><p>Nothing here for your role yet</p></div>}
     </div>
   );
 }

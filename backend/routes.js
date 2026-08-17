@@ -16,6 +16,7 @@ const {
   groupContexts, groupTenantsFor,
 } = require('./auth');
 const { sendDailyReport, sendGeneratedReport, sendManualReport, sendInvite, sendContactMessage, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
+const { resolveReportRecipients, REPORTS_INBOX } = require('./reportmail');
 
 const ROLE_LABELS = {
   GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
@@ -47,7 +48,7 @@ const scheduler = require('./scheduler');
 const payments = require('./payments');
 const ls = require('./lemonsqueezy');
 const { emitEvent, broadcastLive } = require('./realtime');
-const { sendPushToUser, saveSubscription, removeSubscription, getPublicKey } = require('./push');
+const { sendPushToUser, saveSubscription, removeSubscription, getPublicKey, pushEnabled } = require('./push');
 const XLSX = require('xlsx');
 
 // Build an .xlsx workbook from { sheetName: aoa } and stream it as a download.
@@ -388,7 +389,8 @@ const isEmailList = (v) => !v || String(v).split(',').every((e) => /^[^\s@]+@[^\
 router.get('/report-recipients', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
   const tenant = await tenantById(req.ctx.tenant_id);
   const sites = await qall('SELECT id, code, name, report_email FROM sites WHERE tenant_id=? AND status=? ORDER BY name', [req.ctx.tenant_id, 'ACTIVE']);
-  res.json({ sites, all_sites: tenant.report_email_all || REPORTS_INBOX, default_all: REPORTS_INBOX });
+  const list = await qall('SELECT * FROM recipients WHERE tenant_id=? ORDER BY email', [req.ctx.tenant_id]);
+  res.json({ sites, all_sites: tenant.report_email_all || REPORTS_INBOX, default_all: REPORTS_INBOX, list });
 });
 
 router.patch('/report-recipients', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
@@ -405,7 +407,8 @@ router.patch('/report-recipients', requireAuth, needTenant('SNR_ACCOUNTANT'), as
   await audit(req.ctx.tenant_id, req.user.id, 'UPDATE', 'report-recipients', req.ctx.tenant_id, {});
   const tenant = await tenantById(req.ctx.tenant_id);
   const sites = await qall('SELECT id, code, name, report_email FROM sites WHERE tenant_id=? AND status=? ORDER BY name', [req.ctx.tenant_id, 'ACTIVE']);
-  res.json({ sites, all_sites: tenant.report_email_all || REPORTS_INBOX, default_all: REPORTS_INBOX });
+  const list = await qall('SELECT * FROM recipients WHERE tenant_id=? ORDER BY email', [req.ctx.tenant_id]);
+  res.json({ sites, all_sites: tenant.report_email_all || REPORTS_INBOX, default_all: REPORTS_INBOX, list });
 });
 
 // ── MEMBERS ───────────────────────────────────────────────────────────────────
@@ -425,7 +428,15 @@ router.get('/members', requireAuth, needTenant('SITE_MANAGER'), async (req, res)
 // ── Email diagnostics (Admin) — verify SMTP + send a real test message ────────
 router.get('/email/health', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const v = await verifyConnection();
-  res.json({ ...v, from: MAIL_FROM, host: process.env.SMTP_HOST || 'smtp-relay.gmail.com', port: process.env.SMTP_PORT || '587', auth: !!(process.env.SMTP_USER && process.env.SMTP_PASS) });
+  res.json({
+    ...v,
+    from: MAIL_FROM,
+    host: process.env.SMTP_HOST || 'smtp-relay.gmail.com',
+    port: process.env.SMTP_PORT || '587',
+    auth: !!(process.env.SMTP_USER && process.env.SMTP_PASS),
+    mail_disabled: process.env.MAIL_DISABLED === '1' || process.env.MAIL_DISABLED === 'true',
+    push_enabled: pushEnabled(),
+  });
 });
 router.post('/email/test', requireAuth, needTenant('ADMIN'), async (req, res) => {
   const to = ((req.body || {}).to || req.user.email || '').trim();
@@ -644,30 +655,18 @@ router.delete('/reports/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Auto-email a submitted daily report (Fido & Fiafia only) to its creator and
-// dailyreports@torama.money. Fire-and-forget; logs success/failure to email_log.
-const REPORTS_INBOX = process.env.REPORTS_INBOX || 'dailyreports@torama.money';
-
-// Where a daily report is emailed. Configurable per site (sites.report_email)
-// and per tenant for the all-sites roll-up (tenants.report_email_all). The
-// report's creator ("sender") is always included. Falls back to the all-sites
-// address, then the REPORTS_INBOX default, so a report is never sent nowhere.
-function reportRecipients({ tenant, site, senderEmail }) {
-  const allSites = (tenant && tenant.report_email_all) || REPORTS_INBOX;
-  const siteAddr = site && site.report_email ? site.report_email : null;
-  const primary = site ? (siteAddr || allSites) : allSites;
-  return [...new Set([primary, senderEmail].filter(Boolean))];
-}
-
+// Auto-email a submitted daily report (Fido & Fiafia only). Fire-and-forget;
+// logs success/failure to email_log. Recipients = distribution list + site /
+// all-sites addresses + the creator (see resolveReportRecipients).
 async function emailReportOnSubmit(tenant_id, reportId, site, user) {
+  let to = [];
   try {
     const tenant = await tenantById(tenant_id);
     const isFidoFiafia = !!tenant && (tenant.pos_source || ['fido', 'fiafia'].includes(String(tenant.slug || '').toLowerCase()));
     if (!isFidoFiafia) return;
     const report = await qone('SELECT * FROM daily_reports WHERE id=?', [reportId]);
     if (!report) return;
-    // Recipients: this site's configured report address + the report's creator.
-    const to = reportRecipients({ tenant, site, senderEmail: user && user.email });
+    to = await resolveReportRecipients({ tenant, site, senderEmail: user && user.email });
     if (!to.length) return;
     const docs = (await qall('SELECT * FROM documents WHERE report_id=?', [reportId]))
       .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));
@@ -675,10 +674,11 @@ async function emailReportOnSubmit(tenant_id, reportId, site, user) {
     const sent = await sendDailyReport({ tenant, site, report, ops: opsRow ? J(opsRow.data, null) : null, to, attachments: docs });
     await qrun('UPDATE daily_reports SET emailed_at=? WHERE id=?', [nowS(), reportId]).catch(() => {});
     await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)',
-      [uuid(), tenant_id, reportId, to.join(','), sent.subject, 'SENT']);
+      [uuid(), tenant_id, reportId, to.join(','), sent.subject, sent.queued ? 'QUEUED' : 'SENT']);
   } catch (e) {
+    console.error('[emailReportOnSubmit]', e.message);
     await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?,?)',
-      [uuid(), tenant_id, reportId, REPORTS_INBOX, 'Daily report', 'FAILED', e.message]).catch(() => {});
+      [uuid(), tenant_id, reportId, to.join(',') || REPORTS_INBOX, 'Daily report', 'FAILED', e.message]).catch(() => {});
   }
 }
 
@@ -714,7 +714,7 @@ router.post('/reports', requireAuth, needTenant('SECRETARY'), async (req, res) =
     await notify(req.ctx.tenant_id, uids,
       { type: 'report', title: `Report submitted — ${site.name}`, body: `${b.report_date} · sales ₦${(totals.total_sales || 0).toLocaleString()}`, link: 'reports' });
     // Fido & Fiafia: email the submitted report to the creator + dailyreports@torama.money.
-    emailReportOnSubmit(req.ctx.tenant_id, id, site, req.user).catch(() => {});
+    emailReportOnSubmit(req.ctx.tenant_id, id, site, req.user).catch((e) => console.error('[emailReportOnSubmit]', e.message));
   }
   res.status(existing ? 200 : 201).json(reportView(await qone('SELECT * FROM daily_reports WHERE id=?', [id])));
 });
@@ -1105,7 +1105,7 @@ router.post('/reports/generate/email', requireAuth, needTenant('SECRETARY'), asy
   // Single-site → that site's configured address; all-sites roll-up → the
   // tenant's all-sites address. Creator ("sender") always included.
   const site = out.site_id ? await siteById(out.site_id) : null;
-  const to = reportRecipients({ tenant, site, senderEmail: req.user.email });
+  const to = await resolveReportRecipients({ tenant, site, senderEmail: req.user.email });
   // Include any files attached to the saved report for this site+date.
   let attachments = [];
   if (out.site_id) {
@@ -1194,7 +1194,7 @@ router.post('/reports/manual/email', requireAuth, needTenant('SNR_ACCOUNTANT'), 
   const r = await qone('SELECT * FROM manual_reports WHERE tenant_id=? AND report_date=?', [req.ctx.tenant_id, date]);
   if (!r) return res.status(400).json({ error: 'enter the report first' });
   const tenant = await tenantById(req.ctx.tenant_id);
-  const to = reportRecipients({ tenant, site: null, senderEmail: req.user.email });
+  const to = await resolveReportRecipients({ tenant, site: null, senderEmail: req.user.email });
   try {
     const sent = await sendManualReport({ tenant, date, data: J(r.data, {}), notes: r.notes || '', to });
     await qrun('UPDATE manual_reports SET status=?, emailed_at=? WHERE id=?', ['EMAILED', Math.floor(Date.now() / 1000), r.id]);
@@ -1366,7 +1366,7 @@ router.post('/reports/consolidated/email', requireAuth, needTenant('SNR_ACCOUNTA
   const payload = await consolidatedPayload(req.ctx, date);
   if (!payload.auto) return res.status(400).json({ error: 'nothing to report for this date' });
   const tenant = await tenantById(req.ctx.tenant_id);
-  const to = reportRecipients({ tenant, site: null, senderEmail: req.user.email });
+  const to = await resolveReportRecipients({ tenant, site: null, senderEmail: req.user.email });
   // Fold the manual financial lines + combined incidents into the email's notes
   // block (reuses the all-sites generated-report template).
   const m = payload.manual || {};
@@ -1419,10 +1419,8 @@ router.post('/reports/:id/email', requireAuth, async (req, res) => {
   const c = await contextFor(req.user, r.tenant_id);
   if (!c || !atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'forbidden' });
   const tenant = await tenantById(r.tenant_id), site = await siteById(r.site_id);
-  const recs = (await qall('SELECT email FROM recipients WHERE tenant_id=? AND active=1', [r.tenant_id])).map((x) => x.email);
   const extra = Array.isArray(req.body?.extra) ? req.body.extra : [];
-  const fallback = (process.env.DEFAULT_REPORT_RECIPIENTS || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const to = [...new Set([...recs, ...extra, ...(recs.length ? [] : fallback)])].filter(Boolean);
+  const to = await resolveReportRecipients({ tenant, site, extra });
   if (!to.length) return res.status(400).json({ error: 'no recipients configured' });
   const docs = (await qall('SELECT * FROM documents WHERE report_id=?', [r.id]))
     .map((d) => ({ filename: d.file_name, path: path.join(UPLOAD_DIR, d.stored_name) })).filter((a) => fs.existsSync(a.path));
@@ -1517,14 +1515,16 @@ router.delete('/documents/:id', requireAuth, async (req, res) => {
 // ── RECIPIENTS ────────────────────────────────────────────────────────────────
 router.get('/recipients', requireAuth, needTenant('GENERAL_MANAGER'), async (req, res) =>
   res.json(await qall('SELECT * FROM recipients WHERE tenant_id=? ORDER BY email', [req.ctx.tenant_id])));
-router.post('/recipients', requireAuth, needTenant('ADMIN'), async (req, res) => {
-  const { email, name } = req.body || {}; if (!email) return res.status(400).json({ error: 'email required' });
+router.post('/recipients', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
+  const { name } = req.body || {};
+  const email = String((req.body || {}).email || '').trim();
+  if (!email) return res.status(400).json({ error: 'email required' });
   const id = uuid();
   try { await qrun('INSERT INTO recipients (id,tenant_id,email,name) VALUES (?,?,?,?)', [id, req.ctx.tenant_id, email, name || null]); }
   catch { return res.status(409).json({ error: 'recipient already exists' }); }
   res.status(201).json(await qone('SELECT * FROM recipients WHERE id=?', [id]));
 });
-router.delete('/recipients/:id', requireAuth, needTenant('ADMIN'), async (req, res) => {
+router.delete('/recipients/:id', requireAuth, needTenant('SNR_ACCOUNTANT'), async (req, res) => {
   await qrun('DELETE FROM recipients WHERE id=? AND tenant_id=?', [req.params.id, req.ctx.tenant_id]);
   res.json({ ok: true });
 });
@@ -3055,7 +3055,7 @@ router.post('/notifications/read', requireAuth, async (req, res) => {
 
 // ── WEB PUSH (native notifications) ───────────────────────────────────────────
 // The frontend needs the VAPID public key to create a PushSubscription.
-router.get('/push/vapid-public-key', (_req, res) => res.json({ key: getPublicKey() }));
+router.get('/push/vapid-public-key', (_req, res) => res.json({ key: getPublicKey(), enabled: pushEnabled() }));
 
 // Register (or refresh) this device's push subscription for the signed-in user.
 router.post('/push/subscribe', requireAuth, async (req, res) => {

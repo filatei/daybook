@@ -22,8 +22,7 @@ const { v4: uuid } = require('uuid');
 const { qone, qall, qrun } = require('./db');
 const sales = require('./salesSource');
 const { sendDailyReport, sendComplianceAlert } = require('./mailer');
-
-const REPORTS_INBOX = process.env.REPORTS_INBOX || 'dailyreports@torama.money';
+const { resolveReportRecipients, REPORTS_INBOX } = require('./reportmail');
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../data/uploads');
 
@@ -79,9 +78,6 @@ async function syncDay(dateStr, { email = false } = {}) {
   const out = { date: dateStr, created: 0, updated: 0, emailed: 0, skipped_human: 0, errors: 0 };
   const tenants = await qall("SELECT * FROM tenants WHERE status='ACTIVE'");
   for (const t of tenants) {
-    const recs = email
-      ? (await qall('SELECT email FROM recipients WHERE tenant_id=? AND active=1', [t.id])).map((r) => r.email)
-      : [];
     const sitesList = await qall("SELECT * FROM sites WHERE tenant_id=? AND status='ACTIVE'", [t.id]);
     for (const s of sitesList) {
       let data;
@@ -108,19 +104,22 @@ async function syncDay(dateStr, { email = false } = {}) {
           JSON.stringify(data.lines || []), '{}', paymentNote(data), 'DRAFT']);
       existing ? out.updated++ : out.created++;
 
-      if (email && recs.length) {
+      if (email) {
+        let to = [];
         try {
+          to = await resolveReportRecipients({ tenant: t, site: s });
+          if (!to.length) continue;
           const report = await qone('SELECT * FROM daily_reports WHERE id=?', [id]);
           const opsRow = await qone('SELECT data FROM ops_daily WHERE tenant_id=? AND site_id=? AND ops_date=?', [t.id, s.id, dateStr]).catch(() => null);
           let ops = null; try { ops = opsRow ? JSON.parse(opsRow.data) : null; } catch { ops = null; }
-          const sent = await sendDailyReport({ tenant: t, site: s, report, ops, to: recs, attachments: [] });
+          const sent = await sendDailyReport({ tenant: t, site: s, report, ops, to, attachments: [] });
           await qrun('UPDATE daily_reports SET status=?, emailed_at=EXTRACT(EPOCH FROM NOW())::BIGINT WHERE id=?', ['EMAILED', id]);
           await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status) VALUES (?,?,?,?,?,?)',
-            [uuid(), t.id, id, recs.join(','), sent.subject, 'SENT']);
+            [uuid(), t.id, id, to.join(','), sent.subject, sent.queued ? 'QUEUED' : 'SENT']);
           out.emailed++;
         } catch (e) {
           await qrun('INSERT INTO email_log (id,tenant_id,report_id,to_addrs,subject,status,error) VALUES (?,?,?,?,?,?,?)',
-            [uuid(), t.id, id, recs.join(','), 'Daily report', 'FAILED', e.message]);
+            [uuid(), t.id, id, to.join(',') || '', 'Daily report', 'FAILED', e.message]);
           out.errors++;
         }
       }

@@ -116,6 +116,12 @@ ensure_env SYNC_ENABLED "0"
 ensure_env SYNC_CRON "30 22 * * *"
 ensure_env SYNC_TZ "Africa/Lagos"
 ensure_env SYNC_EMAIL "0"
+ensure_env VAPID_SUBJECT "mailto:support@torama.money"
+ensure_env VAPID_PUBLIC_KEY ""
+ensure_env VAPID_PRIVATE_KEY ""
+if grep -qE '^VAPID_PRIVATE_KEY=$' "${ENV_FILE}"; then
+  log "VAPID_PRIVATE_KEY is empty — PWA push is off until you set a key pair (npx web-push generate-vapid-keys)"
+fi
 chown daybookuser:daybookuser "${ENV_FILE}" 2>/dev/null || true
 
 # ── 5. TLS — temporary HTTP vhost → certbot → managed vhost ───────────────────

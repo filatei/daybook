@@ -9,7 +9,12 @@
 
 ## Target
 - **DB engine:** PostgreSQL (Daybook new system)
-- **Tenant:** Fido Water — get tenant_id from `SELECT id FROM tenants WHERE name ILIKE '%fido%'`
+- **Tenant:** Fido Water — look up `tenant_id` on the server (UI also shows Workspace ID under the header switcher + Admin → Settings):
+```
+docker exec -it daybook-postgres psql -U daybook -d daybook -c "SELECT id, name, slug FROM tenants WHERE name ILIKE '%fido%';"
+# or: cd /opt/daybook/backend && docker compose exec postgres psql -U daybook -d daybook -c "..."
+```
+Defaults user/db `daybook`; check `.env` if different.
 
 ## Status
 - [ ] SSH into fido.torama.ng and identify MongoDB collections

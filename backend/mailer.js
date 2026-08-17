@@ -26,16 +26,20 @@ function getTransporter() {
   const secure = process.env.SMTP_SECURE === 'true';
   const user = process.env.SMTP_USER;
   const pass = process.env.SMTP_PASS;
+  // Google SMTP relay rejects EHLO when Nodemailer uses the Docker container
+  // hostname (e.g. 87b7a5cd40ae) with 421. Force a Workspace domain that the
+  // relay already accepts. Override with SMTP_EHLO_NAME if needed.
+  const name = (process.env.SMTP_EHLO_NAME || 'torama.money').trim() || 'torama.money';
   // Match otuburu exactly: a plain transport, one fresh connection per send.
   // A long-lived POOLED connection is what the Google relay 421s under bursts —
   // otuburu never hits it because every send opens and closes its own socket.
   // Credential auth only when BOTH user and pass are set; otherwise IP relay.
   const auth = user && pass ? { user, pass } : undefined;
   _transporter = nodemailer.createTransport({
-    host, port, secure, auth,
+    host, port, secure, auth, name,
     connectionTimeout: 15000, greetingTimeout: 12000, socketTimeout: 25000,
   });
-  console.log(`[Mailer] SMTP ${host}:${port} | auth: ${auth ? 'credentials' : 'IP-relay (no password)'}`);
+  console.log(`[Mailer] SMTP ${host}:${port} | EHLO ${name} | auth: ${auth ? 'credentials' : 'IP-relay (no password)'}`);
   return _transporter;
 }
 

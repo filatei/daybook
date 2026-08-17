@@ -433,6 +433,7 @@ router.get('/email/health', requireAuth, needTenant('ADMIN'), async (req, res) =
     from: MAIL_FROM,
     host: process.env.SMTP_HOST || 'smtp-relay.gmail.com',
     port: process.env.SMTP_PORT || '587',
+    ehlo_name: process.env.SMTP_EHLO_NAME || 'torama.money',
     auth: !!(process.env.SMTP_USER && process.env.SMTP_PASS),
     mail_disabled: process.env.MAIL_DISABLED === '1' || process.env.MAIL_DISABLED === 'true',
     push_enabled: pushEnabled(),

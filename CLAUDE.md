@@ -44,6 +44,7 @@ React 18 + Vite frontend, Node/Express + PostgreSQL backend. Deployed as PWA.
 
 ## Recently Completed (verified 2026-08-17)
 - [x] **Daily-report email fix** (`301c61d`) — Emails went quiet after ~Aug 13 because auto-submit used only per-site / all-sites addresses; the company distribution list (`recipients`) was only used on manual re-email; lists never merged. Fix: every send path merges distribution list + per-site/all-sites + generator (`backend/reportmail.js` → `resolveReportRecipients`). Admin → Report emails **"Always send to"**; comma-separated emails save (`type=text`). SMTP outbox retries via `deliver()`, trim/normalize addresses. Submit failures log the real To: list. Health: `GET /api/email/health`, `POST /api/email/test`. Ensure `MAIL_DISABLED` is not `1` in prod.
+- [x] **SMTP EHLO hostname** — Google relay (`smtp-relay.gmail.com:587`) returns 421 when Nodemailer EHLO uses the Docker container ID. Fix: Nodemailer `name` from `SMTP_EHLO_NAME` (default `torama.money`) in `backend/mailer.js`. Set in `/opt/daybook/backend/.env` (CI does not rewrite `.env`); optional docker-compose `hostname:` is extra hardening only. After deploy: restart, then manually requeue FAILED outbox / re-send reports (do not blind-requeue prod FAILED).
 - [x] **PWA push notifications** (same deploy family as email fix) — Banner after login (`PushPrompt`) + More → Notifications. SW cache `daybook-v4`. Server needs `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` in `/opt/daybook/backend/.env` (generate with `npx web-push generate-vapid-keys`). Without private key, in-app notifications still work but no native phone push. See `DEPLOYMENT.md` §4b.
 - [x] **Tenant ID in UI** (`85e199e`) — Shown under header workspace switcher (ID + Copy), and Admin → Settings **Workspace ID** card (for API curls `?tenant=`).
 
@@ -73,7 +74,7 @@ React 18 + Vite frontend, Node/Express + PostgreSQL backend. Deployed as PWA.
 - Vite root is `frontend/src/` — not `frontend/`
 - `color-scheme: light` set in `:root` to prevent dark mode bleed
 - Report email recipients: always merge `recipients` + site/all-sites + sender (`resolveReportRecipients`); do not regress to site-only auto-submit
-- Prod mail/push env (`/opt/daybook/backend/.env`): `MAIL_DISABLED` must not be `1`; VAPID pair required for native push (CI does not rewrite `.env`)
+- Prod mail/push env (`/opt/daybook/backend/.env`): `MAIL_DISABLED` must not be `1`; `SMTP_EHLO_NAME=torama.money` (Nodemailer EHLO; default in code if unset); VAPID pair required for native push (CI does not rewrite `.env`)
 - Deploy git remote: HTTPS may need auth fix for pushes; SSH was used successfully
 - Look up tenant UUIDs on the server (defaults user/db `daybook`; check `.env` if different; container `daybook-postgres`, deploy path `/opt/daybook/backend`):
 ```

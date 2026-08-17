@@ -42,6 +42,7 @@ App secrets (daybook-specific):
 | `DAYBOOK_SMTP_FROM` | no | `Daybook <noreply@torama.money>` |
 | `SMTP_USER` / `SMTP_PASS` | no | blank → IP-based relay (see §4) |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_SECURE` | no | Google relay defaults |
+| `SMTP_EHLO_NAME` | no | `torama.money` (see §4 — set in server `.env`; CI does not rewrite `.env`) |
 
 > Generate the JWT secret: `openssl rand -hex 32`
 
@@ -96,10 +97,28 @@ Identical to otuburu. The server IP is already whitelisted in
 needed** — leave `SMTP_USER`/`SMTP_PASS` blank. (If you prefer an App Password,
 set both and it switches to credential auth automatically.)
 
+**EHLO hostname:** Nodemailer defaults to the Docker container hostname
+(e.g. `87b7a5cd40ae`). Google's relay returns **421 on EHLO** for those IDs.
+Set a Workspace domain that already works:
+
+```bash
+# in /opt/daybook/backend/.env  (CI does not rewrite .env)
+SMTP_EHLO_NAME=torama.money
+```
+
+Code default is also `torama.money` if the var is unset. Optional extra
+hardening: set `hostname: daybook.torama.money` on the `daybook` service in
+`docker-compose.yml` — the env/Nodemailer `name` option is the real fix.
+
 If reports stopped arriving, check the container logs for `[emailReportOnSubmit]`
 and `[Mailer]`, and that `MAIL_DISABLED` is not `1` in `/opt/daybook/backend/.env`.
 Admin → a test send is `POST /api/email/test`. Auto-submit now always includes
 the company distribution list **and** the per-site / all-sites addresses.
+
+After deploying an EHLO fix: confirm `SMTP_EHLO_NAME` (or rely on the code
+default), restart the app, then **manually requeue FAILED outbox rows** (e.g.
+the ~305 FAILED messages) and/or re-send reports from Admin — do not blindly
+auto-requeue production FAILED mail without checking recipients/errors.
 
 ## 4b. PWA notifications (Web Push)
 

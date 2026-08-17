@@ -33,6 +33,10 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: daybook
+    # Optional EHLO hardening for Google SMTP relay (real fix is SMTP_EHLO_NAME
+    # / Nodemailer `name` in mailer.js). Uncomment if you want container hostname
+    # to match a Workspace domain too:
+    # hostname: daybook.torama.money
     restart: always
     depends_on:
       postgres:

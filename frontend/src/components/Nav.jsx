@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useStore, useRole, useActiveTenant, atLeast, isGateRole } from '../store.jsx';
+import { useStore, useRole, useActiveTenant, atLeast, isGateRole, GROUP_ID } from '../store.jsx';
 import { api, scoped } from '../api.js';
 import { useRealtime } from '../hooks/useRealtime.js';
 import { pushSupported, pushPermission, enablePush } from '../push.js';
@@ -142,6 +142,27 @@ export default function Nav() {
               <option key={t.id} value={t.id}>{t.name}</option>
             ))}
           </select>
+          {tenant && tenant !== GROUP_ID && (
+            <div className="nav-tenant-id">
+              <span className="nav-tenant-id-label" title="Workspace ID for API curls (?tenant=…)">
+                ID <code>{tenant}</code>
+              </span>
+              <button
+                type="button"
+                className="nav-tenant-copy"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(tenant);
+                    toast?.('Tenant ID copied', 'ok');
+                  } catch {
+                    toast?.('Could not copy', 'err');
+                  }
+                }}
+              >
+                Copy
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Desktop tab strip (hidden on mobile via CSS) */}

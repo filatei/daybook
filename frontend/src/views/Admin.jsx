@@ -351,7 +351,8 @@ function PurgeErrantCard() {
 }
 
 function SettingsTab() {
-  const { toast, tenant, confirm } = useStore();
+  const { toast, tenant, tenants, confirm } = useStore();
+  const activeTenant = (tenants || []).find((t) => t.id === tenant);
   const [thr, setThr] = useState(0.55);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -364,6 +365,15 @@ function SettingsTab() {
       api(scoped('/products')).then((p) => setProducts(Array.isArray(p) ? p : [])).catch(() => {}),
     ]).finally(() => setLoading(false));
   }, [tenant]);
+  const copyTenantId = async () => {
+    if (!tenant) return;
+    try {
+      await navigator.clipboard.writeText(tenant);
+      toast('Tenant ID copied', 'ok');
+    } catch {
+      toast('Could not copy', 'err');
+    }
+  };
   const saveBagged = async () => {
     if (!await confirm({ title: 'Save finished-goods product?', message: 'The daily bagged count will add to this product’s stock.', confirmText: 'Save' })) return;
     setSavingBagged(true);
@@ -398,6 +408,21 @@ function SettingsTab() {
   if (loading) return <div className="skel" />;
   return (
     <div>
+    {tenant && (
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="section-title" style={{ marginTop: 0 }}>Workspace ID</div>
+        <p className="sub">Use this ID in API curls as <code>?tenant=…</code> (or the <code>X-Tenant-Id</code> header).</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 800 }}>{activeTenant?.name || '—'}</div>
+            <code style={{ fontSize: 12.5, wordBreak: 'break-all' }}>{tenant}</code>
+          </div>
+          <button type="button" className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }} onClick={copyTenantId}>
+            Copy ID
+          </button>
+        </div>
+      </div>
+    )}
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="section-title" style={{ marginTop: 0 }}>📧 Email delivery</div>
       <p className="sub">Invite & report emails go through your SMTP relay. Test it here to see exactly what the server reports.</p>

@@ -1678,6 +1678,47 @@ async function migrate() {
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_production_staff_site_day
        ON production(tenant_id, staff_id, work_date, site_id)`,
   );
+
+  // Staff identity: token-sorted lowercase name (word-order / case duplicates).
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION staff_name_key(n TEXT) RETURNS TEXT AS $$
+      SELECT COALESCE((
+        SELECT string_agg(t, ' ' ORDER BY t)
+        FROM regexp_split_to_table(
+          lower(trim(regexp_replace(
+            regexp_replace(COALESCE(n,''), '[^a-zA-Z0-9]', ' ', 'g'),
+            '\\s+', ' ', 'g'))),
+          '\\s+'
+        ) t
+        WHERE t <> ''
+      ), '');
+    $$ LANGUAGE SQL IMMUTABLE
+  `);
+  // Pull a bank hint out of "FCMB-0123…" then keep digits only. Column is TEXT —
+  // never coerce to numeric (that drops leading zeros).
+  await pool.query(`
+    UPDATE staff SET
+      bank_name = COALESCE(
+        NULLIF(trim(bank_name), ''),
+        NULLIF(trim(regexp_replace(regexp_replace(bank_account, '[0-9].*$', ''), '[-_/|,]+', ' ', 'g')), '')
+      ),
+      bank_account = COALESCE(
+        substring(bank_account from '[0-9]{10}'),
+        NULLIF(regexp_replace(bank_account, '[^0-9]', '', 'g'), '')
+      )
+    WHERE bank_account IS NOT NULL AND bank_account ~ '[^0-9]'
+  `);
+  try {
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_staff_tenant_name_key
+        ON staff (tenant_id, staff_name_key(full_name))
+        WHERE status = 'ACTIVE'
+          AND COALESCE(full_name,'') <> ''
+          AND UPPER(full_name) NOT LIKE '%HIRED%'
+    `);
+  } catch (e) {
+    console.warn('[db] staff name unique index skipped (existing duplicates):', e.message);
+  }
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction, clientQ };

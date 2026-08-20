@@ -19,6 +19,9 @@ const { v4: uuid } = require('uuid');
 const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
 const { qone, qall, qrun, withTransaction, clientQ } = require('./db');
 const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
+const {
+  nameKey, accountDigits, parseBankFields, csvAccountText, personGroups, STAFF_NAME_KEY_SQL,
+} = require('./staffIdentity');
 
 const router = express.Router();
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -591,11 +594,11 @@ router.get('/production/summary', requireAuth, async (req, res) => {
 // Search active staff (any site) to pull a visiting worker into a site's sheet.
 router.get('/production/staff-search', requireAuth, async (req, res) => {
   const c = await needCtx(req, res, 'SECRETARY'); if (!c) return;
-  const q = `%${(req.query.q || '').trim().toLowerCase()}%`;
+  const q = `%${(req.query.q || '').trim()}%`;
   res.json(await qall(`SELECT s.id staff_id, s.full_name, s.role_title, s.pay_type, s.staff_type,
       s.site_id primary_site_id, ps.name primary_site_name
     FROM staff s LEFT JOIN sites ps ON ps.id = s.site_id
-    WHERE s.tenant_id = ? AND s.status='ACTIVE' AND LOWER(s.full_name) LIKE ?
+    WHERE s.tenant_id = ? AND s.status='ACTIVE' AND s.full_name ILIKE ?
     ORDER BY s.full_name LIMIT 20`, [c.tenant_id, q]));
 });
 router.post('/production', requireAuth, async (req, res) => {
@@ -724,11 +727,12 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
     PAYROLL_ELIGIBLE], sArgs = [tenant_id];
   if (pieceOnly) sWhere.push(PIECE_WORKER);
   if (site) { sWhere.push('site_id=?'); sArgs.push(site); }
-  const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged
+  const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged, bank_name, bank_account
     FROM staff WHERE ${sWhere.join(' AND ')} ORDER BY full_name`, sArgs);
-  const att = await qall(`SELECT staff_id, COUNT(DISTINCT work_date) d FROM attendance
-    WHERE tenant_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ? GROUP BY staff_id`, [tenant_id, from, to]);
-  const daysBy = {}; for (const a of att) daysBy[a.staff_id] = Number(a.d);
+  const att = await qall(`SELECT DISTINCT staff_id, work_date FROM attendance
+    WHERE tenant_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [tenant_id, from, to]);
+  const daysByStaff = {};
+  for (const a of att) (daysByStaff[a.staff_id] = daysByStaff[a.staff_id] || new Set()).add(a.work_date);
   const { by: prodBy, override, sourceIds } = await bagsForPeriod(tenant_id, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   // Per-site split behind each worker's total (where the bags were actually done).
   const bySite = await siteSplit(tenant_id, from, to, override);
@@ -738,22 +742,33 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
   // Calendar days in the pay period — denominator for monthly proration.
   const periodDays = workingDays(from, to); // Mon–Sat working days
-  return staff.map((s) => {
-    const days = daysBy[s.id] || 0;
-    const pb = prodBy[s.id] || { l: 0, g: 0 };
-    const pt = (s.pay_type || '').toUpperCase();
+  const lines = [];
+  for (const g of personGroups(staff, sourceIds)) {
+    const { head, memberIds, fromSheet, bagIds } = g;
+    const dayset = new Set();
+    let l = 0, bagged = 0, advance = 0;
+    for (const id of memberIds) {
+      for (const d of (daysByStaff[id] || [])) dayset.add(d);
+      advance += advBy[id] || 0;
+    }
+    for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; bagged += pb.g; } }
+    const days = dayset.size;
+    const pt = (head.pay_type || '').toUpperCase();
     let gross;
-    if (pt === 'PIECE') gross = pb.l * rates.loaded + pb.g * rates.bagged;
-    // Monthly staff earn a FIXED salary, prorated by attendance over the period.
-    else if (pt === 'MONTHLY') gross = (s.daily_rate || 0) * (days / periodDays);
-    else gross = days * (s.daily_rate || 0);   // daily wage
-    return { staff_id: s.id, full_name: s.full_name, role_title: s.role_title, pay_type: s.pay_type,
-      days_present: days, period_days: periodDays, bags_loaded: pb.l, bags_bagged: pb.g, gross: Math.round(gross * 100) / 100,
-      by_site: bySite[s.id] || [],
-      bags_source: sourceIds.has(s.id) ? 'SHEET' : 'PRODUCTION',
-      member_ids: [s.id],
-      advance: Math.round((advBy[s.id] || 0) * 100) / 100 };
-  });
+    if (pt === 'PIECE') gross = l * rates.loaded + bagged * rates.bagged;
+    else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
+    else gross = days * (head.daily_rate || 0);
+    lines.push({
+      staff_id: head.id, full_name: head.full_name, role_title: head.role_title, pay_type: head.pay_type,
+      days_present: days, period_days: periodDays, bags_loaded: l, bags_bagged: bagged, gross: Math.round(gross * 100) / 100,
+      by_site: memberIds.flatMap((id) => bySite[id] || []),
+      bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
+      member_ids: memberIds,
+      advance: Math.round(advance * 100) / 100,
+    });
+  }
+  lines.sort((a, b) => String(a.full_name).localeCompare(String(b.full_name)));
+  return lines;
   // Returns ALL active staff (incl. zero) so the UI can show paid staff up top
   // and cull the rest into a review section. Save (runs2) skips zero lines.
 }
@@ -843,20 +858,15 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
   const periodDays = workingDays(from, to); // Mon–Sat working days
 
-  const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  const groups = {};
-  for (const s of staff) {
-    const acct = norm(s.bank_account);
-    const key = acct ? `${norm(s.full_name)}|${acct}` : `n:${norm(s.full_name)}`;
-    (groups[key] = groups[key] || []).push(s);
-  }
+  // Identity = token-sorted name, or the same ≥9-digit account (see staffIdentity.js).
+  // The old key (lowercase name + raw account string) missed word-order twins
+  // ("CHINEYE OKARA" / "OKARA CHINEYE") and bank-prefixed accounts
+  // ("FCMB-5933484012" vs "5933484012") — one person, two payslips.
   const lines = [];
-  for (const key of Object.keys(groups)) {
-    const members = groups[key];
-    const head = members[0];
-    const memberIds = members.map((m) => m.id);
+  for (const grp of personGroups(staff, sourceIds)) {
+    const { head, members, memberIds, fromSheet, bagIds } = grp;
     const dayset = new Set();
-    let l = 0, g = 0, advance = 0;
+    let l = 0, bags = 0, advance = 0;
     // One human can hold two staff records (multi-site duplicates — see
     // fix_merge_multisite_dupes.sql), and this line merges them. If the sheet
     // matched only ONE of those records, summing every member would pay the
@@ -864,23 +874,21 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     // same work, twice. bagsForPeriod replaces per staff_id; the merge has to
     // replace per person. So when any member came from the sheet, only the
     // sheet members' bags count.
-    const fromSheet = memberIds.some((id) => sourceIds.has(id));
-    const bagIds = fromSheet ? memberIds.filter((id) => sourceIds.has(id)) : memberIds;
     for (const id of memberIds) {
       for (const d of (daysByStaff[id] || [])) dayset.add(d);
       advance += advBy[id] || 0;
     }
-    for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; g += pb.g; } }
+    for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; bags += pb.g; } }
     const days = dayset.size;
     const pt = (head.pay_type || '').toUpperCase();
     let gross;
-    if (pt === 'PIECE') gross = l * rates.loaded + g * rates.bagged;
+    if (pt === 'PIECE') gross = l * rates.loaded + bags * rates.bagged;
     else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
     else gross = days * (head.daily_rate || 0);
     const line = {
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
-      bags_loaded: l, bags_bagged: g, gross: round2(gross), advance: round2(advance),
+      bags_loaded: l, bags_bagged: bags, gross: round2(gross), advance: round2(advance),
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
       tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
     };
@@ -937,7 +945,7 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   for (const l of lines) {
     const s = sBy[l.staff_id] || {};
     const nm = splitName(l.full_name);
-    const acct = [s.bank_name, s.bank_account].filter(Boolean).join('-') || (s.bank_account || '');
+    const acct = accountDigits(s.bank_account);
     const pt = (l.pay_type || '').toUpperCase();
     // Sheet bucketing must agree with the PIECE_WORKER filter: staff_type is
     // authoritative, pay_type is the fallback. Testing pay_type alone dropped
@@ -959,7 +967,7 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   if (!pieceOnly) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reg, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'DESIGNATION', 'LOCATION', 'ACCOUNT NUMBER', 'DAYS WORKED', 'BASE SALARY', 'DEDUCTION', 'REMARKS', 'NET SALARY'] }), 'REGULAR');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bag, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'QTY', 'ACCOUNT NUMBER', 'DEDUCTION', 'REMARKS', 'COMMISSION'] }), 'BAGGERS');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(load, { header: ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'ACCOUNT NUMBER', 'BAGS LOADED', 'DEDUCTION', 'REMARKS', 'NET PAY (COMMISSION)'] }), 'LOADERS');
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const buf = XLSX.write(forceAccountTextSheets(wb, ['ACCOUNT NUMBER']), { type: 'buffer', bookType: 'xlsx' });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx"`);
   res.send(buf);
@@ -1008,9 +1016,7 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
     if (!id && !full) return; // empty row
     if (/HIRED/i.test(full)) return; // "HIRED BAGGER/LOADER" placeholders are not real staff
     const acctRaw = String(get(['ACCOUNT NUMBER', 'ACCOUNT']) ?? '').trim();
-    const dash = acctRaw.indexOf('-');
-    const bankName = dash > 0 ? acctRaw.slice(0, dash) : null;
-    const bankAcct = dash > 0 ? acctRaw.slice(dash + 1) : acctRaw || null;
+    const parsed = parseBankFields(acctRaw, null);
     const loc = String(get(['LOCATION']) ?? '').trim().toLowerCase();
     const siteId = siteByName[loc] || null;
     if (loc && !siteId) noSite.add(loc);
@@ -1018,16 +1024,16 @@ router.post('/staff-import', requireAuth, xlsUpload.single('file'), async (req, 
     const payType = staffType === 'REGULAR' ? 'MONTHLY' : 'PIECE';
     const baseSalary = staffType === 'REGULAR' ? (num(get(['BASE SALARY', 'SALARY', 'MONTHLY SALARY'])) || 0) : 0;
 
-    // Match an existing staff by ext id (preferred) or by name within the tenant.
+    // Match an existing staff by ext id (preferred) or by token-sorted name
+    // ("CHINEYE OKARA" = "OKARA CHINEYE", case/spacing ignored).
     let existing = id ? await qone('SELECT id FROM staff WHERE tenant_id=? AND ext_people_id=?', [c.tenant_id, id]) : null;
-    // Name match must be whitespace-insensitive, or "BLESSING  FELIX" (double space)
-    // imports as a NEW row alongside "BLESSING FELIX" — which is how the roster grew
-    // ~80 duplicate people. Collapse runs of whitespace on BOTH sides before compare.
     if (!existing && full) {
       existing = await qone(
-        "SELECT id FROM staff WHERE tenant_id=? AND LOWER(REGEXP_REPLACE(TRIM(full_name), '\\s+', ' ', 'g')) = ?",
-        [c.tenant_id, full.toLowerCase().replace(/\s+/g, ' ')]);
+        `SELECT id FROM staff WHERE tenant_id=? AND ${STAFF_NAME_KEY_SQL} = ?`,
+        [c.tenant_id, nameKey(full)]);
     }
+    const bankName = parsed.bank_name;
+    const bankAcct = parsed.bank_account;
     if (existing) {
       await qrun(`UPDATE staff SET full_name=?, role_title=?, staff_type=?, pay_type=?, bank_name=COALESCE(?,bank_name), bank_account=COALESCE(?,bank_account),
         ${baseSalary > 0 ? 'daily_rate=?,' : ''} ext_people_id=COALESCE(?,ext_people_id), site_id=COALESCE(?,site_id), status='ACTIVE' WHERE id=?`,
@@ -1433,7 +1439,7 @@ router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
     'Bank', 'Account number', 'Gross', 'Deductions', 'Net', 'Bags from'].join(','),
   ...lines.map((l) => [l.staff_name, l.ext_people_id || '', l.site_name || '', l.pay_type,
     l.days_present, l.bags_loaded, l.bags_bagged,
-    normaliseBank(l.bank_name), String(l.bank_account || '').trim(),
+    normaliseBank(l.bank_name), csvAccountText(l.bank_account),
     l.gross, l.deductions, l.net,
     l.bags_source === 'SHEET' ? "accountant's sheet" : 'recorded production'].map(q).join(','))];
   res.setHeader('Content-Type', 'text/csv');
@@ -1447,6 +1453,32 @@ router.get('/runs2/:id/export.csv', requireAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const excelSerial = (d) => Math.floor((Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) - Date.UTC(1899, 11, 30)) / 86400000);
+
+/** Mark ACCOUNT NUMBER columns as Excel text so leading zeros survive. */
+function forceAccountTextSheets(wb, headers) {
+  const want = new Set(headers.map((h) => String(h).trim().toUpperCase()));
+  for (const name of wb.SheetNames) {
+    const ws = wb.Sheets[name];
+    if (!ws || !ws['!ref']) continue;
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    const cols = [];
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: range.s.r, c: C })];
+      if (cell && want.has(String(cell.v || '').trim().toUpperCase())) cols.push(C);
+    }
+    for (const C of cols) {
+      for (let R = range.s.r + 1; R <= range.e.r; R++) {
+        const addr = XLSX.utils.encode_cell({ r: R, c: C });
+        const cell = ws[addr];
+        if (!cell) continue;
+        const digits = accountDigits(cell.v);
+        ws[addr] = { t: 's', v: digits, z: '@', w: digits };
+      }
+    }
+  }
+  return wb;
+}
+
 function splitName(full) {
   const parts = String(full || '').trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return { first: '', middle: '', last: '' };
@@ -1559,27 +1591,13 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
   // recorded production on a separate line. July 2026 mid-month: 29 people, an
   // extra ₦140,492.
   //
-  // Identity is name + bank account (name alone when there is no account), so two
-  // real people who share a name but not an account stay separate.
-  const nrm = (x) => String(x || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  const groups = {};
-  for (const s of staff) {
-    const acct = nrm(s.bank_account);
-    const key = acct ? `${nrm(s.full_name)}|${acct}` : `n:${nrm(s.full_name)}`;
-    (groups[key] = groups[key] || []).push(s);
-  }
-
+  // Identity is token-sorted name (and shared ≥9-digit account), so "John Doe"
+  // and "Doe John" collapse, and "FCMB-123" matches "123". Two real people who
+  // share a name but not an account still merge on the name — that is the
+  // duplicate the payroll team flagged. Park a genuine namesake via eligibility.
   const lines = [];
-  for (const key of Object.keys(groups)) {
-    const members = groups[key];
-    // Prefer the record the sheet matched as the head — its site and bank details
-    // are the ones the accountant is working from.
-    const head = members.find((m) => sourceIds.has(m.id)) || members[0];
-    const memberIds = members.map((m) => m.id);
-    // If ANY copy of this person came from the sheet, ONLY the sheet copies count.
-    // Otherwise every copy's recorded production is summed once.
-    const fromSheet = memberIds.some((id) => sourceIds.has(id));
-    const bagIds = fromSheet ? memberIds.filter((id) => sourceIds.has(id)) : memberIds;
+  for (const grp of personGroups(staff, sourceIds)) {
+    const { head, memberIds, fromSheet, bagIds } = grp;
     let l = 0, g = 0;
     for (const id of bagIds) { const pb = by[id]; if (pb) { l += pb.l; g += pb.g; } }
 
@@ -1591,7 +1609,7 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
     lines.push({
       staff_id: head.id, member_ids: memberIds,
       ext_id: head.ext_people_id || '', ...nm, full_name: head.full_name,
-      location: head.site_name || '', account: [head.bank_name, head.bank_account].filter(Boolean).join('-'),
+      location: head.site_name || '', account: accountDigits(head.bank_account),
       bags_loaded: l, bags_bagged: g, qty: designation === 'LOADER' ? l : g,
       by_site: memberIds.flatMap((id) => bySite[id] || []),
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
@@ -1685,10 +1703,10 @@ async function fidoCsv(tenant_id, run) {
   };
   section('BAGGERS', 'BAGGER',
     ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'QTY', 'ACCOUNT NUMBER', 'COMMISSION', 'PAY START DATE', 'PAY END DATE', 'DESIGNATION'],
-    (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', l.bags_bagged, [l.bank_name, l.bank_account].filter(Boolean).join('-'), l.gross, ps, pe, 'BAGGER']; });
+    (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', l.bags_bagged, csvAccountText(l.bank_account), l.gross, ps, pe, 'BAGGER']; });
   section('LOADERS', 'LOADER',
     ['S/N', 'ID', 'FIRST NAME', 'MIDDLE NAME', 'LAST NAME', 'LOCATION', 'ACCOUNT NUMBER', 'BAGS LOADED', 'NET PAY (COMMISSION)', 'PAY START DATE', 'PAY END DATE', 'DESIGNATION'],
-    (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', [l.bank_name, l.bank_account].filter(Boolean).join('-'), l.bags_loaded, l.gross, ps, pe, 'LOADER']; });
+    (l, n) => { const nm = splitName(l.full_name); return [n, l.ext_people_id || '', nm.first, nm.middle, nm.last, l.site_name || '', csvAccountText(l.bank_account), l.bags_loaded, l.gross, ps, pe, 'LOADER']; });
   return rows.map((r) => r.map(q).join(',')).join('\r\n');
 }
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2290,7 +2308,7 @@ function nibssKey(raw) {
 function bankLineIssues(l) {
   const out = [];
   const bank = normaliseBank(l.bank_name);
-  const acct = String(l.bank_account || '').replace(/\D/g, '');
+  const acct = accountDigits(l.bank_account);
 
   if (!bank) out.push('no bank');
   else if (/\d/.test(String(l.bank_name))) out.push(`bank name contains digits ("${l.bank_name}")`);
@@ -2352,7 +2370,7 @@ async function bankXlsxBuffer(run) {
         // actually typed against the full NIBSS directory — covers a bank
         // nobody has hard-coded an alias for yet without guessing at one.
         BANK_CODES[bank] || NIBSS_CODE_BY_NAME[nibssKey(l.bank_name)] || '',
-        String(l.bank_account || '').trim(),
+        accountDigits(l.bank_account),
         r2(l.gross),
         r2(l.deductions),
         r2(l.net ?? l.gross),
@@ -2367,7 +2385,7 @@ async function bankXlsxBuffer(run) {
     { wch: 11 }, { wch: 20 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'BANK PAYMENT');
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  return XLSX.write(forceAccountTextSheets(wb, ['Account number']), { type: 'buffer', bookType: 'xlsx' });
 }
 
 // The workbook itself always generates — a payroll must not be blocked by
@@ -2494,7 +2512,6 @@ const asDate = (v) => {
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
   return fromSerial(s);
 };
-const collapse = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
 // Read the flag + the batches already loaded. Snr Accountant+ so the accountant
 // can see whether Admin has opened the gate for them yet.
@@ -2555,7 +2572,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
   for (const s of staff) {
     const e = s.ext_people_id == null ? '' : String(s.ext_people_id).replace(/\.0$/, '').trim();
     if (e) byExt[e] = (e in byExt) ? null : s;
-    const n = collapse(s.full_name);
+    const n = nameKey(s.full_name);
     if (n) byName[n] = (n in byName) ? null : s;
   }
 
@@ -2607,7 +2624,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
       // Ambiguity is checked BEFORE the not-found message, or a person who exists
       // on the roster TWICE gets reported as "not on the roster" — which invites
       // the accountant to create a third duplicate.
-      const nk = collapse(full);
+      const nk = nameKey(full);
       if (ext && byExt[ext] === null) { note(`ID ${ext} belongs to more than one staff record`); continue; }
       if (!byExt[ext] && nk && byName[nk] === null) { note('name matches more than one staff record'); continue; }
       const st = byExt[ext] || (nk ? byName[nk] : null);
@@ -2670,14 +2687,13 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
   // BLANK on the roster, and never overwrite one that differs — that is
   // redirecting somebody's wages, and it needs a person to decide, not an
   // upload. Differences are recorded and shown.
-  const digits = (x) => String(x || '').replace(/\D/g, '');
+  const digits = accountDigits;
   for (const r of rows0) {
-    const raw = String(r.acct || '').trim();
-    const dash = raw.indexOf('-');
-    r.sheetBank = dash > 0 ? raw.slice(0, dash).trim() : '';
-    r.sheetAcct = (dash > 0 ? raw.slice(dash + 1) : raw).trim();
+    const parsed = parseBankFields(r.acct, null);
+    r.sheetBank = parsed.bank_name || '';
+    r.sheetAcct = parsed.bank_account || '';
     const have = digits(r.staff.bank_account);
-    const want = digits(r.sheetAcct);
+    const want = parsed.bank_account || '';
     if (!want) { r.bankNote = have ? null : 'no account on the sheet or the roster'; r.bankAction = 'NONE'; }
     else if (!have) { r.bankNote = `filled from sheet: ${r.sheetBank}-${r.sheetAcct}`; r.bankAction = 'FILL'; }
     else if (have !== want) { r.bankNote = `sheet says ${r.sheetBank}-${r.sheetAcct}, roster has ${r.staff.bank_name || '?'}-${r.staff.bank_account} — NOT changed`; r.bankAction = 'CONFLICT'; }
@@ -2696,7 +2712,7 @@ router.post('/production-override/import', requireAuth, xlsUpload.single('file')
     full_name: r.staff.full_name,
     ext_id: r.staff.ext_people_id || '',
     site_name: siteName[r.staff.site_id] || '—',
-    account: [r.sheetBank || r.staff.bank_name, r.sheetAcct || r.staff.bank_account].filter(Boolean).join('-'),
+    account: accountDigits(r.sheetAcct || r.staff.bank_account),
     bank_note: r.bankNote || null,
     designation: r.loaded >= r.bagged ? 'LOADER' : 'BAGGER',
     bags_loaded: r2(r.loaded), bags_bagged: r2(r.bagged),

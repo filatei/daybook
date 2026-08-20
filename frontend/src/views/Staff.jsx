@@ -130,7 +130,7 @@ function StaffForm({ sites, siteBound, defaultSite, staff, onSaved, onClose }) {
     staff_type: staff?.staff_type || 'REGULAR',
     role_title: staff?.role_title || '', phone: staff?.phone || '',
     daily_rate: staff?.daily_rate ?? '', rate_loaded: staff?.rate_loaded ?? '', rate_bagged: staff?.rate_bagged ?? '',
-    bank_name: staff?.bank_name || '', bank_account: staff?.bank_account || '', pay_type: staff?.pay_type || 'DAILY',
+    bank_name: staff?.bank_name || '', bank_account: String(staff?.bank_account || '').replace(/\D/g, ''), pay_type: staff?.pay_type || 'DAILY',
   });
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
@@ -145,7 +145,7 @@ function StaffForm({ sites, siteBound, defaultSite, staff, onSaved, onClose }) {
       role_title: isPiece ? null : (f.role_title.trim() || null), phone: f.phone.trim() || null,
       pay_type: f.pay_type, daily_rate: +f.daily_rate || 0,
       rate_loaded: +f.rate_loaded || 0, rate_bagged: +f.rate_bagged || 0,
-      bank_name: f.bank_name.trim() || null, bank_account: f.bank_account.trim() || null,
+      bank_name: f.bank_name.trim() || null, bank_account: String(f.bank_account || '').replace(/\D/g, '') || null,
     };
     try {
       if (editing) await api(scoped(`/staff/${staff.id}`), { method: 'PATCH', body });
@@ -218,7 +218,9 @@ function StaffForm({ sites, siteBound, defaultSite, staff, onSaved, onClose }) {
           </div>
           <div style={{ flex: 1.5 }}>
             <label className="fl">Account no.</label>
-            <input className="input" value={f.bank_account} onChange={set('bank_account')} placeholder="0123456789" />
+            <input className="input" value={f.bank_account} inputMode="numeric" autoComplete="off"
+              placeholder="0123456789" maxLength={12}
+              onChange={(e) => setF((p) => ({ ...p, bank_account: e.target.value.replace(/\D/g, '').slice(0, 12) }))} />
           </div>
         </div>
 

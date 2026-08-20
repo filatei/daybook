@@ -17,6 +17,7 @@ const {
 } = require('./auth');
 const { sendDailyReport, sendGeneratedReport, sendManualReport, sendInvite, sendContactMessage, verifyConnection, sendTest, FROM: MAIL_FROM } = require('./mailer');
 const { resolveReportRecipients, REPORTS_INBOX } = require('./reportmail');
+const { nameKey, parseBankFields, STAFF_NAME_KEY_SQL } = require('./staffIdentity');
 
 const ROLE_LABELS = {
   GATEMAN: 'Gateman / Security', SUPERVISOR: 'Supervisor (loading)', GATE: 'Gate',
@@ -1813,21 +1814,30 @@ router.post('/staff', requireAuth, needTenant('SECRETARY'), async (req, res) => 
   const site_id = siteBound(req.ctx) ? req.ctx.site_id : b.site_id;
   if (!b.full_name || !site_id) return res.status(400).json({ error: 'full_name and site_id required' });
   const site = await siteById(site_id); if (!site || site.tenant_id !== req.ctx.tenant_id) return res.status(400).json({ error: 'invalid site' });
+  const full_name = String(b.full_name).trim();
+  const nk = nameKey(full_name);
+  if (nk) {
+    const twin = await qone(
+      `SELECT id, full_name, status FROM staff WHERE tenant_id=? AND status IN ('ACTIVE','SUSPENDED') AND ${STAFF_NAME_KEY_SQL} = ? LIMIT 1`,
+      [req.ctx.tenant_id, nk]);
+    if (twin) return res.status(409).json({ error: `staff already exists as "${twin.full_name}"`, existing_id: twin.id });
+  }
   const id = uuid();
   const staff_type = STAFF_TYPES.includes(String(b.staff_type || '').toUpperCase()) ? String(b.staff_type).toUpperCase() : 'REGULAR';
   const pay_type = payTypeFor(staff_type, b.pay_type);
   // Baggers/loaders use a piece role_title by default; regular keep their position.
   const role_title = (b.role_title || '').trim() || (staff_type === 'REGULAR' ? null : staff_type.charAt(0) + staff_type.slice(1).toLowerCase());
+  const bank = parseBankFields(b.bank_account, b.bank_name);
   try {
     await qrun(`INSERT INTO staff (id,tenant_id,site_id,full_name,role_title,phone,pay_type,staff_type,department,bank_name,bank_account,daily_rate,rate_loaded,rate_bagged,badge_code,ext_people_id)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [id, req.ctx.tenant_id, site_id, b.full_name.trim(), role_title, b.phone || null, pay_type, staff_type,
-        b.department || null, b.bank_name || null, b.bank_account || null,
+      [id, req.ctx.tenant_id, site_id, full_name, role_title, b.phone || null, pay_type, staff_type,
+        b.department || null, bank.bank_name, bank.bank_account,
         +b.daily_rate || 0, +b.rate_loaded || 0, +b.rate_bagged || 0, newBadgeCode(),
         // Every staff gets a Staff ID at birth — it is how spreadsheets address them.
         b.ext_people_id || ('S' + uuid().replace(/-/g, '').slice(0, 8).toUpperCase())]);
   } catch { return res.status(409).json({ error: 'staff already exists for this site' }); }
-  await audit(req.ctx.tenant_id, req.user.id, 'STAFF_ADD', 'staff', id, { full_name: b.full_name, staff_type });
+  await audit(req.ctx.tenant_id, req.user.id, 'STAFF_ADD', 'staff', id, { full_name, staff_type });
   res.status(201).json(await qone('SELECT * FROM staff WHERE id=?', [id]));
 });
 router.patch('/staff/:id', requireAuth, needTenant('SECRETARY'), async (req, res) => {
@@ -1843,10 +1853,21 @@ router.patch('/staff/:id', requireAuth, needTenant('SECRETARY'), async (req, res
   if (f.status != null && (String(f.status).toUpperCase() === 'LEFT' || st.status === 'LEFT')) {
     return res.status(403).json({ error: 'use payroll eligibility to change LEFT status' });
   }
+  const nextName = f.full_name != null ? String(f.full_name).trim() : st.full_name;
+  const nk = nameKey(nextName);
+  if (nk) {
+    const twin = await qone(
+      `SELECT id, full_name FROM staff WHERE tenant_id=? AND id<>? AND status IN ('ACTIVE','SUSPENDED') AND ${STAFF_NAME_KEY_SQL} = ? LIMIT 1`,
+      [req.ctx.tenant_id, st.id, nk]);
+    if (twin) return res.status(409).json({ error: `staff already exists as "${twin.full_name}"`, existing_id: twin.id });
+  }
+  const bank = parseBankFields(
+    f.bank_account !== undefined ? f.bank_account : st.bank_account,
+    f.bank_name !== undefined ? f.bank_name : st.bank_name);
   await qrun(`UPDATE staff SET full_name=?,role_title=?,phone=?,pay_type=?,staff_type=?,department=?,bank_name=?,bank_account=?,
       daily_rate=?,rate_loaded=?,rate_bagged=?,status=?,site_id=? WHERE id=?`,
-    [f.full_name ?? st.full_name, f.role_title ?? st.role_title, f.phone ?? st.phone, pay_type, staff_type,
-      f.department ?? st.department, f.bank_name ?? st.bank_name, f.bank_account ?? st.bank_account,
+    [nextName, f.role_title ?? st.role_title, f.phone ?? st.phone, pay_type, staff_type,
+      f.department ?? st.department, bank.bank_name, bank.bank_account,
       f.daily_rate ?? st.daily_rate, f.rate_loaded ?? st.rate_loaded, f.rate_bagged ?? st.rate_bagged,
       f.status ?? st.status, siteBound(req.ctx) ? st.site_id : (f.site_id ?? st.site_id), st.id]);
   res.json(await qone('SELECT * FROM staff WHERE id=?', [st.id]));
@@ -1876,7 +1897,7 @@ router.get('/suggest/staff', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.json([]);
   const q = (req.query.q || '').toString().trim(); if (q.length < 2) return res.json([]);
   if (await posEnabled(s.ctx.tenant_id)) { try { return res.json(await sales.searchStaff(q)); } catch {} }
-  res.json(await qall("SELECT DISTINCT full_name AS name, role_title AS role, phone FROM staff WHERE tenant_id=? AND full_name LIKE ? ORDER BY full_name LIMIT 8", [s.ctx.tenant_id, `%${q}%`]));
+  res.json(await qall("SELECT DISTINCT full_name AS name, role_title AS role, phone FROM staff WHERE tenant_id=? AND full_name ILIKE ? ORDER BY full_name LIMIT 8", [s.ctx.tenant_id, `%${q}%`]));
 });
 router.get('/suggest/customers', requireAuth, async (req, res) => {
   const s = await scope(req); if (!s.ctx) return res.json([]);

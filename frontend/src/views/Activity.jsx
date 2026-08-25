@@ -83,7 +83,9 @@ export default function Activity() {
   const NICON = { expense: '🧾', billing: '💳', message: '✉️', feature: '💡' };
   const openNotif = async (n) => {
     if (!n.read) { api(scoped('/notifications/read'), { method: 'POST', body: { ids: [n.id] } }).catch(() => {}); }
-    if (n.link) go(n.link);
+    if (!n.link) return;
+    if (n.link === 'chat' || String(n.link).startsWith('chat:')) go('chat');
+    else go(n.link);
   };
   const markAllRead = async () => {
     try { await api(scoped('/notifications/read'), { method: 'POST', body: {} }); setData((d) => ({ ...d, notifications: (d?.notifications || []).map((n) => ({ ...n, read: 1 })) })); } catch { /* ignore */ }

@@ -101,8 +101,10 @@ export function StoreProvider({ children }) {
   }, []);
 
   const go = useCallback((tab) => {
-    if (tabRef.current !== tab) { histRef.current.push(tab); tabRef.current = tab; }
-    dispatch({ type: 'SET_TAB', tab });
+    // Activity / legacy push links used chat:<channel> — map to the chat tab.
+    const next = (tab && String(tab).startsWith('chat:')) ? 'chat' : tab;
+    if (tabRef.current !== next) { histRef.current.push(next); tabRef.current = next; }
+    dispatch({ type: 'SET_TAB', tab: next });
   }, []);
 
   const toast = useCallback((msg, kind = 'info', ms = 3200) => {

@@ -5,7 +5,7 @@
    - /api/*: network-only (never cache)
    - Images / icons: stale-while-revalidate
 */
-const CACHE = 'daybook-v3';
+const CACHE = 'daybook-v5';
 const STATIC = ['/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -71,17 +71,24 @@ self.addEventListener('message', (e) => {
 });
 
 // ── Web Push ────────────────────────────────────────────────────────────────
-// Server sends { title, body, link, type }. Show a notification; on click, focus
-// an existing window (navigating it to the link) or open a new one.
+// Server sends { title, body, url|link, type, promptInstall }.
+// Body may include \n — Android/Chrome show multi-line; iOS truncates.
 self.addEventListener('push', (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data && e.data.text() }; }
   const title = d.title || 'Daybook';
+  const url = d.url || d.link || '/';
   const options = {
     body: d.body || '',
     icon: '/icons/icon-192.png',
     badge: '/icons/icon-192.png',
-    data: { link: d.link || '/' },
+    data: {
+      url,
+      link: url,
+      type: d.type || 'general',
+      promptInstall: d.promptInstall !== false,
+      ...(d.data && typeof d.data === 'object' ? d.data : {}),
+    },
     tag: d.type || 'daybook',
     renotify: true,
   };
@@ -90,12 +97,32 @@ self.addEventListener('push', (e) => {
 
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
-  const link = (e.notification.data && e.notification.data.link) || '/';
+  // Limitation: browsers cannot force-install a PWA from a notification click.
+  // Best effort — open the same-origin app URL (standalone if already installed;
+  // otherwise the browser). When promptInstall is set, append ?install=1 so the
+  // web app can surface beforeinstallprompt / More → Install.
+  const nd = e.notification.data || {};
+  const raw = nd.url || nd.link || '/';
+  const targetUrl = (() => {
+    try {
+      const u = new URL(raw, self.registration.scope);
+      if (nd.promptInstall !== false) u.searchParams.set('install', '1');
+      return u.href;
+    } catch (_) {
+      return raw;
+    }
+  })();
+
   e.waitUntil((async () => {
+    const scope = self.registration.scope;
     const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const c of all) {
-      if ('focus' in c) { try { await c.navigate(link); } catch (_) {} return c.focus(); }
+      if (!c.url || !c.url.startsWith(scope)) continue;
+      if ('focus' in c) {
+        try { if ('navigate' in c) await c.navigate(targetUrl); } catch (_) { /* some browsers block navigate */ }
+        return c.focus();
+      }
     }
-    if (clients.openWindow) return clients.openWindow(link);
+    if (clients.openWindow) return clients.openWindow(targetUrl);
   })());
 });

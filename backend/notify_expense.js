@@ -15,7 +15,7 @@
 'use strict';
 
 const { v4: uuid } = require('uuid');
-const { qall, qrun } = require('./db');
+const { qall, qone, qrun } = require('./db');
 
 const ngn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 
@@ -63,18 +63,43 @@ async function notifyExpenseEvent({ tenant_id, expense, targetState, action, act
     const userIds = [...ids];
     if (!userIds.length) return;
 
-    const ref = '#' + (expense.ext_id || String(expense.id).slice(0, 6));
+    const ref = '#' + (expense.ext_id || String(expense.id).slice(0, 8));
     const label = STATE_LABEL[state] || state;
     const need = ACTION_NEEDED[state] || '';
     const amt = ngn(expense.amount);
+    let siteName = expense.site_name || null;
+    if (!siteName && expense.site_id) {
+      const s = await qone('SELECT name FROM sites WHERE id=?', [expense.site_id]).catch(() => null);
+      siteName = s && s.name;
+    }
 
-    // 1) In-app notifications
     const title = `Expense ${ref} · ${label}`;
-    const body = `${amt}${expense.vendor ? ' · ' + expense.vendor : ''}${need ? ' — ' + need : ''}`;
+    const bodyLines = [
+      `${amt}${expense.vendor ? ' · ' + expense.vendor : ''}`,
+      [siteName, expense.category, expense.expense_date].filter(Boolean).join(' · ') || null,
+      expense.description ? String(expense.description).trim().slice(0, 120) : null,
+      need || null,
+      actorName ? `${label} by ${actorName}` : null,
+    ].filter(Boolean);
+    const body = bodyLines.join('\n');
+
     for (const u of userIds) {
       await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
         [uuid(), tenant_id, u, 'expense', title, body, 'expenses']);
-      require('./push').sendPushToUser(u, { type: 'expense', title, body, link: '/?go=expenses' }).catch(() => {});
+      require('./push').sendPushToUser(u, {
+        type: 'expense',
+        title,
+        body,
+        link: '/?go=expenses',
+        data: {
+          expenseId: expense.id,
+          state,
+          amount: Number(expense.amount) || 0,
+          vendor: expense.vendor || null,
+          siteId: expense.site_id || null,
+          siteName: siteName || null,
+        },
+      }).catch(() => {});
     }
 
     // Expense workflow events are IN-APP ONLY (notifications inbox + push) — no

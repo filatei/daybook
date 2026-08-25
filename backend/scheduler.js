@@ -195,11 +195,21 @@ async function checkComplianceExpiries() {
         `SELECT DISTINCT u.id, u.email FROM memberships m JOIN users u ON u.id=m.user_id
           WHERE m.tenant_id=? AND m.status='ACTIVE' AND m.role IN ('ADMIN','GENERAL_MANAGER')`, [tenant_id]);
       for (const a of admins) {
-        const cTitle = `${items.length} compliance document(s) need attention`;
-        const cBody = items.slice(0, 3).map((i) => `${i.title} — ${i.status === 'EXPIRED' ? 'expired' : i.days + 'd left'}`).join('; ');
+        const cTitle = items.length === 1
+          ? `Compliance: ${items[0].title}`
+          : `${items.length} compliance docs need attention`;
+        const cBody = items.slice(0, 5).map((i) => {
+          const when = i.status === 'EXPIRED'
+            ? `expired ${i.expiry_date}`
+            : `${i.days}d left · due ${i.expiry_date}`;
+          return `${i.title}${i.issuer ? ` (${i.issuer})` : ''} — ${when}`;
+        }).join('\n');
         await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
           [uuid(), tenant_id, a.id, 'compliance', cTitle, cBody, 'compliance']).catch(() => {});
-        require('./push').sendPushToUser(a.id, { type: 'compliance', title: cTitle, body: cBody, link: '/?go=compliance' }).catch(() => {});
+        require('./push').sendPushToUser(a.id, {
+          type: 'compliance', title: cTitle, body: cBody, url: '/?go=compliance', promptInstall: true,
+          data: { count: items.length, ids: items.map((i) => i.id).slice(0, 10) },
+        }).catch(() => {});
       }
       // Email: Admin/GM addresses + the all-sites report inbox.
       const to = [...new Set([...admins.map((a) => a.email), tenant.report_email_all || REPORTS_INBOX].filter(Boolean))];

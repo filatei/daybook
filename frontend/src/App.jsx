@@ -9,6 +9,7 @@ import Toast from './components/Toast.jsx';
 import InstallLanding, { isStandalone } from './components/InstallLanding.jsx';
 import { refreshPushIfGranted } from './push.js';
 import PushPrompt from './components/PushPrompt.jsx';
+import InstallPrompt from './components/InstallPrompt.jsx';
 import './chatOutbox.js';   // registers offline-message auto-flush on app boot
 
 // Views (lazy-ish — just plain imports for now; split later if bundle grows)
@@ -62,13 +63,24 @@ function Inner() {
 
   // Deep-link from a tapped push notification: /?go=<tab> → open that tab once
   // the user is signed in, then strip the param so a refresh won't re-trigger.
+  // ?install=1 is handled by InstallPrompt (session flag + banner).
   useEffect(() => {
     if (!user) return;
     try {
-      const dest = new URLSearchParams(window.location.search).get('go');
-      if (dest) {
+      const params = new URLSearchParams(window.location.search);
+      const dest = params.get('go');
+      const wantInstall = params.get('install') === '1' || params.get('action') === 'install';
+      if (wantInstall && !isStandalone()) {
+        try { sessionStorage.setItem('daybook_prompt_install', '1'); } catch { /* ignore */ }
+      }
+      if (dest || wantInstall) {
         window.history.replaceState({}, '', window.location.pathname);
-        go(dest);
+      }
+      if (dest) {
+        if (String(dest).startsWith('chat:') && dest.length > 5) {
+          try { sessionStorage.setItem('daybook_chat_channel', dest.slice(5)); } catch { /* ignore */ }
+        }
+        go(String(dest).startsWith('chat') ? 'chat' : dest);
       }
     } catch { /* ignore */ }
   }, [user, go]);
@@ -179,12 +191,30 @@ function Inner() {
     } catch (e) { toast(e.message, 'err'); }
   }, []);
 
+  // Also honour ?install=1 on the login screen (push opened before auth).
+  useEffect(() => {
+    try {
+      if (isStandalone()) return;
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('install') === '1' || params.get('action') === 'install') {
+        sessionStorage.setItem('daybook_prompt_install', '1');
+      }
+    } catch { /* ignore */ }
+  }, []);
+
   // Customer scanned a receipt QR in a browser without the app → prompt install.
   if (scannedReceipt) return <InstallLanding receipt={scannedReceipt} onContinue={() => setScannedReceipt(null)} />;
 
   if (booting) return <div className="boot-screen">Loading…</div>;
 
-  if (!user) return <LoginScreen devLogin={devLogin} />;
+  if (!user) {
+    return (
+      <>
+        <InstallPrompt />
+        <LoginScreen devLogin={devLogin} />
+      </>
+    );
+  }
   if (!tenants.length) return <OnboardingScreen />;
 
   return (
@@ -192,6 +222,7 @@ function Inner() {
       <Nav />
       <main className="main-content" ref={mainRef}>
         <PushPrompt />
+        <InstallPrompt />
         <div className="ptr" style={{ height: ptr, opacity: ptr ? 1 : 0 }}>
           <span className={`ptr-ic ${refreshing || ptr >= 70 ? 'go' : ''}`}>↻</span>
         </div>

@@ -9,6 +9,13 @@
  *   VAPID_PUBLIC_KEY   — safe to expose; the frontend needs it to subscribe.
  *   VAPID_PRIVATE_KEY  — SECRET; must be set in production for sends to work.
  *   VAPID_SUBJECT      — mailto: or https: contact, default mailto:support@torama.money
+ *
+ * Payload shape (all fields optional except title/body are filled with defaults):
+ *   { title, body, type, link, url, data, promptInstall }
+ *   - link / url: relative path the SW opens on click (e.g. /?go=reports)
+ *   - data: extra deep-link fields (reportId, expenseId, channel, …)
+ *   - promptInstall: when true (default), append &install=1 so the web app can
+ *     surface the PWA install banner after open (browsers cannot force-install)
  */
 'use strict';
 const webpush = require('web-push');
@@ -55,8 +62,21 @@ async function removeSubscription(endpoint) {
   await qrun('DELETE FROM push_subscriptions WHERE endpoint=?', [endpoint]);
 }
 
+/** Build the relative open path for notification click (SPA deep-link). */
+function buildClickPath(payload) {
+  let path = payload.url || payload.link || '/';
+  if (path && !path.startsWith('/') && !/^https?:\/\//i.test(path)) {
+    path = `/?go=${encodeURIComponent(path)}`;
+  }
+  const promptInstall = payload.promptInstall !== false;
+  if (promptInstall && !/[?&]install=/.test(path)) {
+    path += (path.includes('?') ? '&' : '?') + 'install=1';
+  }
+  return path;
+}
+
 // Fan a notification payload out to every endpoint registered for a user.
-// payload: { title, body, link?, type? }. Fails soft — never throws to callers.
+// Fails soft — never throws to callers.
 async function sendPushToUser(userId, payload) {
   if (!_enabled || !userId) return;
   let subs;
@@ -68,11 +88,15 @@ async function sendPushToUser(userId, payload) {
   }
   if (!subs || !subs.length) return;
 
+  const clickPath = buildClickPath(payload || {});
   const body = JSON.stringify({
-    title: payload.title || 'Daybook',
-    body: payload.body || '',
-    link: payload.link || '/',
-    type: payload.type || 'general',
+    title: (payload && payload.title) || 'Daybook',
+    body: (payload && payload.body) || '',
+    link: clickPath,
+    url: clickPath,
+    type: (payload && payload.type) || 'general',
+    promptInstall: !(payload && payload.promptInstall === false),
+    data: (payload && payload.data) || {},
   });
 
   await Promise.all(subs.map(async (s) => {

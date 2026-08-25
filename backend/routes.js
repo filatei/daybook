@@ -100,12 +100,21 @@ const posEnabled = async (tenant_id) => {
 };
 const publicUser = (u) => ({ id: u.id, email: u.email, name: u.name, photo_url: u.photo_url, is_superadmin: !!u.is_superadmin });
 
-async function notify(tenant_id, userIds, { type, title, body, link } = {}) {
+const pushNgn = (n) => '₦' + Number(n || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+
+async function notify(tenant_id, userIds, { type, title, body, link, data, promptInstall } = {}) {
+  // Deep-link path for the PWA (Activity inbox keeps the bare tab key in `link`).
+  const url = !link ? '/'
+    : (String(link).startsWith('/') ? String(link) : `/?go=${encodeURIComponent(link)}`);
   for (const u of [...new Set((userIds || []).filter(Boolean))]) {
     await qrun('INSERT INTO notifications (id,tenant_id,user_id,type,title,body,link) VALUES (?,?,?,?,?,?,?)',
       [uuid(), tenant_id || null, u, type || null, title || null, body || null, link || null]);
     // Mirror the in-app notification to a native push (no-op if user/device not subscribed).
-    sendPushToUser(u, { type, title, body, link: link ? `/?go=${link}` : '/' }).catch(() => {});
+    sendPushToUser(u, {
+      type, title, body, url,
+      data: data || undefined,
+      promptInstall: promptInstall !== false,
+    }).catch(() => {});
   }
 }
 async function tenantUserIds(tenant_id, minRole) {
@@ -147,7 +156,16 @@ router.post('/contact', requireAuth, async (req, res) => {
   const tenant = tid ? await tenantById(tid) : null;
   const allAdminIds = tid ? await tenantUserIds(tid, 'ADMIN') : [];
   // In-app inbox (alerts) for every admin except the sender (no self-notify).
-  await notify(tid, allAdminIds.filter((u) => u && u !== req.user.id), { type: 'contact', title: `Message from ${req.user.name || req.user.email}`, body: subject, link: 'activity' });
+  {
+    const who = req.user.name || req.user.email;
+    const tLabel = tenant && tenant.name ? ` · ${tenant.name}` : '';
+    await notify(tid, allAdminIds.filter((u) => u && u !== req.user.id), {
+      type: 'contact',
+      title: `Contact from ${who}${tLabel}`,
+      body: [subject, message.slice(0, 280)].filter(Boolean).join('\n'),
+      link: 'activity',
+    });
+  }
   // Email goes to ALL admins (including the sender if they are an admin, so a
   // solo-admin company still gets it). Falls back to the Torama support inbox
   // only when a company has no admin at all, so a message never goes nowhere.
@@ -713,8 +731,23 @@ router.post('/reports', requireAuth, needTenant('SECRETARY'), async (req, res) =
   await audit(req.ctx.tenant_id, req.user.id, existing ? 'UPDATE' : 'CREATE', 'report', id, { date: b.report_date, status });
   if (status === 'SUBMITTED') {
     const uids = (await tenantUserIds(req.ctx.tenant_id, 'GENERAL_MANAGER')).filter((u) => u !== req.user.id);
-    await notify(req.ctx.tenant_id, uids,
-      { type: 'report', title: `Report submitted — ${site.name}`, body: `${b.report_date} · sales ₦${(totals.total_sales || 0).toLocaleString()}`, link: 'reports' });
+    const who = req.user.name || req.user.email;
+    const reportBody = [
+      b.report_date,
+      `Sales ${pushNgn(totals.total_sales)}`,
+      `Cash ${pushNgn(+b.total_cash || 0)} · Deposit ${pushNgn(+b.total_deposit || 0)}`,
+      `Diesel ${pushNgn(+b.diesel || 0)} · Expenses ${pushNgn(+b.expenses || 0)}`,
+      `Balance ${pushNgn(totals.balance)}`,
+      who ? `Submitted by ${who}` : null,
+      b.notes ? String(b.notes).slice(0, 100) : null,
+    ].filter(Boolean).join('\n');
+    await notify(req.ctx.tenant_id, uids, {
+      type: 'report',
+      title: `Daily report · ${site.name}`,
+      body: reportBody,
+      link: 'reports',
+      data: { reportId: id, siteId: site_id, siteName: site.name, reportDate: b.report_date },
+    });
     // Fido & Fiafia: email the submitted report to the creator + dailyreports@torama.money.
     emailReportOnSubmit(req.ctx.tenant_id, id, site, req.user).catch((e) => console.error('[emailReportOnSubmit]', e.message));
   }
@@ -1972,7 +2005,15 @@ router.post('/site-messages', requireAuth, async (req, res) => {
   await qrun('INSERT INTO site_messages (id,tenant_id,site_id,sender_id,body) VALUES (?,?,?,?,?)', [id, s.ctx.tenant_id, site_id, req.user.id, body]);
   try {
     const admins = (await tenantUserIds(s.ctx.tenant_id, 'ADMIN')).filter((u) => u !== req.user.id);
-    await notify(s.ctx.tenant_id, admins, { type: 'message', title: 'New site message', body: body.slice(0, 80), link: 'messages' });
+    const siteRow = site_id ? await siteById(site_id) : null;
+    const who = req.user.name || req.user.email;
+    await notify(s.ctx.tenant_id, admins, {
+      type: 'message',
+      title: siteRow ? `Site message · ${siteRow.name}` : 'New site message',
+      body: `${who}\n${body.slice(0, 280)}`,
+      link: 'messages',
+      data: { messageId: id, siteId: site_id || null, siteName: (siteRow && siteRow.name) || null, from: who },
+    });
   } catch { /* notify best-effort */ }
   res.status(201).json({ id, ok: true });
 });
@@ -3051,8 +3092,13 @@ router.post('/chat/messages', requireAuth, async (req, res) => {
   }
   const siteName = channel !== 'team' ? ((await siteById(channel)) || {}).name || 'Site chat' : null;
   const label = channel === 'team' ? 'Team chat' : siteName;
-  await notify(s.ctx.tenant_id, audience.filter((u) => u !== req.user.id),
-    { type: 'chat', title: `${name} · ${label}`, body: body.slice(0, 120), link: `chat:${channel}` });
+  await notify(s.ctx.tenant_id, audience.filter((u) => u !== req.user.id), {
+    type: 'chat',
+    title: `${name} · ${label}`,
+    body: body.slice(0, 280),
+    link: channel === 'team' ? 'chat' : `chat:${channel}`,
+    data: { channel, from: name, messageId: id },
+  });
   res.status(201).json({ id, channel, user_id: req.user.id, user_name: name, body, created_at: nowS(), mine: true });
 });
 
@@ -3408,8 +3454,18 @@ router.post('/feature-requests', requireAuth, async (req, res) => {
   await audit(s.ctx.tenant_id, req.user.id, 'CREATE', 'feature_request', id, { title });
   const supers = (await qall('SELECT id FROM users WHERE is_superadmin=1')).map((u) => u.id);
   const t = await tenantById(s.ctx.tenant_id);
-  await notify(s.ctx.tenant_id, [...await tenantUserIds(s.ctx.tenant_id, 'ADMIN'), ...supers].filter((u) => u !== req.user.id),
-    { type: 'feature', title: `Feature request — ${t?.name || ''}`, body: title.slice(0, 120), link: 'admin' });
+  const featBody = [
+    name,
+    title.slice(0, 160),
+    b.body ? String(b.body).slice(0, 160) : null,
+  ].filter(Boolean).join('\n');
+  await notify(s.ctx.tenant_id, [...await tenantUserIds(s.ctx.tenant_id, 'ADMIN'), ...supers].filter((u) => u !== req.user.id), {
+    type: 'feature',
+    title: `Feature request · ${t?.name || 'Daybook'}`,
+    body: featBody,
+    link: 'admin',
+    data: { featureRequestId: id, from: name },
+  });
   res.status(201).json(await qone('SELECT * FROM feature_requests WHERE id=?', [id]));
 });
 router.patch('/feature-requests/:id', requireAuth, async (req, res) => {
@@ -3423,7 +3479,13 @@ router.patch('/feature-requests/:id', requireAuth, async (req, res) => {
   const status = ok.includes(b.status) ? b.status : fr.status;
   await qrun('UPDATE feature_requests SET status=?, updated_at=? WHERE id=?', [status, nowS(), fr.id]);
   if (status !== fr.status && fr.user_id && fr.user_id !== req.user.id) {
-    await notify(fr.tenant_id, [fr.user_id], { type: 'feature', title: `Your request is now ${status}`, body: fr.title, link: 'admin' });
+    await notify(fr.tenant_id, [fr.user_id], {
+      type: 'feature',
+      title: `Request · ${String(status).replace(/_/g, ' ')}`,
+      body: [fr.title, fr.body ? String(fr.body).slice(0, 160) : null].filter(Boolean).join('\n'),
+      link: 'admin',
+      data: { featureRequestId: fr.id, status },
+    });
   }
   res.json(await qone('SELECT * FROM feature_requests WHERE id=?', [fr.id]));
 });
@@ -3455,7 +3517,17 @@ async function applyPaidPayment(reference, rawData) {
   await qrun("UPDATE tenants SET paid_until=?, plan=?, status='ACTIVE' WHERE id=?", [paid_until, p.plan || t.plan, t.id]);
   await qrun("UPDATE payments SET status='SUCCESS', paid_at=?, raw=? WHERE id=?", [now, rawData ? JSON.stringify(rawData).slice(0, 8000) : p.raw, p.id]);
   await audit(t.id, p.created_by, 'SUBSCRIBE', 'tenant', t.id, { reference, provider: p.provider, plan: p.plan, months: p.months, paid_until });
-  await notify(t.id, await tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription active', body: `${p.plan} · ${p.months} month(s)`, link: 'admin' });
+  await notify(t.id, await tenantUserIds(t.id, 'ADMIN'), {
+    type: 'billing',
+    title: `Subscription active · ${t.name || 'Daybook'}`,
+    body: [
+      `Plan ${p.plan || '—'} · ${p.months || 1} month(s)`,
+      paid_until ? `Paid through ${new Date(paid_until * 1000).toLocaleDateString('en-NG')}` : null,
+      p.amount != null ? `Amount ${pushNgn(p.amount)}` : null,
+    ].filter(Boolean).join('\n'),
+    link: 'admin',
+    data: { plan: p.plan, months: p.months, paid_until },
+  });
   return { tenant: await tenantById(t.id) };
 }
 async function confirmPayment(reference) {
@@ -3509,7 +3581,17 @@ async function applySubscriptionCharge(data) {
     [uuid(), t.id, reference, meta.plan || t.plan, interval === 'annually' ? 12 : 1,
       Math.round((Number(data.amount) || 0) / 100), payments.CURRENCY, 'paystack', 'SUCCESS', now, JSON.stringify(data).slice(0, 8000)]);
   await audit(t.id, null, 'SUBSCRIBE_RENEW', 'tenant', t.id, { reference, interval, paid_until });
-  await notify(t.id, await tenantUserIds(t.id, 'ADMIN'), { type: 'billing', title: 'Subscription renewed', body: `Auto-renew · paid through ${new Date(paid_until * 1000).toLocaleDateString()}`, link: 'admin' });
+  await notify(t.id, await tenantUserIds(t.id, 'ADMIN'), {
+    type: 'billing',
+    title: `Subscription renewed · ${t.name || 'Daybook'}`,
+    body: [
+      `Auto-renew · ${interval}`,
+      `Paid through ${new Date(paid_until * 1000).toLocaleDateString('en-NG', { timeZone: 'Africa/Lagos' })}`,
+      data.amount != null ? `Charged ${pushNgn(Math.round((Number(data.amount) || 0) / 100))}` : null,
+    ].filter(Boolean).join('\n'),
+    link: 'admin',
+    data: { interval, paid_until },
+  });
 }
 
 router.post('/billing/checkout', requireAuth, needTenant('ADMIN'), async (req, res) => {

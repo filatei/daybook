@@ -855,16 +855,17 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 
       {expense.kind === 'IMPREST' && (
         <div style={{ fontSize: 11.5, color: 'var(--muted)', margin: '8px 0 0' }}>
-          Cash-at-hand — Snr Accountant & GM can approve, then Pay to close.
+          Cash-at-hand — Snr Accountant / GM / Admin approve, then Pay to close.
         </div>
       )}
 
-      {/* Lifecycle actions — server decides which the current user may run */}
+      {/* Lifecycle actions — server decides which the current user may run.
+          .wf-actions overrides .btn { width:100% } so Approve/Decline/Reset stay
+          visible and tappable on narrow phones (no horizontal clip). */}
       {actions.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '10px 0 2px' }}>
+        <div className="wf-actions">
           {actions.map((act) => (
-            <button key={act} className={`btn${WF_ACTION[act]?.kind === 'ghost' ? ' btn-ghost' : ''}`}
-              style={{ flex: '1 1 auto', minWidth: 92, ...(WF_ACTION[act]?.kind === 'danger' ? { background: 'var(--err)' } : {}) }}
+            <button key={act} className={`btn${WF_ACTION[act]?.kind === 'ghost' ? ' btn-ghost' : ''}${WF_ACTION[act]?.kind === 'danger' ? ' btn-danger' : ''}`}
               disabled={!!acting} onClick={() => runAction(act)}>
               {acting === act ? <span className="spin" /> : (WF_ACTION[act]?.label || act)}
             </button>

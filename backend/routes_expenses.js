@@ -802,24 +802,20 @@ router.delete('/:id/attachments/:aid', requireAuth, async (req, res) => {
 // ── Ticket lifecycle (Fido) — DRAFT→VALIDATED→REVIEWED→APPROVED→PAID→DELIVERED / DECLINED ──
 // allow(ctx, expense, uid) decides who may run each transition.
 const isCreator = (e, uid) => e.recorded_by === uid;
-// Imprest = paid from cash at hand (e.g. diesel). These can be approved/declined
-// by Snr Accountant & GM (atLeast SNR_ACCOUNTANT covers Snr Acct=GM=7, Admin=8+),
-// then paid to close. Every other (non-imprest) expense still needs ADMIN approval.
+// Imprest = paid from cash at hand (e.g. diesel). Kind is still used when paying
+// (cash settlement on pay). Approve/decline itself is Snr Accountant+ for EVERY
+// ticket — the old "non-imprest needs Admin" gate left GM/Snr phones showing only
+// Reset on REVIEWED (desktop Admin still saw Approve/Decline).
 const isImprest = (e) => String(e.kind || 'NON_IMPREST').toUpperCase() === 'IMPREST';
-// Fuel/lubricant tickets (diesel, engine oil, petrol…) are routine operational
-// spend — Snr Accountant & GM may approve them like imprest, without waiting on Admin.
-const FUEL_RE = /diesel|engine\s*oil|\bfuel\b|petrol|lubric/i;
-const isFuel = (e) => FUEL_RE.test([e.category, e.description, e.items_json].filter(Boolean).join(' '));
-const approveRole = (e) => (isImprest(e) || isFuel(e)) ? 'SNR_ACCOUNTANT' : 'ADMIN';
 const FLOW = {
   // Creator OR a secretary validates a draft (confirms what was entered).
   validate: { from: ['DRAFT'], to: 'VALIDATED', allow: (c, e, uid) => isCreator(e, uid) || atLeast(c.role, 'SECRETARY') },
   // A manager reviews a validated ticket and sends it for approval.
   review:   { from: ['VALIDATED'], to: 'REVIEWED', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
-  // Approve/decline a reviewed ticket: imprest (cash-at-hand) → Snr Accountant/GM;
-  // everything else → Admin.
-  approve:  { from: ['REVIEWED'], to: 'APPROVED', allow: (c, e) => atLeast(c.role, approveRole(e)) },
-  decline:  { from: ['REVIEWED'], to: 'DECLINED', allow: (c, e) => atLeast(c.role, approveRole(e)) },
+  // Approve/decline a reviewed ticket — Snr Accountant, GM, or Admin (same bar as
+  // delete/reset-payments). Matches who actually does day-to-day approvals on phone.
+  approve:  { from: ['REVIEWED'], to: 'APPROVED', allow: (c) => atLeast(c.role, 'SNR_ACCOUNTANT') },
+  decline:  { from: ['REVIEWED'], to: 'DECLINED', allow: (c) => atLeast(c.role, 'SNR_ACCOUNTANT') },
   // Once approved, the only forward action is Pay (record payment + receipt).
   pay:      { from: ['APPROVED'], to: 'PAID', allow: (c) => atLeast(c.role, 'SITE_MANAGER') },
   // Send a ticket back to draft to correct it — allowed before approval only

@@ -5,7 +5,7 @@
  * the ticket next (in-app notification + email), per Fido's rules:
  *   - Site managers create most tickets and receive EVERY status update.
  *   - DRAFT      → managers validate
- *   - REVIEWED   → Admin / General Manager approve (or decline)
+ *   - REVIEWED   → Snr Accountant / GM / Admin approve (or decline)
  *   - APPROVED   → managers / accountants / GM / admin pay (+ attach receipt)
  *   - PAID       → managers deliver the funds
  *   - DELIVERED / DECLINED → status update only
@@ -45,7 +45,7 @@ function recipientsFor(mem, expense, targetState) {
   if (targetState === 'VALIDATED') {
     // Managers review validated tickets — they're already added above; nothing extra.
   } else if (targetState === 'REVIEWED') {
-    add(mem.filter((r) => r.role === 'ADMIN' || r.role === 'GENERAL_MANAGER'));
+    add(mem.filter((r) => ['ADMIN', 'GENERAL_MANAGER', 'SNR_ACCOUNTANT'].includes(r.role)));
   } else if (targetState === 'APPROVED') {
     add(mem.filter((r) => ['ADMIN', 'GENERAL_MANAGER', 'SNR_ACCOUNTANT', 'ACCOUNTANT'].includes(r.role)));
   }

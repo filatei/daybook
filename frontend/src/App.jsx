@@ -61,20 +61,25 @@ function Inner() {
   // Gate-only roles (Gateman, Supervisor) are confined to the Gate screen.
   useEffect(() => { if (isGateRole(role) && tab !== 'gate') go('gate'); }, [role, tab, go]);
 
-  // Deep-link from a tapped push notification: /?go=<tab> → open that tab once
-  // the user is signed in, then strip the param so a refresh won't re-trigger.
-  // ?install=1 is handled by InstallPrompt (session flag + banner).
-  useEffect(() => {
-    if (!user) return;
+  // Apply /?go=<tab>&install=1 (from openWindow/navigate or SW postMessage).
+  const applyNotificationDeepLink = useCallback((searchOrUrl) => {
     try {
-      const params = new URLSearchParams(window.location.search);
+      let params;
+      if (typeof searchOrUrl === 'string' && /^https?:\/\//i.test(searchOrUrl)) {
+        params = new URL(searchOrUrl).searchParams;
+      } else if (typeof searchOrUrl === 'string') {
+        params = new URLSearchParams(searchOrUrl.startsWith('?') ? searchOrUrl.slice(1) : searchOrUrl);
+      } else {
+        params = new URLSearchParams(window.location.search);
+      }
       const dest = params.get('go');
       const wantInstall = params.get('install') === '1' || params.get('action') === 'install';
       if (wantInstall && !isStandalone()) {
         try { sessionStorage.setItem('daybook_prompt_install', '1'); } catch { /* ignore */ }
+        window.dispatchEvent(new CustomEvent('daybook-prompt-install'));
       }
       if (dest || wantInstall) {
-        window.history.replaceState({}, '', window.location.pathname);
+        try { window.history.replaceState({}, '', window.location.pathname); } catch { /* ignore */ }
       }
       if (dest) {
         if (String(dest).startsWith('chat:') && dest.length > 5) {
@@ -82,8 +87,29 @@ function Inner() {
         }
         go(String(dest).startsWith('chat') ? 'chat' : dest);
       }
-    } catch { /* ignore */ }
-  }, [user, go]);
+      return !!(dest || wantInstall);
+    } catch { return false; }
+  }, [go]);
+
+  // Deep-link from a tapped push notification: /?go=<tab> → open that tab once
+  // the user is signed in, then strip the param so a refresh won't re-trigger.
+  // ?install=1 is handled by InstallPrompt (session flag + banner).
+  useEffect(() => {
+    if (!user) return;
+    applyNotificationDeepLink();
+  }, [user, applyNotificationDeepLink]);
+
+  // SW may focus an existing client and postMessage instead of full navigate.
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const onMsg = (e) => {
+      const d = e.data;
+      if (!d || d.type !== 'DAYBOOK_NOTIFICATION_CLICK') return;
+      applyNotificationDeepLink(d.url || '');
+    };
+    navigator.serviceWorker.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker.removeEventListener('message', onMsg);
+  }, [applyNotificationDeepLink]);
 
   // .main-content is the app shell's only scroll area, so it persists across tab
   // changes — reset it to the top whenever the tab switches.

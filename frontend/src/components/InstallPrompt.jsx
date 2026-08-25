@@ -17,15 +17,20 @@ export default function InstallPrompt() {
 
   useEffect(() => {
     if (isStandalone()) { setShow(false); return; }
-    try {
-      const q = new URLSearchParams(window.location.search);
-      if (q.get('install') === '1' || q.get('action') === 'install') {
-        sessionStorage.setItem('daybook_prompt_install', '1');
-        setShow(true);
-      } else if (sessionStorage.getItem('daybook_prompt_install') === '1') {
-        setShow(true);
-      }
-    } catch { /* ignore */ }
+    const sync = () => {
+      try {
+        const q = new URLSearchParams(window.location.search);
+        if (q.get('install') === '1' || q.get('action') === 'install') {
+          sessionStorage.setItem('daybook_prompt_install', '1');
+          setShow(true);
+        } else if (sessionStorage.getItem('daybook_prompt_install') === '1') {
+          setShow(true);
+        }
+      } catch { /* ignore */ }
+    };
+    sync();
+    window.addEventListener('daybook-prompt-install', sync);
+    return () => window.removeEventListener('daybook-prompt-install', sync);
   }, []);
 
   if (!show) return null;

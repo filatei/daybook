@@ -90,8 +90,6 @@ const PIECE_WORKER_S = PIECE_WORKER.replace(/\b(staff_type|pay_type)\b/g, 's.$1'
 const isPieceWorker = (st) => ['BAGGER', 'LOADER'].includes(String(st?.staff_type || '').toUpperCase())
   || String(st?.pay_type || '').toUpperCase() === 'PIECE';
 
-const normName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
-
 // Score a staff row for "which duplicate should drive pay?" — the Fiafia ETL often
 // creates a DAILY @ ₦0 twin where people actually clock in, while the Fido import
 // carries MONTHLY salary on a record with no attendance. Picking members[0] paid
@@ -113,18 +111,15 @@ function pickPayrollHead(members, { sourceIds } = {}) {
   return members.reduce((best, m) => (payConfigScore(m) > payConfigScore(best) ? m : best), members[0]);
 }
 
-// Combined Fido+Fiafia payroll: one person is often two rows (ETL twin + legacy
-// import). Group by normalized name when spanning multiple tenants; bank account
-// alone split Salihu when Fido/Fiafia bank cells drifted.
-function groupStaffCombined(staff, tenantIds) {
-  const multi = tenantIds.length > 1;
-  const groups = {};
-  for (const s of staff) {
-    const acct = normName(s.bank_account);
-    const key = multi ? normName(s.full_name) : (acct ? `${normName(s.full_name)}|${acct}` : `n:${normName(s.full_name)}`);
-    (groups[key] = groups[key] || []).push(s);
+// Home / primary site for grouping — staff.site_id, not where bags were done.
+function resolvePrimarySite(members, siteNames, preferHead) {
+  const ordered = preferHead
+    ? [preferHead, ...(members || []).filter((m) => m.id !== preferHead.id)]
+    : (members || []);
+  for (const m of ordered) {
+    if (m?.site_id) return { id: m.site_id, name: siteNames[m.site_id] || null };
   }
-  return Object.values(groups);
+  return { id: null, name: null };
 }
 
 // Staff tied to a site for filtering combined runs: home site, clock-ins, or bags.
@@ -796,9 +791,17 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
   // Calendar days in the pay period — denominator for monthly proration.
   const periodDays = workingDays(from, to); // Mon–Sat working days
+  const siteNames = {};
+  const homeSiteIds = [...new Set(staff.map((s) => s.site_id).filter(Boolean))];
+  if (homeSiteIds.length) {
+    const sph = homeSiteIds.map(() => '?').join(',');
+    for (const r of await qall(`SELECT id, name FROM sites WHERE id IN (${sph})`, homeSiteIds)) siteNames[r.id] = r.name;
+  }
   const lines = [];
   for (const g of personGroups(staff, sourceIds)) {
-    const { head, memberIds, fromSheet, bagIds } = g;
+    const { head, members, memberIds, fromSheet, bagIds } = g;
+    const payHead = pickPayrollHead(members, { sourceIds }) || head;
+    const primary = resolvePrimarySite(members, siteNames, payHead);
     const dayset = new Set();
     let l = 0, bagged = 0, advance = 0;
     for (const id of memberIds) {
@@ -813,9 +816,10 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
     else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
     else gross = days * (head.daily_rate || 0);
     lines.push({
-      staff_id: head.id, full_name: head.full_name, role_title: head.role_title, pay_type: head.pay_type,
+      staff_id: payHead.id, full_name: payHead.full_name, role_title: payHead.role_title, pay_type: payHead.pay_type,
       days_present: days, period_days: periodDays, bags_loaded: l, bags_bagged: bagged, gross: Math.round(gross * 100) / 100,
       by_site: memberIds.flatMap((id) => bySite[id] || []),
+      primary_site_id: primary.id, primary_site_name: primary.name,
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
       member_ids: memberIds,
       advance: Math.round(advance * 100) / 100,
@@ -943,12 +947,14 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     const displayMember = members.find((m) => m.site_id && (daysByStaff[m.id]?.size || 0) > 0)
       || members.find((m) => m.site_id)
       || head;
+    const primary = resolvePrimarySite(members, siteNames, head);
     lines.push({
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
       bags_loaded: l, bags_bagged: bags, gross: round2(gross), advance: round2(advance),
       by_site: siteRows.length ? siteRows : (displayMember.site_id ? [{ site_id: displayMember.site_id, site_name: siteNames[displayMember.site_id] || '—', loaded: 0, bagged: 0 }] : []),
-      home_site_id: displayMember.site_id || null,
+      primary_site_id: primary.id, primary_site_name: primary.name,
+      home_site_id: primary.id || displayMember.site_id || null,
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
       tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
       merged: members.length > 1,
@@ -1231,9 +1237,9 @@ router.post('/runs2', requireAuth, async (req, res) => {
       tg += l.gross; td += d; tn += net;
       // rec_* = the daily-recorded snapshot at compute time; later edits/uploads
       // are compared against it to flag discrepancies in `remarks`.
-      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged,bags_source)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged, l.bags_source || 'PRODUCTION']);
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged,bags_source,primary_site_name)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), runId, c.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged, l.bags_source || 'PRODUCTION', l.primary_site_name || null]);
       // Settle outstanding advances up to the period end. Combined runs settle
       // across ALL of the person's merged staff ids (both tenants) by staff_id;
       // single-tenant runs scope by tenant_id as before.
@@ -1262,16 +1268,23 @@ router.get('/runs2/:id', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
-  run.lines = await qall(`SELECT pl.*, COALESCE(st.name,
-      (SELECT si.name FROM staff s2 JOIN sites si ON si.id=s2.site_id
-        WHERE LOWER(REGEXP_REPLACE(TRIM(s2.full_name), '\\s+', ' ', 'g'))
-            = LOWER(REGEXP_REPLACE(TRIM(s.full_name), '\\s+', ' ', 'g'))
-          AND s2.site_id IS NOT NULL
-        LIMIT 1)) AS site_name
+  run.lines = await qall(`SELECT pl.*,
+      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name,
+        (SELECT si.name FROM staff s2 JOIN sites si ON si.id=s2.site_id
+          WHERE LOWER(REGEXP_REPLACE(TRIM(s2.full_name), '\\s+', ' ', 'g'))
+              = LOWER(REGEXP_REPLACE(TRIM(s.full_name), '\\s+', ' ', 'g'))
+            AND s2.site_id IS NOT NULL
+          LIMIT 1)) AS primary_site_name,
+      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name,
+        (SELECT si.name FROM staff s2 JOIN sites si ON si.id=s2.site_id
+          WHERE LOWER(REGEXP_REPLACE(TRIM(s2.full_name), '\\s+', ' ', 'g'))
+              = LOWER(REGEXP_REPLACE(TRIM(s.full_name), '\\s+', ' ', 'g'))
+            AND s2.site_id IS NOT NULL
+          LIMIT 1)) AS site_name
     FROM pay_run_lines pl
     LEFT JOIN staff s ON s.id=pl.staff_id
     LEFT JOIN sites st ON st.id=s.site_id
-    WHERE pl.run_id=? ORDER BY site_name NULLS LAST, pl.staff_name`, [run.id]);
+    WHERE pl.run_id=? ORDER BY primary_site_name NULLS LAST, pl.staff_name`, [run.id]);
   // Carry the provenance through to the saved view, so a run that was paid from
   // the accountant's sheet still says so at approval time — and keeps saying so
   // after the batch itself has been removed.
@@ -1472,9 +1485,9 @@ router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
       const d = Math.min(l.gross, Math.max(0, l.advance || 0));
       const net = round2(l.gross - d);
       tg += l.gross; td += d; tn += net; n += 1;
-      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged,bags_source)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), run.id, run.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged, l.bags_source || 'PRODUCTION']);
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged,bags_source,primary_site_name)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), run.id, run.tenant_id, l.staff_id, l.full_name, l.pay_type, l.days_present, l.bags_loaded, l.bags_bagged, l.gross, d, net, l.days_present, l.bags_loaded, l.bags_bagged, l.bags_source || 'PRODUCTION', l.primary_site_name || null]);
       if (d > 0) {
         if (combined && Array.isArray(l.member_ids) && l.member_ids.length) {
           const ph = l.member_ids.map(() => '?').join(',');
@@ -1682,7 +1695,8 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
     lines.push({
       staff_id: head.id, member_ids: memberIds,
       ext_id: head.ext_people_id || '', ...nm, full_name: head.full_name,
-      location: head.site_name || '', account: accountDigits(head.bank_account),
+      location: head.site_name || '', primary_site_name: head.site_name || null,
+      account: accountDigits(head.bank_account),
       bags_loaded: l, bags_bagged: g, qty: designation === 'LOADER' ? l : g,
       by_site: memberIds.flatMap((id) => bySite[id] || []),
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
@@ -1733,9 +1747,9 @@ async function generateMidMonth(tenant_id, month, userId, site = null, opts = {}
     let tot = 0;
     for (const l of lines) {
       tot += l.commission;
-      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), runId, tenant_id, l.staff_id, l.full_name, l.designation, 0, l.bags_loaded, l.bags_bagged, l.commission, 0, l.commission]);
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,primary_site_name)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), runId, tenant_id, l.staff_id, l.full_name, l.designation, 0, l.bags_loaded, l.bags_bagged, l.commission, 0, l.commission, l.primary_site_name || l.location || null]);
     }
     await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=0, total_net=? WHERE id=?', [r2(tot), r2(tot), runId]);
   });

@@ -1572,6 +1572,8 @@ async function migrate() {
     -- 'SHEET' when this line's bags came from the accountant's workbook rather
     -- than from what the site recorded.
     ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS bags_source TEXT;
+    -- Staff home site at compute time — used for "Group by site" on saved runs.
+    ALTER TABLE pay_run_lines ADD COLUMN IF NOT EXISTS primary_site_name TEXT;
   `);
 
   // ── Phase 9: optional monthly-salary proration, chosen per run ───────────────

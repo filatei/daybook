@@ -11,6 +11,20 @@ const siteSplitLabel = (bySite) => (bySite || []).map((s) => {
   if (s.bagged > 0) parts.push(`B${s.bagged}`);
   return `${s.site_name} ${parts.join('/')}`;
 }).join(' · ');
+const UNASSIGNED_SITE = 'Unassigned';
+// Group-by-site uses the staff's home site, not where bags were recorded.
+const groupSiteKey = (l) => {
+  const ps = (l.primary_site_name || '').trim();
+  if (ps && ps !== '—') return ps;
+  const sn = (l.site_name || '').trim();
+  if (sn && sn !== '—') return sn;
+  return UNASSIGNED_SITE;
+};
+const sitesForSearch = (l) => {
+  const out = new Set([groupSiteKey(l)]);
+  (l.by_site || []).forEach((s) => { if (s.site_name && s.site_name !== '—') out.add(s.site_name); });
+  return [...out];
+};
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 // Full-month commission cycle: 28th of the previous month → 27th of this one. The
 // "current" completed cycle ends on the 27th of this month once we're past the
@@ -280,26 +294,17 @@ function RunTab({ sites, onSaved }) {
       {lines && (() => {
         if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
         const term = q.trim().toLowerCase();
-        // A worker's site(s) come from their production split. The one with the most
-        // bags is their primary site; regular staff with no bags group under "—".
-        const sitesOf = (l) => (l.by_site || []).map((s) => s.site_name).filter(Boolean);
-        const primarySite = (l) => {
-          const bs = l.by_site || [];
-          if (!bs.length) return '—';
-          return (bs.reduce((a, b) => ((b.loaded + b.bagged) > (a.loaded + a.bagged) ? b : a)).site_name) || '—';
-        };
-        // Search matches name OR any site the person worked at, so "mbiama" isolates a site.
+        // Search matches name OR primary site OR any work site the person bagged at.
         const match = (l) => !term
           || String(l.full_name || '').toLowerCase().includes(term)
-          || sitesOf(l).join(' ').toLowerCase().includes(term);
+          || sitesForSearch(l).join(' ').toLowerCase().includes(term);
         const paid = lines.filter((l) => (l.gross || 0) > 0 && match(l));
         const others = lines.filter((l) => (l.gross || 0) <= 0 && match(l));
 
         const rowBtn = (l) => {
-          // title · site line: the primary production site (or home site fallback).
-          const site = primarySite(l);
+          const site = groupSiteKey(l);
           const title = (l.role_title || l.pay_type || '').toString();
-          const meta = [title, site !== '—' ? site : null].filter(Boolean).join(' · ');
+          const meta = [title, site !== UNASSIGNED_SITE ? site : null].filter(Boolean).join(' · ');
           return (
             <button key={l.staff_id} onClick={() => openDetail(l)}
               style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 14px', borderBottom: '1px solid var(--line)', background: 'transparent', border: 'none', borderBottomStyle: 'solid', textAlign: 'left', cursor: 'pointer' }}>
@@ -313,9 +318,9 @@ function RunTab({ sites, onSaved }) {
           );
         };
 
-        // Sites present among the paid rows (sorted; "—" for no-site last).
-        const siteNames = Array.from(new Set(paid.map(primarySite)))
-          .sort((a, b) => (a === '—' ? 1 : b === '—' ? -1 : a.localeCompare(b)));
+        // Distinct primary sites among paid rows (Unassigned last).
+        const siteNames = Array.from(new Set(paid.map(groupSiteKey)))
+          .sort((a, b) => (a === UNASSIGNED_SITE ? 1 : b === UNASSIGNED_SITE ? -1 : a.localeCompare(b)));
         const toggleSite = (s) => setOpenSites((o) => ({ ...o, [s]: !o[s] }));
 
         return (
@@ -347,7 +352,7 @@ function RunTab({ sites, onSaved }) {
               ? <div className="empty"><div className="ic">💰</div><p>{term ? `No paid staff match “${q}”.` : 'No one has pay this period. Set rates/salaries under Rates.'}</p></div>
               : bySiteView
                 ? siteNames.map((s) => {
-                  const rows = paid.filter((l) => primarySite(l) === s);
+                  const rows = paid.filter((l) => groupSiteKey(l) === s);
                   const subtotal = rows.reduce((a, l) => a + net(l), 0);
                   // Absent key = open. Collapse all therefore has to write false
                   // for every site; clearing the object would re-open them all.
@@ -356,7 +361,7 @@ function RunTab({ sites, onSaved }) {
                     <div key={s} className="card" style={{ padding: 0, overflow: 'hidden', marginBottom: 10 }}>
                       <button onClick={() => toggleSite(s)}
                         style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', border: 'none', background: '#f8fafc', padding: '11px 14px', cursor: 'pointer', textAlign: 'left', borderBottom: open ? '1px solid var(--line)' : 'none' }}>
-                        <strong>{open ? '▾' : '▸'} {s === '—' ? 'No production site' : s} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {rows.length}</span></strong>
+                        <strong>{open ? '▾' : '▸'} {s} <span style={{ color: 'var(--muted)', fontWeight: 600 }}>· {rows.length}</span></strong>
                         <strong>{ngn(subtotal)}</strong>
                       </button>
                       {open && rows.map(rowBtn)}
@@ -485,9 +490,9 @@ function RunsTab() {
     setActing(false);
   };
   const badge = { DRAFT: '#f1f5f9', APPROVED: '#dbeafe', PAID: '#dcfce7' };
-  const visibleLines = (open?.lines || []).filter((l) => !siteFilter || l.site_name === sites.find((s) => s.id === siteFilter)?.name);
-  const siteNames = Array.from(new Set((open?.lines || []).map((l) => l.site_name || '—').filter(Boolean)))
-    .sort((a, b) => (a === '—' ? 1 : b === '—' ? -1 : a.localeCompare(b)));
+  const visibleLines = (open?.lines || []).filter((l) => !siteFilter || groupSiteKey(l) === sites.find((s) => s.id === siteFilter)?.name);
+  const siteNames = Array.from(new Set((open?.lines || []).map(groupSiteKey)))
+    .sort((a, b) => (a === UNASSIGNED_SITE ? 1 : b === UNASSIGNED_SITE ? -1 : a.localeCompare(b)));
 
   if (loading) return <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>;
   return (
@@ -541,11 +546,11 @@ function RunsTab() {
               )}
               {(bySiteView
                 ? siteNames.filter((sn) => !siteFilter || sn === (sites.find((s) => s.id === siteFilter)?.name || sn)).map((sn) => {
-                  const rows = visibleLines.filter((l) => (l.site_name || '—') === sn);
+                  const rows = visibleLines.filter((l) => groupSiteKey(l) === sn);
                   if (!rows.length) return null;
                   return (
                     <div key={sn}>
-                      <div style={{ padding: '8px 12px', background: '#f8fafc', fontWeight: 700, fontSize: 12, borderBottom: '1px solid var(--line)' }}>{sn === '—' ? 'No site on file' : sn} · {rows.length}</div>
+                      <div style={{ padding: '8px 12px', background: '#f8fafc', fontWeight: 700, fontSize: 12, borderBottom: '1px solid var(--line)' }}>{sn} · {rows.length}</div>
                       {rows.map((l) => (
                         <button key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
                           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13, width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: open.status === 'DRAFT' ? 'pointer' : 'default' }}>
@@ -566,7 +571,7 @@ function RunsTab() {
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {l.remarks ? <span title={l.remarks} style={{ marginRight: 4 }}>ℹ️</span> : null}
                     {l.bags_source === 'SHEET' ? <span title="Bags came from the accountant's sheet, not recorded production" style={{ marginRight: 4 }}>📄</span> : null}
-                    {l.staff_name}{l.site_name ? <span style={{ color: 'var(--muted)' }}> · {l.site_name}</span> : null}
+                    {l.staff_name}{(l.primary_site_name || l.site_name) ? <span style={{ color: 'var(--muted)' }}> · {l.primary_site_name || l.site_name}</span> : null}
                     <span style={{ color: 'var(--muted)' }}> · {l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`}{l.deductions ? ` − ${ngn(l.deductions)}` : ''}</span>
                   </span>
                   <strong style={{ whiteSpace: 'nowrap' }}>{ngn(l.net)}{open.status === 'DRAFT' ? ' ›' : ''}</strong>
@@ -809,17 +814,18 @@ function MidMonthTab({ onSaved }) {
     setBusy(false);
   };
 
-  // Search filters on name OR site, so "mbiama" isolates that site's workers.
+  // Search filters on name OR primary site, so "mbiama" isolates that site's workers.
   const needle = q.trim().toLowerCase();
-  const match = (l) => !needle || (l.full_name || '').toLowerCase().includes(needle) || (l.location || '').toLowerCase().includes(needle);
+  const midSite = (l) => groupSiteKey({ primary_site_name: l.primary_site_name || l.location });
+  const match = (l) => !needle || (l.full_name || '').toLowerCase().includes(needle) || midSite(l).toLowerCase().includes(needle);
   const baggers = (data?.baggers || []).filter(match);
   const loaders = (data?.loaders || []).filter(match);
   const shownTotal = [...baggers, ...loaders].reduce((a, l) => a + l.commission, 0);
 
-  // Every site present in the result, so grouping shows which sites are captured
-  // — and, by their absence, which are not (e.g. no production logged there).
-  const sites = Array.from(new Set([...baggers, ...loaders].map((l) => l.location || '(no site)'))).sort();
-  const forSite = (rows, s) => rows.filter((l) => (l.location || '(no site)') === s);
+  // Every primary site present in the result — grouping is by home site, not work site.
+  const sites = Array.from(new Set([...baggers, ...loaders].map(midSite)))
+    .sort((a, b) => (a === UNASSIGNED_SITE ? 1 : b === UNASSIGNED_SITE ? -1 : a.localeCompare(b)));
+  const forSite = (rows, s) => rows.filter((l) => midSite(l) === s);
   const toggleSite = (s) => setOpenSites((o) => ({ ...o, [s]: !o[s] }));
 
   return (

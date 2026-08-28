@@ -186,7 +186,7 @@ function RunTab({ sites, onSaved }) {
     if (from > to) return toast('“From” is after “To”', 'err');
     setBusy(true); setErr(null); setLines(null); setOverride(null);
     try {
-      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), combined, piece_only: pieceOnly } });
+      const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: site || undefined, combined, piece_only: pieceOnly } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 })));
       setOverride(r.override || null);
       if (!r.lines.length) toast('No one to pay for this period', 'err');
@@ -218,7 +218,7 @@ function RunTab({ sites, onSaved }) {
     setBusy(true);
     try {
       const deductions = {}; lines.forEach((l) => { deductions[l.staff_id] = +l.deduction || 0; });
-      await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: combined ? undefined : (site || undefined), deductions, combined, piece_only: pieceOnly } });
+      await api(scopedAny('/payroll/runs2'), { method: 'POST', body: { from, to, site: site || undefined, deductions, combined, piece_only: pieceOnly } });
       toast('Payroll saved as draft ✓', 'ok'); setLines(null); setOverride(null); onSaved && onSaved();
     } catch (e) { toast(e.message, 'err'); }
     setBusy(false);
@@ -245,8 +245,8 @@ function RunTab({ sites, onSaved }) {
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={from} onChange={(e) => setFrom(e.target.value)} />
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={to} max={today()} onChange={(e) => setTo(e.target.value)} />
-        {!combined && sites.length > 1 && (
-          <SearchSelect style={{ flex: '1 1 120px' }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
+        {sites.length > 1 && (
+          <SearchSelect style={{ flex: '1 1 120px' }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: combined ? 'All sites (Fido + Fiafia)' : 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
         <button className="btn" style={{ width: 'auto', padding: '8px 16px', minWidth: 116 }} onClick={run} disabled={busy}>
           {busy ? <><span className="spin" /> Computing…</> : 'Compute'}
@@ -271,7 +271,7 @@ function RunTab({ sites, onSaved }) {
         </label>
       )}
       <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
-        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}${site ? `&site=${site}` : ''}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
         ⬇ Excel template (Regular / Baggers / Loaders)
       </button>
 
@@ -386,11 +386,13 @@ function RunTab({ sites, onSaved }) {
 
 // ── Runs: saved runs → approve → mark paid ────────────────────────────────────
 function RunsTab() {
-  const { tenant, toast, confirm } = useStore();
+  const { tenant, toast, confirm, sites } = useStore();
   const role = useRole();
   const isGM = role && atLeast(role, 'GENERAL_MANAGER');
   const [runs, setRuns] = useState([]);
   const [open, setOpen] = useState(null);   // run detail
+  const [siteFilter, setSiteFilter] = useState('');
+  const [bySiteView, setBySiteView] = useState(false);
   // Who in this run cannot be paid as recorded. Fetched alongside the run so
   // the warning is on screen BEFORE the accountant downloads and submits.
   const [bankCheck, setBankCheck] = useState(null);
@@ -483,6 +485,9 @@ function RunsTab() {
     setActing(false);
   };
   const badge = { DRAFT: '#f1f5f9', APPROVED: '#dbeafe', PAID: '#dcfce7' };
+  const visibleLines = (open?.lines || []).filter((l) => !siteFilter || l.site_name === sites.find((s) => s.id === siteFilter)?.name);
+  const siteNames = Array.from(new Set((open?.lines || []).map((l) => l.site_name || '—').filter(Boolean)))
+    .sort((a, b) => (a === '—' ? 1 : b === '—' ? -1 : a.localeCompare(b)));
 
   if (loading) return <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>;
   return (
@@ -508,7 +513,18 @@ function RunsTab() {
               <strong>{open.period_from} → {open.period_to}</strong>
               <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[open.status] }}>{open.status}</span>
             </div>
-            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}{open.site_name ? ` · ${open.site_name}` : ' · All sites'}</div>
+            {(sites.length > 1 || siteNames.length > 1) && (
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                {sites.length > 1 && (
+                  <SearchSelect style={{ flex: '1 1 140px' }} value={siteFilter} onChange={setSiteFilter}
+                    options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="Filter by site" />
+                )}
+                <button className={`btn btn-sm ${bySiteView ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setBySiteView((v) => !v)}>
+                  {bySiteView ? '✓ Grouped by site' : 'Group by site'}
+                </button>
+              </div>
+            )}
             <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 10 }}>
               {/* Provenance survives to the saved run, and stays visible even if
                   the batch has since been removed — an approved payroll whose
@@ -523,17 +539,39 @@ function RunsTab() {
                   </div>
                 </div>
               )}
-              {(open.lines || []).map((l) => (
+              {(bySiteView
+                ? siteNames.filter((sn) => !siteFilter || sn === (sites.find((s) => s.id === siteFilter)?.name || sn)).map((sn) => {
+                  const rows = visibleLines.filter((l) => (l.site_name || '—') === sn);
+                  if (!rows.length) return null;
+                  return (
+                    <div key={sn}>
+                      <div style={{ padding: '8px 12px', background: '#f8fafc', fontWeight: 700, fontSize: 12, borderBottom: '1px solid var(--line)' }}>{sn === '—' ? 'No site on file' : sn} · {rows.length}</div>
+                      {rows.map((l) => (
+                        <button key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
+                          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13, width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: open.status === 'DRAFT' ? 'pointer' : 'default' }}>
+                          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {l.remarks ? <span title={l.remarks} style={{ marginRight: 4 }}>ℹ️</span> : null}
+                            {l.bags_source === 'SHEET' ? <span title="Bags came from the accountant's sheet" style={{ marginRight: 4 }}>📄</span> : null}
+                            {l.staff_name}<span style={{ color: 'var(--muted)' }}> · {l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`}{l.deductions ? ` − ${ngn(l.deductions)}` : ''}</span>
+                          </span>
+                          <strong style={{ whiteSpace: 'nowrap' }}>{ngn(l.net)}{open.status === 'DRAFT' ? ' ›' : ''}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })
+                : visibleLines.map((l) => (
                 <button key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
                   style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13, width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: open.status === 'DRAFT' ? 'pointer' : 'default' }}>
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {l.remarks ? <span title={l.remarks} style={{ marginRight: 4 }}>ℹ️</span> : null}
                     {l.bags_source === 'SHEET' ? <span title="Bags came from the accountant's sheet, not recorded production" style={{ marginRight: 4 }}>📄</span> : null}
-                    {l.staff_name}<span style={{ color: 'var(--muted)' }}> · {l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`}{l.deductions ? ` − ${ngn(l.deductions)}` : ''}</span>
+                    {l.staff_name}{l.site_name ? <span style={{ color: 'var(--muted)' }}> · {l.site_name}</span> : null}
+                    <span style={{ color: 'var(--muted)' }}> · {l.pay_type === 'PIECE' ? `L${l.bags_loaded}/B${l.bags_bagged}` : `${l.days_present}d`}{l.deductions ? ` − ${ngn(l.deductions)}` : ''}</span>
                   </span>
                   <strong style={{ whiteSpace: 'nowrap' }}>{ngn(l.net)}{open.status === 'DRAFT' ? ' ›' : ''}</strong>
                 </button>
-              ))}
+              )))}
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
               {open.status === 'DRAFT' && (

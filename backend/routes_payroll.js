@@ -90,6 +90,59 @@ const PIECE_WORKER_S = PIECE_WORKER.replace(/\b(staff_type|pay_type)\b/g, 's.$1'
 const isPieceWorker = (st) => ['BAGGER', 'LOADER'].includes(String(st?.staff_type || '').toUpperCase())
   || String(st?.pay_type || '').toUpperCase() === 'PIECE';
 
+const normName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+// Score a staff row for "which duplicate should drive pay?" — the Fiafia ETL often
+// creates a DAILY @ ₦0 twin where people actually clock in, while the Fido import
+// carries MONTHLY salary on a record with no attendance. Picking members[0] paid
+// zero for permanent staff who clocked in daily (Aug 2026 report: Otasowei et al.).
+function payConfigScore(st) {
+  const pt = String(st?.pay_type || '').toUpperCase();
+  const rate = Number(st?.daily_rate) || 0;
+  if (pt === 'MONTHLY' && rate > 0) return 300 + rate;
+  if (pt === 'DAILY' && rate > 0) return 200 + rate;
+  if (pt === 'PIECE' && (rate > 0 || ['BAGGER', 'LOADER'].includes(String(st?.staff_type || '').toUpperCase()))) return 100 + rate;
+  if (pt === 'MONTHLY') return 10;
+  return 0;
+}
+
+function pickPayrollHead(members, { sourceIds } = {}) {
+  if (sourceIds && members.some((m) => sourceIds.has(m.id))) {
+    return members.find((m) => sourceIds.has(m.id));
+  }
+  return members.reduce((best, m) => (payConfigScore(m) > payConfigScore(best) ? m : best), members[0]);
+}
+
+// Combined Fido+Fiafia payroll: one person is often two rows (ETL twin + legacy
+// import). Group by normalized name when spanning multiple tenants; bank account
+// alone split Salihu when Fido/Fiafia bank cells drifted.
+function groupStaffCombined(staff, tenantIds) {
+  const multi = tenantIds.length > 1;
+  const groups = {};
+  for (const s of staff) {
+    const acct = normName(s.bank_account);
+    const key = multi ? normName(s.full_name) : (acct ? `${normName(s.full_name)}|${acct}` : `n:${normName(s.full_name)}`);
+    (groups[key] = groups[key] || []).push(s);
+  }
+  return Object.values(groups);
+}
+
+// Staff tied to a site for filtering combined runs: home site, clock-ins, or bags.
+async function staffIdsForSite(tenantIds, site, from, to) {
+  if (!site) return null;
+  const ph = tenantIds.map(() => '?').join(',');
+  const rows = await qall(
+    `SELECT DISTINCT staff_id FROM (
+       SELECT id AS staff_id FROM staff WHERE tenant_id IN (${ph}) AND site_id=?
+       UNION
+       SELECT staff_id FROM attendance WHERE tenant_id IN (${ph}) AND site_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?
+       UNION
+       SELECT staff_id FROM production WHERE tenant_id IN (${ph}) AND site_id=? AND work_date BETWEEN ? AND ?
+     ) x`,
+    [...tenantIds, site, ...tenantIds, site, from, to, ...tenantIds, site, from, to]);
+  return new Set(rows.map((r) => r.staff_id));
+}
+
 // Global, SHARED per-bag rates (one for loading, one for bagging) applied to every
 // loader/bagger across the combined payroll. Stored tenant-independently.
 //
@@ -839,11 +892,11 @@ async function siteSplit(tenant_id, from, to, override = null) {
 // person into one payslip. Identity = normalized name + bank account (name-only
 // when no account on file). Piece pay uses the shared per-bag rates; monthly pay
 // is prorated by DISTINCT days clocked-in across all the person's tenants.
-async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = false) {
+async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = false, site = null) {
   rates = rates || await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (!tenantIds.length) return [];
   const ph = tenantIds.map(() => '?').join(',');
-  const staff = await qall(`SELECT id, tenant_id, full_name, role_title, site_id, pay_type, daily_rate, bank_name, bank_account
+  const staff = await qall(`SELECT id, tenant_id, full_name, role_title, site_id, pay_type, daily_rate, bank_name, bank_account, staff_type
     FROM staff WHERE tenant_id IN (${ph}) AND status='ACTIVE'
       AND UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'
       AND ${PAYROLL_ELIGIBLE}
@@ -852,28 +905,28 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     WHERE tenant_id IN (${ph}) AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [...tenantIds, from, to]);
   const daysByStaff = {};
   for (const a of att) (daysByStaff[a.staff_id] = daysByStaff[a.staff_id] || new Set()).add(a.work_date);
-  const { by: prodBy, sourceIds } = await bagsForPeriod(tenantIds, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const { by: prodBy, override, sourceIds } = await bagsForPeriod(tenantIds, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const bySite = await siteSplit(tenantIds, from, to, override);
+  const siteStaff = await staffIdsForSite(tenantIds, site, from, to);
   const adv = await qall(`SELECT staff_id, COALESCE(SUM(amount),0) a FROM staff_advances
     WHERE tenant_id IN (${ph}) AND run_id IS NULL AND adv_date<=? GROUP BY staff_id`, [...tenantIds, to]);
   const advBy = {}; for (const a of adv) advBy[a.staff_id] = Number(a.a);
   const periodDays = workingDays(from, to); // Mon–Sat working days
+  const siteNames = {};
+  const homeSiteIds = [...new Set(staff.map((s) => s.site_id).filter(Boolean))];
+  if (homeSiteIds.length) {
+    const sph = homeSiteIds.map(() => '?').join(',');
+    for (const r of await qall(`SELECT id, name FROM sites WHERE id IN (${sph})`, homeSiteIds)) siteNames[r.id] = r.name;
+  }
 
   // Identity = token-sorted name, or the same ≥9-digit account (see staffIdentity.js).
-  // The old key (lowercase name + raw account string) missed word-order twins
-  // ("CHINEYE OKARA" / "OKARA CHINEYE") and bank-prefixed accounts
-  // ("FCMB-5933484012" vs "5933484012") — one person, two payslips.
   const lines = [];
   for (const grp of personGroups(staff, sourceIds)) {
-    const { head, members, memberIds, fromSheet, bagIds } = grp;
+    const { members, memberIds, fromSheet, bagIds } = grp;
+    const head = pickPayrollHead(members, { sourceIds }) || grp.head;
+    if (siteStaff && !memberIds.some((id) => siteStaff.has(id))) continue;
     const dayset = new Set();
     let l = 0, bags = 0, advance = 0;
-    // One human can hold two staff records (multi-site duplicates — see
-    // fix_merge_multisite_dupes.sql), and this line merges them. If the sheet
-    // matched only ONE of those records, summing every member would pay the
-    // sheet figure for record A PLUS the site's production for record B: the
-    // same work, twice. bagsForPeriod replaces per staff_id; the merge has to
-    // replace per person. So when any member came from the sheet, only the
-    // sheet members' bags count.
     for (const id of memberIds) {
       for (const d of (daysByStaff[id] || [])) dayset.add(d);
       advance += advBy[id] || 0;
@@ -885,14 +938,20 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     if (pt === 'PIECE') gross = l * rates.loaded + bags * rates.bagged;
     else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
     else gross = days * (head.daily_rate || 0);
-    const line = {
+    const siteRows = memberIds.flatMap((id) => bySite[id] || []);
+    const displayMember = members.find((m) => m.site_id && (daysByStaff[m.id]?.size || 0) > 0)
+      || members.find((m) => m.site_id)
+      || head;
+    lines.push({
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
       bags_loaded: l, bags_bagged: bags, gross: round2(gross), advance: round2(advance),
+      by_site: siteRows.length ? siteRows : (displayMember.site_id ? [{ site_id: displayMember.site_id, site_name: siteNames[displayMember.site_id] || '—', loaded: 0, bagged: 0 }] : []),
+      home_site_id: displayMember.site_id || null,
       bags_source: fromSheet ? 'SHEET' : 'PRODUCTION',
       tenants: Array.from(new Set(members.map((m) => m.tenant_id))),
-    };
-    lines.push(line); // include all; UI splits paid vs review, save skips zero
+      merged: members.length > 1,
+    });
   }
   lines.sort((a, b) => String(a.full_name).localeCompare(String(b.full_name)));
   return lines;
@@ -911,8 +970,9 @@ router.post('/compute2', requireAuth, async (req, res) => {
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   if (combined) {
     const group = await payrollGroup(req.user, c.tenant_id, c);
-    const lines = await computeCombinedLines(group, from, to, rates, pieceOnly);
-    return res.json({ from, to, combined: true, piece_only: pieceOnly, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+    const siteId = siteBound(c) ? c.site_id : (site || null);
+    const lines = await computeCombinedLines(group, from, to, rates, pieceOnly, siteId);
+    return res.json({ from, to, combined: true, piece_only: pieceOnly, site: siteId, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
   }
   const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly);
   res.json({ from, to, piece_only: pieceOnly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
@@ -929,9 +989,10 @@ router.get('/template.xlsx', requireAuth, async (req, res) => {
   // Mid-month: piece workers only, so the REGULAR sheet is omitted entirely.
   const pieceOnly = req.query.piece_only === '1' || req.query.piece_only === 'true';
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const siteId = siteBound(c) ? c.site_id : (req.query.site || null);
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
-    : await computeLines(c.tenant_id, from, to, null, rates, pieceOnly);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly, siteId)
+    : await computeLines(c.tenant_id, from, to, siteId, rates, pieceOnly);
   const ids = lines.map((l) => l.staff_id).filter(Boolean);
   const sBy = {};
   if (ids.length) {
@@ -1145,9 +1206,10 @@ router.post('/runs2', requireAuth, async (req, res) => {
   // would quietly differ from what they approved on screen.
   const pieceOnly = b.piece_only === true;
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const siteId = siteBound(c) ? c.site_id : (site || null);
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly)
-    : await computeLines(c.tenant_id, from, to, site, rates, pieceOnly);
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), from, to, rates, pieceOnly, siteId)
+    : await computeLines(c.tenant_id, from, to, siteId, rates, pieceOnly);
   const runId = uuid();
   // Which override batch (if any) fed this run. Recorded ON THE RUN because the
   // batch can later be removed, and an approved payroll whose numbers cannot be
@@ -1159,7 +1221,7 @@ router.post('/runs2', requireAuth, async (req, res) => {
     // line edit or Excel re-import would recompute a ₦1 mid-month run at the ₦6
     // full rate — a silent 6x overpay.
     await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?,?)`,
-      [runId, c.tenant_id, combined ? null : site, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR',
+      [runId, c.tenant_id, siteId || null, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR',
         usedOverride ? usedOverride.id : null, req.user.id]);
     for (const l of lines) {
       if (l.gross <= 0) continue; // never save a zero payslip line
@@ -1199,7 +1261,16 @@ router.get('/runs2/:id', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
-  run.lines = await qall('SELECT * FROM pay_run_lines WHERE run_id=? ORDER BY staff_name', [run.id]);
+  run.lines = await qall(`SELECT pl.*, COALESCE(st.name,
+      (SELECT si.name FROM staff s2 JOIN sites si ON si.id=s2.site_id
+        WHERE LOWER(REGEXP_REPLACE(TRIM(s2.full_name), '\\s+', ' ', 'g'))
+            = LOWER(REGEXP_REPLACE(TRIM(s.full_name), '\\s+', ' ', 'g'))
+          AND s2.site_id IS NOT NULL
+        LIMIT 1)) AS site_name
+    FROM pay_run_lines pl
+    LEFT JOIN staff s ON s.id=pl.staff_id
+    LEFT JOIN sites st ON st.id=s.site_id
+    WHERE pl.run_id=? ORDER BY site_name NULLS LAST, pl.staff_name`, [run.id]);
   // Carry the provenance through to the saved view, so a run that was paid from
   // the accountant's sheet still says so at approval time — and keeps saying so
   // after the batch itself has been removed.
@@ -1386,10 +1457,10 @@ router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
   if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be recomputed' });
   const pieceOnly = run.kind === 'MIDMONTH';
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
-  // site_id NULL on a saved run means it was combined across the group.
-  const combined = !run.site_id;
+  const group = await payrollGroup(req.user, run.tenant_id, c);
+  const combined = group.length > 1;
   const lines = combined
-    ? await computeCombinedLines(await payrollGroup(req.user, run.tenant_id, c), run.period_from, run.period_to, rates, pieceOnly)
+    ? await computeCombinedLines(group, run.period_from, run.period_to, rates, pieceOnly, run.site_id)
     : await computeLines(run.tenant_id, run.period_from, run.period_to, run.site_id, rates, pieceOnly);
   let tg = 0, td = 0, tn = 0, n = 0;
   await withTransaction(async () => {
@@ -1597,7 +1668,8 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
   // duplicate the payroll team flagged. Park a genuine namesake via eligibility.
   const lines = [];
   for (const grp of personGroups(staff, sourceIds)) {
-    const { head, memberIds, fromSheet, bagIds } = grp;
+    const { members, memberIds, fromSheet, bagIds } = grp;
+    const head = pickPayrollHead(members, { sourceIds }) || grp.head;
     let l = 0, g = 0;
     for (const id of bagIds) { const pb = by[id]; if (pb) { l += pb.l; g += pb.g; } }
 

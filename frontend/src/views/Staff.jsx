@@ -762,7 +762,7 @@ export default function Staff() {
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState('clock');   // clock | report
   const active = useActiveTenant();
-  const [presentOnly, setPresentOnly] = useState(false);
+  const [presentFilter, setPresentFilter] = useState('all'); // all | in | out
   const [photoStaff, setPhotoStaff] = useState(null);
   const printBadge = async (s) => {
     let photo = s.photo;
@@ -824,7 +824,25 @@ export default function Staff() {
     return { icon: '⬜', label: 'Out', color: 'var(--muted)' };
   };
 
-  const present = staff.filter((s) => attendance[s.id]?.clock_in).length;
+  const isPresent = (s) => {
+    const a = attendance[s.id];
+    return !!(a?.clock_in && !a?.clock_out);
+  };
+  const isOut = (s) => !isPresent(s);
+
+  const parseSearch = (raw) => {
+    const tokens = raw.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    let presence = presentFilter;
+    const terms = [];
+    for (const t of tokens) {
+      if (['in', 'present'].includes(t)) presence = 'in';
+      else if (['out', 'absent', 'done'].includes(t)) presence = 'out';
+      else terms.push(t);
+    }
+    return { presence, term: terms.join(' ') };
+  };
+
+  const present = staff.filter(isPresent).length;
 
   return (
     <div>
@@ -842,11 +860,11 @@ export default function Staff() {
       {mode === 'badge' ? <BadgeClock /> : mode === 'report' ? <AttendanceReport siteFilter={siteFilter} /> : mode === 'production' ? <ProductionGrid siteFilter={siteFilter} sites={sites} siteBound={siteBound} /> : (
       <>
       <div className="stat-grid" style={{ marginBottom: 14 }}>
-        <button className={`stat${presentOnly ? '' : ' accent'}`} onClick={() => setPresentOnly((v) => !v)}
-          style={{ textAlign: 'left', border: presentOnly ? '2px solid var(--brand-d)' : 'none', cursor: 'pointer' }} title="Tap to show only present staff">
-          <div className="k">Present Today {presentOnly ? '✓' : '›'}</div><div className="v">{present}</div>
+        <button className={`stat${presentFilter === 'in' ? ' accent' : ''}`} onClick={() => setPresentFilter((f) => (f === 'in' ? 'all' : 'in'))}
+          style={{ textAlign: 'left', border: presentFilter === 'in' ? '2px solid var(--brand-d)' : 'none', cursor: 'pointer' }} title="Show only staff clocked in now">
+          <div className="k">Present Today {presentFilter === 'in' ? '✓' : '›'}</div><div className="v">{present}</div>
         </button>
-        <button className="stat" onClick={() => { setPresentOnly(false); setQuery(''); }} style={{ textAlign: 'left', border: 'none', cursor: 'pointer' }} title="Show all staff">
+        <button className="stat" onClick={() => { setPresentFilter('all'); setQuery(''); }} style={{ textAlign: 'left', border: 'none', cursor: 'pointer' }} title="Show all staff">
           <div className="k">Total Staff</div><div className="v">{staff.length}</div>
         </button>
       </div>
@@ -856,17 +874,37 @@ export default function Staff() {
       )}
 
       {staff.length > 0 && (
-        <input className="input" style={{ marginBottom: 12 }} value={query} onChange={(e) => setQuery(e.target.value)}
-          placeholder="🔍 Search staff by name or role…" />
+        <>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <input className="input" style={{ flex: '1 1 160px' }} value={query} onChange={(e) => setQuery(e.target.value)}
+              placeholder="🔍 Search name, role, or in/out…" />
+            <div className="seg" style={{ margin: 0, flex: '0 0 auto' }}>
+              {[['all', 'All'], ['in', 'In'], ['out', 'Out']].map(([val, label]) => (
+                <button key={val} className={`seg-b${presentFilter === val ? ' on' : ''}`} style={{ padding: '6px 12px' }}
+                  onClick={() => setPresentFilter(val)}>{label}</button>
+              ))}
+            </div>
+          </div>
+        </>
       )}
 
-      {(() => { const shownStaff = staff.filter((s) => { if (presentOnly && !attendance[s.id]?.clock_in) return false; const q = query.trim().toLowerCase(); return !q || (s.full_name || '').toLowerCase().includes(q) || (s.role_title || '').toLowerCase().includes(q) || (s.badge_code || '').toLowerCase().includes(q); }); return (
+      {(() => {
+        const { presence, term } = parseSearch(query);
+        const shownStaff = staff.filter((s) => {
+          if (presence === 'in' && !isPresent(s)) return false;
+          if (presence === 'out' && !isOut(s)) return false;
+          return !term
+            || (s.full_name || '').toLowerCase().includes(term)
+            || (s.role_title || '').toLowerCase().includes(term)
+            || (s.badge_code || '').toLowerCase().includes(term);
+        });
+        return (
       loading ? (
         <>{[...Array(6)].map((_, i) => <div className="skel" key={i} />)}</>
       ) : staff.length === 0 ? (
         <div className="empty"><div className="ic">👷</div><p>No staff found</p></div>
       ) : shownStaff.length === 0 ? (
-        <div className="empty"><div className="ic">{presentOnly ? '🟢' : '🔍'}</div><p>{presentOnly ? 'No one is clocked in yet today' : `No staff match “${query}”`}</p></div>
+        <div className="empty"><div className="ic">{presence === 'in' ? '🟢' : presence === 'out' ? '⬜' : '🔍'}</div><p>{presence === 'in' ? 'No one is clocked in right now' : presence === 'out' ? 'Everyone is clocked in' : `No staff match “${query}”`}</p></div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {shownStaff.map((s) => {

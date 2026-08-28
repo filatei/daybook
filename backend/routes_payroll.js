@@ -104,10 +104,10 @@ function payConfigScore(st) {
   return 0;
 }
 
-function pickPayrollHead(members, { sourceIds } = {}) {
-  if (sourceIds && members.some((m) => sourceIds.has(m.id))) {
-    return members.find((m) => sourceIds.has(m.id));
-  }
+function pickPayrollHead(members) {
+  // Pay config (MONTHLY salary, daily rate, piece role) — not sheet membership.
+  // A Fiafia DAILY @ ₦0 clock-in twin must not beat a Fido MONTHLY record just
+  // because they appear on a bag sheet with zero bags.
   return members.reduce((best, m) => (payConfigScore(m) > payConfigScore(best) ? m : best), members[0]);
 }
 
@@ -120,6 +120,13 @@ function resolvePrimarySite(members, siteNames, preferHead) {
     if (m?.site_id) return { id: m.site_id, name: siteNames[m.site_id] || null };
   }
   return { id: null, name: null };
+}
+
+// Prefer the member whose home site reflects where they actually clocked in.
+function resolveHomeMember(members, daysByStaff, fallback) {
+  return members.find((m) => m.site_id && (daysByStaff[m.id]?.size || 0) > 0)
+    || members.find((m) => m.site_id)
+    || fallback;
 }
 
 // Staff tied to a site for filtering combined runs: home site, clock-ins, or bags.
@@ -775,14 +782,14 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
   const sWhere = ['tenant_id=?', "status='ACTIVE'", "UPPER(COALESCE(full_name,'')) NOT LIKE '%HIRED%'",
     PAYROLL_ELIGIBLE], sArgs = [tenant_id];
   if (pieceOnly) sWhere.push(PIECE_WORKER);
-  if (site) { sWhere.push('site_id=?'); sArgs.push(site); }
-  const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, daily_rate, rate_loaded, rate_bagged, bank_name, bank_account
+  const staff = await qall(`SELECT id, full_name, role_title, site_id, pay_type, staff_type, daily_rate, rate_loaded, rate_bagged, bank_name, bank_account
     FROM staff WHERE ${sWhere.join(' AND ')} ORDER BY full_name`, sArgs);
   const att = await qall(`SELECT DISTINCT staff_id, work_date FROM attendance
     WHERE tenant_id=? AND clock_in IS NOT NULL AND work_date BETWEEN ? AND ?`, [tenant_id, from, to]);
   const daysByStaff = {};
   for (const a of att) (daysByStaff[a.staff_id] = daysByStaff[a.staff_id] || new Set()).add(a.work_date);
   const { by: prodBy, override, sourceIds } = await bagsForPeriod(tenant_id, from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const siteStaff = await staffIdsForSite([tenant_id], site, from, to);
   // Per-site split behind each worker's total (where the bags were actually done).
   const bySite = await siteSplit(tenant_id, from, to, override);
   // Outstanding (unsettled) advances up to the period end.
@@ -800,8 +807,10 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
   const lines = [];
   for (const g of personGroups(staff, sourceIds)) {
     const { head, members, memberIds, fromSheet, bagIds } = g;
-    const payHead = pickPayrollHead(members, { sourceIds }) || head;
-    const primary = resolvePrimarySite(members, siteNames, payHead);
+    const payHead = pickPayrollHead(members) || head;
+    if (siteStaff && !memberIds.some((id) => siteStaff.has(id))) continue;
+    const homeMember = resolveHomeMember(members, daysByStaff, payHead);
+    const primary = resolvePrimarySite(members, siteNames, homeMember);
     const dayset = new Set();
     let l = 0, bagged = 0, advance = 0;
     for (const id of memberIds) {
@@ -810,11 +819,11 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
     }
     for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; bagged += pb.g; } }
     const days = dayset.size;
-    const pt = (head.pay_type || '').toUpperCase();
+    const pt = (payHead.pay_type || '').toUpperCase();
     let gross;
     if (pt === 'PIECE') gross = l * rates.loaded + bagged * rates.bagged;
-    else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
-    else gross = days * (head.daily_rate || 0);
+    else if (pt === 'MONTHLY') gross = (payHead.daily_rate || 0) * (days / periodDays);
+    else gross = days * (payHead.daily_rate || 0);
     lines.push({
       staff_id: payHead.id, full_name: payHead.full_name, role_title: payHead.role_title, pay_type: payHead.pay_type,
       days_present: days, period_days: periodDays, bags_loaded: l, bags_bagged: bagged, gross: Math.round(gross * 100) / 100,
@@ -928,7 +937,7 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
   const lines = [];
   for (const grp of personGroups(staff, sourceIds)) {
     const { members, memberIds, fromSheet, bagIds } = grp;
-    const head = pickPayrollHead(members, { sourceIds }) || grp.head;
+    const head = pickPayrollHead(members) || grp.head;
     if (siteStaff && !memberIds.some((id) => siteStaff.has(id))) continue;
     const dayset = new Set();
     let l = 0, bags = 0, advance = 0;
@@ -944,10 +953,8 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
     else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
     else gross = days * (head.daily_rate || 0);
     const siteRows = memberIds.flatMap((id) => bySite[id] || []);
-    const displayMember = members.find((m) => m.site_id && (daysByStaff[m.id]?.size || 0) > 0)
-      || members.find((m) => m.site_id)
-      || head;
-    const primary = resolvePrimarySite(members, siteNames, head);
+    const displayMember = resolveHomeMember(members, daysByStaff, head);
+    const primary = resolvePrimarySite(members, siteNames, displayMember);
     lines.push({
       staff_id: head.id, member_ids: memberIds, full_name: head.full_name, role_title: head.role_title,
       pay_type: head.pay_type, days_present: days, period_days: periodDays,
@@ -1683,7 +1690,7 @@ async function computePieceLines(tenant_id, from, to, site, rates) {
   const lines = [];
   for (const grp of personGroups(staff, sourceIds)) {
     const { members, memberIds, fromSheet, bagIds } = grp;
-    const head = pickPayrollHead(members, { sourceIds }) || grp.head;
+    const head = pickPayrollHead(members) || grp.head;
     let l = 0, g = 0;
     for (const id of bagIds) { const pb = by[id]; if (pb) { l += pb.l; g += pb.g; } }
 

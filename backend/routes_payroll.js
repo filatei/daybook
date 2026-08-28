@@ -171,7 +171,8 @@ async function getBagRates(kind = 'MONTHEND') {
 // re-deriving it, so the saved run matches the scope that was previewed.
 async function payrollGroup(_user, fallbackTenant, ctx) {
   if (ctx && ctx.group && Array.isArray(ctx.tenant_ids) && ctx.tenant_ids.length) return ctx.tenant_ids;
-  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE'");
+  // Fido Water + Fiafia Water are one payroll group — shared runs, merged payslips.
+  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE' AND slug IN ('fido','fiafia') ORDER BY name, id");
   const ids = rows.map((r) => r.id);
   return ids.length ? ids : (fallbackTenant ? [fallbackTenant] : []);
 }

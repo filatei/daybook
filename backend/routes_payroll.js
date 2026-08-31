@@ -19,9 +19,14 @@ const { v4: uuid } = require('uuid');
 
 // Parsed in memory, then the original workbook is written under PAYROLL_SHEET_DIR.
 const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
-const PAYROLL_SHEET_DIR = process.env.PAYROLL_SHEET_DIR || path.join(__dirname, '../data/payroll-sheets');
+const PAYROLL_SHEET_DIR = process.env.PAYROLL_SHEET_DIR
+  || (process.env.UPLOAD_DIR
+    ? path.join(path.dirname(process.env.UPLOAD_DIR), 'payroll-sheets')
+    : path.join(__dirname, '../data/payroll-sheets'));
 const SHEET_EXT_OK = new Set(['.xls', '.xlsx']);
-fs.mkdirSync(PAYROLL_SHEET_DIR, { recursive: true });
+try { fs.mkdirSync(PAYROLL_SHEET_DIR, { recursive: true }); } catch (e) {
+  console.warn('[payroll] PAYROLL_SHEET_DIR not ready at startup:', e.message);
+}
 const { qone, qall, qrun, withTransaction, clientQ } = require('./db');
 const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
 const {

@@ -214,12 +214,27 @@ async function runFor(c, id) {
 
 // Working days in [from,to] inclusive — Mon–Sat (excludes Sundays). Used as the
 // denominator for MONTHLY salary proration (the operation works Mon–Sat).
+// Month-end payroll treats 27 Mon–Sat days in a 28→27 cycle as full monthly pay;
+// Sundays are not working days and must not inflate the denominator or reduce pay.
 function workingDays(from, to) {
   let d = new Date(`${String(from).slice(0, 10)}T00:00:00Z`);
   const end = new Date(`${String(to).slice(0, 10)}T00:00:00Z`);
   let n = 0;
   while (d <= end) { if (d.getUTCDay() !== 0) n += 1; d.setUTCDate(d.getUTCDate() + 1); }
   return Math.max(1, n);
+}
+
+function isSunday(dateStr) {
+  const d = new Date(`${String(dateStr).slice(0, 10)}T12:00:00Z`);
+  return d.getUTCDay() === 0;
+}
+
+// Distinct clock-in dates that fall on Mon–Sat. Sunday attendance is ignored for
+// salaried proration — the plant does not operate on Sundays.
+function workingDaysPresent(dayset) {
+  let n = 0;
+  for (const dt of dayset) if (!isSunday(dt)) n += 1;
+  return n;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -509,7 +524,8 @@ router.get('/runs/:id/export.csv', requireAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PAYROLL v2 — pay config, daily production capture, period compute
 //   Piece workers (loaders/baggers): pay = bags_loaded×rate_loaded + bags_bagged×rate_bagged
-//   Regular staff: pay = days_present (from attendance) × daily_rate
+//   Regular staff (MONTHLY): gross = monthly_salary × (Mon–Sat days present) / (Mon–Sat working days in period)
+//   Sundays are excluded — 27 working days in a 28→27 cycle with full attendance = full pay.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Pay configuration (rates) — Snr Accountant+ ────────────────────────────────
@@ -818,8 +834,8 @@ async function computeLines(tenant_id, from, to, site, rates, pieceOnly = false)
       advance += advBy[id] || 0;
     }
     for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; bagged += pb.g; } }
-    const days = dayset.size;
     const pt = (payHead.pay_type || '').toUpperCase();
+    const days = pt === 'PIECE' ? dayset.size : workingDaysPresent(dayset);
     let gross;
     if (pt === 'PIECE') gross = l * rates.loaded + bagged * rates.bagged;
     else if (pt === 'MONTHLY') gross = (payHead.daily_rate || 0) * (days / periodDays);
@@ -946,8 +962,8 @@ async function computeCombinedLines(tenantIds, from, to, rates, pieceOnly = fals
       advance += advBy[id] || 0;
     }
     for (const id of bagIds) { const pb = prodBy[id]; if (pb) { l += pb.l; bags += pb.g; } }
-    const days = dayset.size;
     const pt = (head.pay_type || '').toUpperCase();
+    const days = pt === 'PIECE' ? dayset.size : workingDaysPresent(dayset);
     let gross;
     if (pt === 'PIECE') gross = l * rates.loaded + bags * rates.bagged;
     else if (pt === 'MONTHLY') gross = (head.daily_rate || 0) * (days / periodDays);
@@ -1238,7 +1254,7 @@ router.post('/runs2', requireAuth, async (req, res) => {
     // Persist WHICH run this is. Without it the draft looks REGULAR, and any later
     // line edit or Excel re-import would recompute a ₦1 mid-month run at the ₦6
     // full rate — a silent 6x overpay.
-    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?,?)`,
+    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,override_batch_id,pay_source,created_by) VALUES (?,?,?,?,?, 'DRAFT', ?,?, 'COMPUTED',?)`,
       [runId, c.tenant_id, siteId || null, from, to, pieceOnly ? 'MIDMONTH' : 'REGULAR',
         usedOverride ? usedOverride.id : null, req.user.id]);
     for (const l of lines) {
@@ -1267,6 +1283,116 @@ router.post('/runs2', requireAuth, async (req, res) => {
       [Math.round(tg * 100) / 100, Math.round(td * 100) / 100, Math.round(tn * 100) / 100, runId]);
   });
   res.status(201).json({ id: runId });
+});
+
+// Build pay_run_lines from stored sheet upload rows — figures taken as-is from the
+// accountant's workbook, not recomputed from attendance or production.
+async function linesFromSheetUpload(upload, sheetLines, tenantId) {
+  const staffIds = sheetLines.map((l) => l.staff_id).filter(Boolean);
+  const staffById = {};
+  if (staffIds.length) {
+    const ph = staffIds.map(() => '?').join(',');
+    for (const s of await qall(`SELECT s.id, s.full_name, s.pay_type, s.staff_type, s.site_id, st.name site_name
+      FROM staff s LEFT JOIN sites st ON st.id=s.site_id WHERE s.id IN (${ph})`, staffIds)) {
+      staffById[s.id] = s;
+    }
+  }
+  const periodDays = workingDays(upload.period_from, upload.period_to);
+  const lines = [];
+  for (const sl of sheetLines) {
+    if (!sl.staff_id) continue;
+    const st = staffById[sl.staff_id];
+    if (!st) continue;
+    const gross = r2(sl.gross || 0);
+    const ded = r2(sl.deduction || 0);
+    const net = r2(sl.net != null && sl.net > 0 ? sl.net : Math.max(0, gross - ded));
+    const hasPay = net > 0 || gross > 0 || (sl.days || 0) > 0 || (sl.loaded || 0) > 0 || (sl.bagged || 0) > 0;
+    if (!hasPay) continue;
+    const kind = String(sl.sheet_kind || '').toUpperCase();
+    let payType = (st.pay_type || '').toUpperCase();
+    if (kind === 'REGULAR') payType = 'MONTHLY';
+    else if (kind === 'BAGGERS' || kind === 'LOADERS') payType = 'PIECE';
+    lines.push({
+      staff_id: st.id,
+      tenant_id: sl.tenant_id || st.tenant_id || tenantId,
+      full_name: st.full_name || sl.name,
+      pay_type: payType,
+      days_present: sl.days || 0,
+      period_days: periodDays,
+      bags_loaded: sl.loaded || 0,
+      bags_bagged: sl.bagged || 0,
+      gross,
+      deduction: ded,
+      net,
+      bags_source: 'SHEET',
+      primary_site_name: st.site_name || null,
+      sheet_kind: kind,
+    });
+  }
+  lines.sort((a, b) => String(a.full_name).localeCompare(String(b.full_name)));
+  return lines;
+}
+
+// Create a DRAFT payroll run from an uploaded month-end sheet (authoritative figures).
+router.post('/runs2/from-sheet', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const b = req.body || {};
+  const { from, to, upload_id: uploadIdIn, site } = b;
+  const siteId = siteBound(c) ? c.site_id : (site || null);
+
+  let upload = null;
+  if (uploadIdIn) {
+    upload = await sheetUploadFor(c, uploadIdIn);
+    if (!upload || !upload.is_active) return res.status(404).json({ error: 'sheet upload not found' });
+  } else {
+    if (!from || !to) return res.status(400).json({ error: 'from and to required (or upload_id)' });
+    upload = await activeSheetUpload(ctxTenants(c), from, to, SHEET_KIND_REGULAR);
+    if (!upload) return res.status(404).json({ error: 'no active sheet upload for this period — upload the month-end workbook first' });
+  }
+
+  if (upload.kind === SHEET_KIND_MIDMONTH) {
+    return res.status(400).json({ error: 'this endpoint is for month-end (REGULAR) sheets only — use Compute for mid-month' });
+  }
+
+  const sheetLines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=? ORDER BY name', [upload.id]);
+  const runLines = await linesFromSheetUpload(upload, sheetLines, c.tenant_id);
+  if (!runLines.length) {
+    return res.status(400).json({ error: 'no matched staff with pay on that sheet — check IDs and re-upload' });
+  }
+
+  const unmatched = sheetLines.filter((l) => !l.staff_id && ((l.net || 0) > 0 || (l.gross || 0) > 0));
+  const runId = uuid();
+  let tg = 0; let td = 0; let tn = 0;
+  await withTransaction(async () => {
+    await qrun(`INSERT INTO pay_runs (id,tenant_id,site_id,period_from,period_to,status,kind,pay_source,sheet_upload_id,created_by)
+      VALUES (?,?,?,?,?, 'DRAFT', 'REGULAR', 'SHEET', ?,?)`,
+    [runId, c.tenant_id, siteId || null, upload.period_from, upload.period_to, upload.id, req.user.id]);
+    for (const l of runLines) {
+      tg += l.gross; td += l.deduction; tn += l.net;
+      await qrun(`INSERT INTO pay_run_lines (id,run_id,tenant_id,staff_id,staff_name,pay_type,days_present,bags_loaded,bags_bagged,gross,deductions,net,rec_days,rec_loaded,rec_bagged,bags_source,primary_site_name,remarks)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [uuid(), runId, l.tenant_id || c.tenant_id, l.staff_id, l.full_name, l.pay_type,
+        l.days_present, l.bags_loaded, l.bags_bagged, l.gross, l.deduction, l.net,
+        l.days_present, l.bags_loaded, l.bags_bagged, 'SHEET', l.primary_site_name,
+        'From accountant sheet']);
+    }
+    await qrun('UPDATE pay_runs SET total_gross=?, total_deductions=?, total_net=? WHERE id=?',
+      [r2(tg), r2(td), r2(tn), runId]);
+  });
+
+  await audit(c.tenant_id, req.user.id, 'PAYROLL_RUN_FROM_SHEET', 'pay_runs', runId,
+    { upload_id: upload.id, period: `${upload.period_from}..${upload.period_to}`, lines: runLines.length, unmatched: unmatched.length });
+  res.status(201).json({
+    id: runId,
+    pay_source: 'SHEET',
+    sheet_upload_id: upload.id,
+    period_from: upload.period_from,
+    period_to: upload.period_to,
+    line_count: runLines.length,
+    unmatched_count: unmatched.length,
+    total_gross: r2(tg),
+    total_net: r2(tn),
+  });
 });
 
 router.get('/runs2', requireAuth, async (req, res) => {
@@ -1487,6 +1613,9 @@ router.post('/runs2/:id/recompute', requireAuth, async (req, res) => {
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be recomputed' });
+  if (run.pay_source === 'SHEET') {
+    return res.status(400).json({ error: 'this run was built from the accountant\'s sheet — re-upload the sheet and use Generate payroll from sheet instead of Recompute' });
+  }
   const pieceOnly = run.kind === 'MIDMONTH';
   const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
   const group = await payrollGroup(req.user, run.tenant_id, c);
@@ -3011,9 +3140,11 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
 
       if (sheetKindName === 'REGULAR') {
         days = xlsNum(xlsGet(row, ['DAYS WORKED', 'DAYS'])) || 0;
+        const daysAbs = xlsNum(xlsGet(row, ['DAYS ABS', 'DAYS ABSENT', 'ABSENT']));
         baseSalary = xlsNum(xlsGet(row, ['BASE SALARY', 'MONTHLY SALARY', 'SALARY'])) || 0;
         net = xlsNum(xlsGet(row, ['NET SALARY', 'NET PAY', 'NET'])) || 0;
         gross = xlsNum(xlsGet(row, ['GROSS', 'GROSS PAY'])) || (net + ded);
+        if (!days && daysAbs != null) row._days_abs = daysAbs;
       } else if (sheetKindName === 'BAGGERS') {
         bagged = xlsNum(xlsGet(row, ['QTY', 'BAGS BAGGED', 'BAGGED'])) || 0;
         gross = xlsNum(xlsGet(row, ['COMMISSION', 'GROSS', 'NET PAY (COMMISSION)'])) || 0;
@@ -3037,6 +3168,7 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
           staff_id: null, tenant_id: null, ext_people_id: ext || null, name: full || null,
           days, loaded, bagged, base_salary: baseSalary, gross: r2(gross), deduction: r2(ded), net: r2(net),
           sheet_kind: sheetKindName, sheet_row: sheetRow, unmatched: true,
+          days_abs: row._days_abs,
         });
         continue;
       }
@@ -3044,6 +3176,7 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
         staff_id: st.id, tenant_id: st.tenant_id, ext_people_id: st.ext_people_id || ext || null,
         name: st.full_name || full, days, loaded, bagged, base_salary: baseSalary,
         gross: r2(gross), deduction: r2(ded), net: r2(net), sheet_kind: sheetKindName, sheet_row: sheetRow,
+        days_abs: row._days_abs,
       });
     }
   };
@@ -3061,6 +3194,23 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
   }
   if (!pFrom || !pTo) return { error: 'could not read the pay period — use a sheet with PAY START DATE / PAY END DATE, or send period_from and period_to' };
   if (pFrom > pTo) return { error: 'the pay period starts after it ends' };
+
+  const periodWorkingDays = workingDays(pFrom, pTo);
+  for (const l of lines) {
+    if (l.sheet_kind === 'REGULAR') {
+      if (!l.days && l.days_abs != null) {
+        l.days = Math.max(0, periodWorkingDays - l.days_abs);
+      }
+      // Infer base salary from net + days when workbook omits BASE SALARY (Fido month-end export).
+      if (!l.base_salary && l.net > 0 && l.days > 0 && l.days < periodWorkingDays) {
+        l.base_salary = r2(l.net * periodWorkingDays / l.days);
+        if (!l.gross) l.gross = r2(l.base_salary * l.days / periodWorkingDays);
+      } else if (!l.base_salary && l.net > 0 && l.days >= periodWorkingDays) {
+        l.base_salary = l.net;
+      }
+      delete l.days_abs;
+    }
+  }
 
   const kindIn = String(body.kind || '').toUpperCase();
   const asked = kindIn === 'MONTHEND' || kindIn === 'MIDMONTH' ? kindIn : (kindIn === SHEET_KIND_MIDMONTH ? 'MIDMONTH' : (kindIn === SHEET_KIND_REGULAR ? 'MONTHEND' : null));

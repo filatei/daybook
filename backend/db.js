@@ -1584,6 +1584,9 @@ async function migrate() {
     -- Persisted ON THE RUN so later line edits and Excel re-imports recompute
     -- gross the same way the run was previewed and approved.
     ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS prorate_monthly BOOLEAN DEFAULT TRUE;
+    -- COMPUTED = built from attendance/production; SHEET = accountant workbook.
+    ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS pay_source TEXT DEFAULT 'COMPUTED';
+    ALTER TABLE pay_runs ADD COLUMN IF NOT EXISTS sheet_upload_id TEXT;
   `);
 
   // ── Phase 10: every staff member gets a permanent Staff ID ───────────────────

@@ -316,7 +316,8 @@ function RunTab({ sites, onSaved }) {
 
       <SheetUploadCard from={from} to={to} pieceOnly={pieceOnly} combined={combined} upload={sheetUpload}
         onUploaded={(r) => { setSheetUpload({ id: r.id, file_name: r.file_name || r.upload?.file_name, line_count: r.line_count, uploaded_at: Math.floor(Date.now() / 1000) }); }}
-        onDeleted={() => { setSheetUpload(null); setComparison(null); }} />
+        onDeleted={() => { setSheetUpload(null); setComparison(null); }}
+        onGenerated={() => { onSaved && onSaved(); }} />
 
       {lines && sheetUpload && comparison && (
         <div className="card" style={{ padding: '10px 12px', marginBottom: 10, background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
@@ -557,7 +558,8 @@ function RunsTab() {
               style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid var(--line)', width: '100%', cursor: 'pointer', textAlign: 'left' }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700 }}>{r.period_from} → {r.period_to} <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[r.status] || '#f1f5f9' }}>{r.status}</span>
-                  {r.sheet_upload_id && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#e0e7ff', marginLeft: 4 }}>Sheet uploaded</span>}
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: r.pay_source === 'SHEET' ? '#dbeafe' : '#f1f5f9', marginLeft: 4 }}>{r.pay_source === 'SHEET' ? 'SHEET' : 'COMPUTED'}</span>
+                  {r.sheet_upload_id && r.pay_source !== 'SHEET' && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#e0e7ff', marginLeft: 4 }}>Sheet uploaded</span>}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.site_name || 'All sites'} · net {ngn(r.total_net)}
                   {r.sheet_upload_id && (
@@ -586,8 +588,16 @@ function RunsTab() {
           <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 440, margin: 0, maxHeight: '88vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <strong>{open.period_from} → {open.period_to}</strong>
-              <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[open.status] }}>{open.status}</span>
+              <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                {open.pay_source === 'SHEET' && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#dbeafe' }}>SHEET</span>}
+                <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[open.status] }}>{open.status}</span>
+              </span>
             </div>
+            {open.pay_source === 'SHEET' && (
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+                📄 Figures from the accountant&apos;s uploaded workbook — not recomputed from attendance.
+              </div>
+            )}
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}{open.site_name ? ` · ${open.site_name}` : ' · All sites'}</div>
             {(sites.length > 1 || siteNames.length > 1) && (
               <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
@@ -656,7 +666,7 @@ function RunsTab() {
                     onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; importFile(f); }} />
                 </label>
               )}
-              {open.status === 'DRAFT' && (
+              {open.status === 'DRAFT' && open.pay_source !== 'SHEET' && (
                 <button className="btn btn-ghost" style={{ flex: 1 }} onClick={recompute} disabled={acting}
                   title="Rebuild this draft from today’s rates and staff — same period">
                   {acting ? <span className="spin" /> : '↻'} Recompute
@@ -1028,8 +1038,8 @@ function PayrollComparison({ from, to, pieceOnly, combined, onClose }) {
   );
 }
 
-// Month-end sheet upload — stored side-by-side, does not replace computed payroll.
-function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, onDeleted }) {
+// Month-end sheet upload — store alongside computed payroll, or generate a draft run.
+function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, onDeleted, onGenerated }) {
   const { toast, confirm } = useStore();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -1048,6 +1058,26 @@ function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, on
       toast(`Sheet stored — ${r.line_count} lines ✓`, 'ok');
       onUploaded && onUploaded(r);
     } catch (e) { setErr(e.message || 'Upload failed'); }
+    setBusy(false);
+  };
+
+  const generateFromSheet = async () => {
+    if (!upload?.id && !from) return;
+    const ok = await confirm({
+      title: 'Generate payroll from sheet?',
+      message: `Create a DRAFT run for ${from} → ${to} using the uploaded workbook figures (not computed attendance). You can approve and download the bank file from Saved.`,
+      confirmText: 'Generate draft',
+    });
+    if (!ok) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await api(scopedAny('/payroll/runs2/from-sheet'), {
+        method: 'POST',
+        body: { from, to, upload_id: upload?.id },
+      });
+      toast(`Draft created from sheet — ${r.line_count} staff, net ${ngn(r.total_net)} ✓`, 'ok');
+      onGenerated && onGenerated(r);
+    } catch (e) { setErr(e.message || 'Could not generate from sheet'); }
     setBusy(false);
   };
 
@@ -1073,13 +1103,16 @@ function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, on
     <div className="card" style={{ padding: '12px 14px', marginBottom: 10, borderLeft: '3px solid #6366f1' }}>
       <strong style={{ display: 'block', marginBottom: 2 }}>📤 Upload month-end sheet</strong>
       <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-        Store the accountant&apos;s Excel alongside the computed payroll — it is not merged into the run automatically.
+        Upload the accountant&apos;s Excel, compare with computed figures, then generate a draft payroll from the sheet for bank export.
       </span>
       {upload ? (
         <div style={{ marginTop: 8, fontSize: 12.5 }}>
           <b>{upload.file_name || 'Uploaded sheet'}</b>
           <span style={{ color: 'var(--muted)' }}> · {upload.line_count} lines · {new Date((upload.uploaded_at || 0) * 1000).toLocaleDateString()}</span>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 14px' }} onClick={generateFromSheet} disabled={busy}>
+              {busy ? <span className="spin" /> : '📋'} Generate payroll from sheet
+            </button>
             <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={remove} disabled={busy}>Remove</button>
           </div>
         </div>

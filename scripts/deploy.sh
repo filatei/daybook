@@ -55,9 +55,64 @@ HOST_PORT="${HOST_PORT:-8091}"
 docker image prune -f --filter "until=24h" >/dev/null 2>&1 || true
 
 # ── 4. Health check ───────────────────────────────────────────────────────────
+# HTTP 200 alone is not enough — another service on the wrong port (e.g. Torama
+# marketing on :8091) also returns 200. Require Daybook's /healthz JSON identity.
+verify_daybook_health() {
+  local url="http://127.0.0.1:${HOST_PORT}/healthz"
+  local tmp http_code body py_err
+
+  tmp="$(mktemp)"
+  if ! http_code="$(curl -sS -o "${tmp}" -w '%{http_code}' "${url}")"; then
+    echo "curl to ${url} failed (non-zero exit)"
+    rm -f "${tmp}"
+    return 1
+  fi
+  body="$(cat "${tmp}")"
+  rm -f "${tmp}"
+
+  if [ "${http_code}" != "200" ]; then
+    echo "HTTP ${http_code} from ${url} (expected 200)"
+    echo "response body: ${body}"
+    return 1
+  fi
+
+  py_err="$(printf '%s' "${body}" | python3 -c "
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except json.JSONDecodeError as e:
+    print(f'invalid JSON from /healthz: {e}')
+    preview = raw.strip().replace(chr(10), ' ')[:400]
+    print(f'body preview: {preview!r}')
+    sys.exit(1)
+svc = d.get('service')
+if svc != 'daybook':
+    print(f'expected JSON "service":"daybook", got service={svc!r}')
+    print(f'full body: {raw[:400]!r}')
+    sys.exit(1)
+st = d.get('status')
+if st != 'ok':
+    print(f'expected JSON "status":"ok", got status={st!r}')
+    sys.exit(1)
+" 2>&1)" || {
+    echo "${py_err}"
+    return 1
+  }
+  return 0
+}
+
 sleep 3
+LAST_ERR=""
 for i in $(seq 1 10); do
-  if curl -fsS "http://127.0.0.1:${HOST_PORT}/healthz" >/dev/null 2>&1; then ok "daybook healthy"; exit 0; fi
+  if LAST_ERR="$(verify_daybook_health 2>&1)"; then
+    ok "daybook healthy (service=daybook, status=ok on :${HOST_PORT})"
+    exit 0
+  fi
   sleep 2
 done
-die "daybook did not become healthy — check: docker logs daybook"
+die "daybook did not become healthy on http://127.0.0.1:${HOST_PORT}/healthz after 10 tries.
+[deploy] Last failure:
+${LAST_ERR}
+[deploy] Expected: HTTP 200 with JSON {"status":"ok","service":"daybook"}
+[deploy] Check DAYBOOK_HOST_PORT in .env and: docker logs daybook"

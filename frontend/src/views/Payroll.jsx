@@ -162,7 +162,7 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
 }
 
 // ── Run: compute + save a payroll ─────────────────────────────────────────────
-function RunTab({ sites, onSaved }) {
+function RunTab({ sites, onSaved, onShowSheetHistory }) {
   const { toast, openModal, closeModal, isGroup } = useStore();
   const fm = fullMonthWindow();
   const [from, setFrom] = useState(fm.from);
@@ -317,7 +317,8 @@ function RunTab({ sites, onSaved }) {
       <SheetUploadCard from={from} to={to} pieceOnly={pieceOnly} combined={combined} upload={sheetUpload}
         onUploaded={(r) => { setSheetUpload({ id: r.id, file_name: r.file_name || r.upload?.file_name, line_count: r.line_count, uploaded_at: Math.floor(Date.now() / 1000) }); }}
         onDeleted={() => { setSheetUpload(null); setComparison(null); }}
-        onGenerated={() => { onSaved && onSaved(); }} />
+        onGenerated={() => { onSaved && onSaved(); }}
+        onShowHistory={onShowSheetHistory} />
 
       {lines && sheetUpload && comparison && (
         <div className="card" style={{ padding: '10px 12px', marginBottom: 10, background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
@@ -1039,7 +1040,7 @@ function PayrollComparison({ from, to, pieceOnly, combined, onClose }) {
 }
 
 // Month-end sheet upload — store alongside computed payroll, or generate a draft run.
-function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, onDeleted, onGenerated }) {
+function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, onDeleted, onGenerated, onShowHistory }) {
   const { toast, confirm } = useStore();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -1124,6 +1125,144 @@ function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, on
         </label>
       )}
       {err && <div style={{ marginTop: 8, fontSize: 12, color: '#991b1b' }}>{err}</div>}
+      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 0', marginTop: 8, fontSize: 12 }}
+        onClick={() => onShowHistory && onShowHistory()}>View sheet upload history →</button>
+    </div>
+  );
+}
+
+// Past month-end workbook uploads — retained for audit and re-download.
+function SheetHistoryTab({ onOpenRun }) {
+  const { toast, isGroup } = useStore();
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [viewing, setViewing] = useState(null);
+  const [linesBusy, setLinesBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await api(scopedAny('/payroll/sheet-upload/history'));
+      setRows(r.uploads || []);
+    } catch (e) {
+      toast(e.message || 'Could not load sheet history', 'err');
+      setRows([]);
+    }
+    setLoading(false);
+  }, [toast]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const viewLines = async (id) => {
+    setLinesBusy(true);
+    try {
+      setViewing(await api(scopedAny(`/payroll/sheet-upload/${id}/lines`)));
+    } catch (e) { toast(e.message || 'Could not load lines', 'err'); }
+    setLinesBusy(false);
+  };
+
+  const statusPill = (u) => {
+    if (u.is_active) return { label: 'Active', bg: '#dcfce7', color: '#166534' };
+    if (u.status === 'DELETED') return { label: 'Removed', bg: '#fee2e2', color: '#991b1b' };
+    return { label: 'Superseded', bg: '#f3f4f6', color: '#4b5563' };
+  };
+
+  const fmtDate = (ts) => (ts ? new Date(ts * 1000).toLocaleString() : '—');
+  const fmtSize = (n) => {
+    if (!n) return '—';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 12px' }}>
+        Every month-end workbook uploaded for payroll is kept here. Re-uploading the same period marks the previous file as superseded but does not delete it.
+      </p>
+      {loading ? <div className="skel" /> : !rows.length ? (
+        <div className="empty"><div className="ic">📁</div><p>No sheet uploads yet</p></div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {rows.map((u) => {
+            const pill = statusPill(u);
+            return (
+              <div key={u.id} style={{ padding: '12px 14px', borderBottom: '1px solid var(--line)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontWeight: 700 }}>{u.file_name || 'Uploaded sheet'}</div>
+                    <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+                      {u.period_from} → {u.period_to}
+                      {u.kind === 'MIDMONTH' ? ' · mid-month' : ' · month-end'}
+                      {isGroup && u.tenant_name ? ` · ${u.tenant_name}` : ''}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2 }}>
+                      {fmtDate(u.uploaded_at)} · {u.uploaded_by_name || '—'} · {u.line_count || 0} lines · {fmtSize(u.file_size)}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: pill.bg, color: pill.color, alignSelf: 'flex-start' }}>
+                    {pill.label}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  {u.has_file ? (
+                    <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+                      onClick={() => downloadFile(scopedAny(`/payroll/sheet-upload/${u.id}/download`), u.file_name || 'payroll-sheet.xlsx').catch((e) => toast(e.message, 'err'))}>
+                      ⬇ Download
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: 11.5, color: 'var(--muted)', alignSelf: 'center' }}>File not stored</span>
+                  )}
+                  <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+                    onClick={() => viewLines(u.id)} disabled={linesBusy}>
+                    {linesBusy ? <span className="spin" /> : '👁'} View lines
+                  </button>
+                  {u.run_id && (
+                    <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+                      onClick={() => onOpenRun && onOpenRun(u)}>
+                      🧾 Run {u.run_status || 'DRAFT'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {viewing && (
+        <div onClick={() => setViewing(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+          <div className="card" onClick={(e) => e.stopPropagation()} style={{ width: 'min(720px, 100%)', maxHeight: '85vh', overflow: 'auto', padding: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+              <div>
+                <strong>{viewing.upload?.file_name || 'Sheet lines'}</strong>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                  {viewing.upload?.period_from} → {viewing.upload?.period_to} · net {ngn(viewing.totals?.net)}
+                </div>
+              </div>
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto' }} onClick={() => setViewing(null)}>Close</button>
+            </div>
+            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', borderBottom: '1px solid var(--line)' }}>
+                  <th style={{ padding: '6px 4px' }}>Name</th>
+                  <th style={{ padding: '6px 4px' }}>Kind</th>
+                  <th style={{ padding: '6px 4px', textAlign: 'right' }}>Net</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(viewing.lines || []).map((l) => (
+                  <tr key={l.id} style={{ borderBottom: '1px solid var(--line)' }}>
+                    <td style={{ padding: '6px 4px' }}>{l.name || '—'}</td>
+                    <td style={{ padding: '6px 4px', color: 'var(--muted)' }}>{l.sheet_kind || '—'}</td>
+                    <td style={{ padding: '6px 4px', textAlign: 'right', fontWeight: 700 }}>{ngn(l.net)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1654,12 +1793,14 @@ export default function Payroll() {
         <button className={`seg-b${tab === 'runs' ? ' on' : ''}`} onClick={() => setTab('runs')}>🧾 Saved</button>
         <button className={`seg-b${tab === 'setup' ? ' on' : ''}`} onClick={() => setTab('setup')}>⚙️ Rates</button>
         <button className={`seg-b${tab === 'history' ? ' on' : ''}`} onClick={() => setTab('history')}>📜 History</button>
+        <button className={`seg-b${tab === 'sheets' ? ' on' : ''}`} onClick={() => setTab('sheets')}>📁 Sheet history</button>
       </div>
 
-      {tab === 'run' ? <RunTab sites={sites} onSaved={() => setTab('runs')} />
+      {tab === 'run' ? <RunTab sites={sites} onSaved={() => setTab('runs')} onShowSheetHistory={() => setTab('sheets')} />
         : tab === 'mid' ? <MidMonthTab onSaved={() => setTab('runs')} />
         : tab === 'runs' ? <RunsTab />
           : tab === 'setup' ? <SetupTab sites={sites} />
+            : tab === 'sheets' ? <SheetHistoryTab onOpenRun={() => setTab('runs')} />
             : !summary || !(summary.byMonth || []).length ? (
               <div className="empty"><div className="ic">📜</div><p>No imported payroll history</p></div>
             ) : (

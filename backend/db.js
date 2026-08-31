@@ -1766,6 +1766,9 @@ async function migrate() {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_psheet_active_period
       ON payroll_sheet_uploads(tenant_id, period_from, period_to, kind)
       WHERE is_active = 1;
+    ALTER TABLE payroll_sheet_uploads ADD COLUMN IF NOT EXISTS stored_path TEXT;
+    ALTER TABLE payroll_sheet_uploads ADD COLUMN IF NOT EXISTS file_size BIGINT;
+    ALTER TABLE payroll_sheet_uploads ADD COLUMN IF NOT EXISTS content_type TEXT;
   `);
 }
 

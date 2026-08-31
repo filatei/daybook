@@ -11,12 +11,17 @@
 'use strict';
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const XLSX = require('xlsx');
 const multer = require('multer');
 const { v4: uuid } = require('uuid');
 
-// In-memory upload for the payroll Excel import (parsed, never written to disk).
+// Parsed in memory, then the original workbook is written under PAYROLL_SHEET_DIR.
 const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
+const PAYROLL_SHEET_DIR = process.env.PAYROLL_SHEET_DIR || path.join(__dirname, '../data/payroll-sheets');
+const SHEET_EXT_OK = new Set(['.xls', '.xlsx']);
+fs.mkdirSync(PAYROLL_SHEET_DIR, { recursive: true });
 const { qone, qall, qrun, withTransaction, clientQ } = require('./db');
 const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
 const {
@@ -3244,6 +3249,40 @@ async function sheetUploadFor(c, uploadId) {
     [uploadId, ...ids]);
 }
 
+function payrollSheetStorageKey(tenantId, periodFrom, periodTo, kind, uploadId, originalName) {
+  const ext = path.extname(originalName || '').toLowerCase();
+  const safeExt = SHEET_EXT_OK.has(ext) ? ext : '.xlsx';
+  const period = `${periodFrom}_${periodTo}`.replace(/[^0-9_-]/g, '');
+  const k = String(kind || 'REGULAR').replace(/[^A-Z0-9_-]/gi, '');
+  return path.join(tenantId, period, `${k}_${uploadId}${safeExt}`);
+}
+
+function savePayrollSheetFile(buffer, tenantId, periodFrom, periodTo, kind, uploadId, originalName, mime) {
+  const rel = payrollSheetStorageKey(tenantId, periodFrom, periodTo, kind, uploadId, originalName);
+  const abs = path.join(PAYROLL_SHEET_DIR, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, buffer);
+  return {
+    stored_path: rel,
+    file_size: buffer.length,
+    content_type: mime || (rel.endsWith('.xls') ? 'application/vnd.ms-excel' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+  };
+}
+
+function resolvePayrollSheetPath(storedPath) {
+  if (!storedPath || storedPath.includes('..') || path.isAbsolute(storedPath)) return null;
+  const resolved = path.resolve(PAYROLL_SHEET_DIR, storedPath);
+  const base = path.resolve(PAYROLL_SHEET_DIR) + path.sep;
+  if (!resolved.startsWith(base)) return null;
+  return resolved;
+}
+
+function removePayrollSheetFile(storedPath) {
+  const p = resolvePayrollSheetPath(storedPath);
+  if (!p) return;
+  try { fs.unlinkSync(p); } catch { /* already gone */ }
+}
+
 function payrollKindFromPieceOnly(pieceOnly) {
   return pieceOnly ? SHEET_KIND_MIDMONTH : SHEET_KIND_REGULAR;
 }
@@ -3316,6 +3355,13 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
 
   const uploadId = uuid();
   const scopeTenants = ctxTenants(c);
+  let fileMeta;
+  try {
+    fileMeta = savePayrollSheetFile(req.file.buffer, c.tenant_id, parsed.period_from, parsed.period_to,
+      parsed.kind, uploadId, req.file.originalname, req.file.mimetype);
+  } catch (e) {
+    return res.status(500).json({ error: `Could not store file: ${e.message}` });
+  }
   try {
     await withTransaction(async (client) => {
       const tx = clientQ(client);
@@ -3325,10 +3371,11 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
       [...scopeTenants, parsed.period_from, parsed.period_to, parsed.kind]);
 
       await tx.qrun(`INSERT INTO payroll_sheet_uploads
-        (id, tenant_id, period_from, period_to, kind, file_name, uploaded_by, uploaded_at, status, is_active, line_count)
-        VALUES (?,?,?,?,?,?,?,?, 'ACTIVE', 1, ?)`,
+        (id, tenant_id, period_from, period_to, kind, file_name, uploaded_by, uploaded_at, status, is_active, line_count, stored_path, file_size, content_type)
+        VALUES (?,?,?,?,?,?,?,?, 'ACTIVE', 1, ?, ?, ?, ?)`,
       [uploadId, c.tenant_id, parsed.period_from, parsed.period_to, parsed.kind,
-        req.file.originalname || null, req.user.id, nowS(), parsed.line_count]);
+        req.file.originalname || null, req.user.id, nowS(), parsed.line_count,
+        fileMeta.stored_path, fileMeta.file_size, fileMeta.content_type]);
 
       for (const l of parsed.lines) {
         await tx.qrun(`INSERT INTO payroll_sheet_lines
@@ -3339,6 +3386,7 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
       }
     });
   } catch (e) {
+    removePayrollSheetFile(fileMeta.stored_path);
     return res.status(500).json({ error: `Upload failed: ${e.message}` });
   }
 
@@ -3360,6 +3408,80 @@ router.get('/sheet-upload', requireAuth, async (req, res) => {
     deduction: r2(lines.reduce((a, l) => a + (l.deduction || 0), 0)),
     net: r2(lines.reduce((a, l) => a + (l.net || 0), 0)),
   } });
+});
+
+router.get('/sheet-upload/history', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const ids = ctxTenants(c);
+  const ph = ids.map(() => '?').join(',');
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '200', 10) || 200, 1), 500);
+  const rows = await qall(
+    `SELECT u.*, usr.name AS uploaded_by_name,
+            pr.id AS run_id, pr.status AS run_status, pr.pay_source AS run_pay_source,
+            t.name AS tenant_name
+       FROM payroll_sheet_uploads u
+       LEFT JOIN users usr ON usr.id = u.uploaded_by
+       LEFT JOIN tenants t ON t.id = u.tenant_id
+       LEFT JOIN LATERAL (
+         SELECT id, status, pay_source FROM pay_runs
+          WHERE sheet_upload_id = u.id
+          ORDER BY created_at DESC LIMIT 1
+       ) pr ON TRUE
+      WHERE u.tenant_id IN (${ph})
+      ORDER BY u.uploaded_at DESC
+      LIMIT ${limit}`,
+    ids,
+  );
+  res.json({
+    uploads: rows.map((u) => ({
+      id: u.id,
+      tenant_id: u.tenant_id,
+      tenant_name: u.tenant_name,
+      period_from: u.period_from,
+      period_to: u.period_to,
+      kind: u.kind,
+      file_name: u.file_name,
+      uploaded_by: u.uploaded_by,
+      uploaded_by_name: u.uploaded_by_name,
+      uploaded_at: u.uploaded_at,
+      status: u.status,
+      is_active: !!u.is_active,
+      line_count: u.line_count,
+      file_size: u.file_size,
+      has_file: !!(u.stored_path),
+      run_id: u.run_id || null,
+      run_status: u.run_status || null,
+      run_pay_source: u.run_pay_source || null,
+    })),
+  });
+});
+
+router.get('/sheet-upload/:id/lines', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const upload = await sheetUploadFor(c, req.params.id);
+  if (!upload) return res.status(404).json({ error: 'not found' });
+  const lines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=? ORDER BY name', [upload.id]);
+  res.json({
+    upload,
+    lines,
+    totals: {
+      gross: r2(lines.reduce((a, l) => a + (l.gross || 0), 0)),
+      deduction: r2(lines.reduce((a, l) => a + (l.deduction || 0), 0)),
+      net: r2(lines.reduce((a, l) => a + (l.net || 0), 0)),
+    },
+  });
+});
+
+router.get('/sheet-upload/:id/download', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const upload = await sheetUploadFor(c, req.params.id);
+  if (!upload) return res.status(404).json({ error: 'not found' });
+  if (!upload.stored_path) {
+    return res.status(404).json({ error: 'file not stored — uploaded before file retention was enabled' });
+  }
+  const p = resolvePayrollSheetPath(upload.stored_path);
+  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'file not found on server' });
+  return res.download(p, upload.file_name || path.basename(p));
 });
 
 router.delete('/sheet-upload/:id', requireAuth, async (req, res) => {

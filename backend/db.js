@@ -1721,6 +1721,49 @@ async function migrate() {
   } catch (e) {
     console.warn('[db] staff name unique index skipped (existing duplicates):', e.message);
   }
+
+  // ── Month-end payroll sheet uploads (side-by-side with computed payroll) ────
+  // Stored independently from pay_runs — the accountant's workbook is reference,
+  // not silently merged into the computed run.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS payroll_sheet_uploads (
+      id           TEXT PRIMARY KEY,
+      tenant_id    TEXT NOT NULL REFERENCES tenants(id),
+      period_from  TEXT NOT NULL,
+      period_to    TEXT NOT NULL,
+      kind         TEXT NOT NULL DEFAULT 'REGULAR',
+      file_name    TEXT,
+      uploaded_by  TEXT,
+      uploaded_at  BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+      status       TEXT DEFAULT 'ACTIVE',
+      is_active    INTEGER DEFAULT 1,
+      line_count   INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS payroll_sheet_lines (
+      id            TEXT PRIMARY KEY,
+      upload_id     TEXT NOT NULL REFERENCES payroll_sheet_uploads(id) ON DELETE CASCADE,
+      tenant_id     TEXT,
+      staff_id      TEXT REFERENCES staff(id) ON DELETE SET NULL,
+      ext_people_id TEXT,
+      name          TEXT,
+      days          DOUBLE PRECISION DEFAULT 0,
+      loaded        DOUBLE PRECISION DEFAULT 0,
+      bagged        DOUBLE PRECISION DEFAULT 0,
+      base_salary   DOUBLE PRECISION DEFAULT 0,
+      gross         DOUBLE PRECISION DEFAULT 0,
+      deduction     DOUBLE PRECISION DEFAULT 0,
+      net           DOUBLE PRECISION DEFAULT 0,
+      sheet_kind    TEXT,
+      sheet_row     TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_psheet_upload_period ON payroll_sheet_uploads(period_from, period_to, kind);
+    CREATE INDEX IF NOT EXISTS idx_psheet_upload_tenant ON payroll_sheet_uploads(tenant_id, is_active);
+    CREATE INDEX IF NOT EXISTS idx_psheet_lines_upload ON payroll_sheet_lines(upload_id);
+    CREATE INDEX IF NOT EXISTS idx_psheet_lines_staff ON payroll_sheet_lines(staff_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_psheet_active_period
+      ON payroll_sheet_uploads(tenant_id, period_from, period_to, kind)
+      WHERE is_active = 1;
+  `);
 }
 
 module.exports = { initDb, getDb, pq, qone, qall, qrun, qexec, withTransaction, clientQ };

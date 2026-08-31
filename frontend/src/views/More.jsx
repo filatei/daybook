@@ -54,7 +54,7 @@ export default function More() {
 
     { id: 'staff',      group: 'People', icon: '👷', label: 'Staff',      desc: 'Clock-in, badge & face, attendance',        show: isSec },
     { id: 'badges',     group: 'People', icon: '🪪', label: 'Staff Badges', desc: 'Design & print scannable ID badges',        show: isSec },
-    { id: 'payroll',    group: 'People', icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isAcct },
+    { id: 'payroll',    group: 'People', icon: '💰', label: 'Payroll',    desc: 'Pay runs, rates & imported history',       show: isSnr },
 
     { id: 'profit',       group: 'Finance', icon: '📈', label: 'Profit & Loss', desc: 'Revenue − expenses by site & period',      show: isMgr },
     { id: 'eod',          group: 'Finance', icon: '🧾', label: 'End-of-day POS', desc: 'Photograph each terminal’s EOD slip — totals & variance', show: isSec },

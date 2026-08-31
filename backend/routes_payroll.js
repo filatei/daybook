@@ -986,10 +986,14 @@ router.post('/compute2', requireAuth, async (req, res) => {
     const group = await payrollGroup(req.user, c.tenant_id, c);
     const siteId = siteBound(c) ? c.site_id : (site || null);
     const lines = await computeCombinedLines(group, from, to, rates, pieceOnly, siteId);
-    return res.json({ from, to, combined: true, piece_only: pieceOnly, site: siteId, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+    const runKind = payrollKindFromPieceOnly(pieceOnly);
+    const sheetUpload = await activeSheetUpload(ctxTenants(c), from, to, runKind);
+    return res.json({ from, to, combined: true, piece_only: pieceOnly, site: siteId, tenants: group, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), sheet_upload: sheetUpload, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
   }
   const lines = await computeLines(c.tenant_id, from, to, site || null, rates, pieceOnly);
-  res.json({ from, to, piece_only: pieceOnly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
+  const runKind = payrollKindFromPieceOnly(pieceOnly);
+  const sheetUpload = await activeSheetUpload(ctxTenants(c), from, to, runKind);
+  res.json({ from, to, piece_only: pieceOnly, rates, lines, override: await overrideForPeriod(from, to, pieceOnly ? 'MIDMONTH' : 'MONTHEND'), sheet_upload: sheetUpload, total: round2(lines.reduce((a, l) => a + l.gross, 0)) });
 });
 
 // ── Excel template download (Fido-shaped: REGULAR / BAGGERS / LOADERS) ─────────
@@ -1268,8 +1272,15 @@ router.post('/runs2', requireAuth, async (req, res) => {
 router.get('/runs2', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const sc = scopeSql(c, 'r.tenant_id');   // Group roll-up sees every workspace's runs
-  res.json(await qall(`SELECT r.*, s.name site_name FROM pay_runs r LEFT JOIN sites s ON s.id=r.site_id
-    WHERE ${sc.sql} ORDER BY r.created_at DESC LIMIT 100`, sc.args));
+  const ids = ctxTenants(c);
+  const upPh = ids.map(() => '?').join(',');
+  res.json(await qall(`SELECT r.*, s.name site_name,
+      (SELECT u.id FROM payroll_sheet_uploads u
+        WHERE u.tenant_id IN (${upPh}) AND u.period_from=r.period_from AND u.period_to=r.period_to
+          AND u.kind=COALESCE(r.kind,'REGULAR') AND u.is_active=1
+        ORDER BY u.uploaded_at DESC LIMIT 1) sheet_upload_id
+    FROM pay_runs r LEFT JOIN sites s ON s.id=r.site_id
+    WHERE ${sc.sql} ORDER BY r.created_at DESC LIMIT 100`, [...ids, ...sc.args]));
 });
 router.get('/runs2/:id', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
@@ -2915,6 +2926,359 @@ router.delete('/production-override/:id', requireAuth, async (req, res) => {
   await audit(c.tenant_id, req.user.id, 'override.delete', 'production_override_batch', req.params.id,
     { period: `${b.period_from}..${b.period_to}`, kind: b.kind });
   res.json({ ok: true });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MONTH-END PAYROLL SHEET UPLOAD (side-by-side with computed payroll)
+// SNR_ACCOUNTANT+ can upload without Admin enabling sheet_override_enabled.
+// Stored independently — does not mutate pay_runs or production.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const SHEET_KIND_REGULAR = 'REGULAR';
+const SHEET_KIND_MIDMONTH = 'MIDMONTH';
+
+// Shared Excel helpers (also used by production-override above).
+const xlsNorm = (k) => String(k || '').trim().toUpperCase();
+const xlsNum = (v) => {
+  if (v == null || v === '') return null;
+  const n = parseFloat(String(v).replace(/[, ₦]/g, ''));
+  return isNaN(n) ? null : n;
+};
+const xlsGet = (row, names) => {
+  for (const k of Object.keys(row)) if (names.includes(xlsNorm(k))) return row[k];
+  return undefined;
+};
+
+function buildStaffLookup(staff) {
+  const byExt = {};
+  const byName = {};
+  for (const s of staff) {
+    const e = s.ext_people_id == null ? '' : String(s.ext_people_id).replace(/\.0$/, '').trim();
+    if (e) byExt[e] = (e in byExt) ? null : s;
+    const n = nameKey(s.full_name);
+    if (n) byName[n] = (n in byName) ? null : s;
+  }
+  return { byExt, byName };
+}
+
+function matchStaffRow(ext, full, byExt, byName) {
+  const nk = nameKey(full);
+  if (ext && byExt[ext] === null) return { staff: null, reason: `ID ${ext} belongs to more than one staff record` };
+  if (!byExt[ext] && nk && byName[nk] === null) return { staff: null, reason: 'name matches more than one staff record' };
+  const st = (ext && byExt[ext]) || (nk ? byName[nk] : null);
+  if (!st) return { staff: null, reason: ext ? `no staff with ID ${ext}` : 'name not on the roster' };
+  return { staff: st, reason: null };
+}
+
+// Parse REGULAR / BAGGERS / LOADERS from a month-end workbook. Returns sheet
+// values as-is — no staff updates, no pay_run mutations.
+function parsePayrollSheetWorkbook(wb, staff, body = {}) {
+  const { byExt, byName } = buildStaffLookup(staff);
+  let pFrom = null;
+  let pTo = null;
+  let sheetKind = null;
+  let mixedPeriod = null;
+  const lines = [];
+  const unmatched = [];
+
+  const readSheet = (sheetName, sheetKindName) => {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' });
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      const ext = String(xlsGet(row, ['ID', 'STAFF ID', 'EXT ID']) ?? '').replace(/\.0$/, '').trim();
+      const full = [xlsGet(row, ['FIRST NAME']), xlsGet(row, ['MIDDLE NAME']), xlsGet(row, ['LAST NAME'])]
+        .map((x) => String(x ?? '').trim()).filter(Boolean).join(' ');
+      if (/^total$/i.test(full) || (!ext && !full)) continue;
+      if (/HIRED/i.test(full)) continue;
+
+      const rFrom = asDate(xlsGet(row, ['PAY START DATE', 'PERIOD FROM', 'FROM']));
+      const rTo = asDate(xlsGet(row, ['PAY END DATE', 'PERIOD TO', 'TO']));
+      if (rFrom && rTo) {
+        if (pFrom && (rFrom !== pFrom || rTo !== pTo)) mixedPeriod = `${rFrom}..${rTo} vs ${pFrom}..${pTo}`;
+        pFrom = pFrom || rFrom;
+        pTo = pTo || rTo;
+      }
+      const pt = String(xlsGet(row, ['PAY TYPE', 'TYPE']) ?? '').trim().toUpperCase().replace(/[^A-Z]/g, '');
+      if (!sheetKind && pt) sheetKind = pt.startsWith('MIDMONTH') ? SHEET_KIND_MIDMONTH : (pt.startsWith('MONTHEND') ? 'MONTHEND' : null);
+
+      const ded = xlsNum(xlsGet(row, ['DEDUCTION', 'SALARY ADV', 'ADVANCE'])) || 0;
+      let days = 0;
+      let loaded = 0;
+      let bagged = 0;
+      let baseSalary = 0;
+      let gross = 0;
+      let net = 0;
+
+      if (sheetKindName === 'REGULAR') {
+        days = xlsNum(xlsGet(row, ['DAYS WORKED', 'DAYS'])) || 0;
+        baseSalary = xlsNum(xlsGet(row, ['BASE SALARY', 'MONTHLY SALARY', 'SALARY'])) || 0;
+        net = xlsNum(xlsGet(row, ['NET SALARY', 'NET PAY', 'NET'])) || 0;
+        gross = xlsNum(xlsGet(row, ['GROSS', 'GROSS PAY'])) || (net + ded);
+      } else if (sheetKindName === 'BAGGERS') {
+        bagged = xlsNum(xlsGet(row, ['QTY', 'BAGS BAGGED', 'BAGGED'])) || 0;
+        gross = xlsNum(xlsGet(row, ['COMMISSION', 'GROSS', 'NET PAY (COMMISSION)'])) || 0;
+        net = xlsNum(xlsGet(row, ['NET PAY (COMMISSION)', 'NET', 'NET PAY'])) || Math.max(0, gross - ded);
+        if (!gross && net) gross = net + ded;
+      } else {
+        loaded = xlsNum(xlsGet(row, ['BAGS LOADED', 'QTY', 'LOADED'])) || 0;
+        gross = xlsNum(xlsGet(row, ['NET PAY (COMMISSION)', 'COMMISSION', 'GROSS'])) || 0;
+        net = xlsNum(xlsGet(row, ['NET', 'NET PAY'])) || Math.max(0, gross - ded);
+        if (!gross && net) gross = net + ded;
+      }
+
+      const hasPay = gross > 0 || net > 0 || days > 0 || loaded > 0 || bagged > 0;
+      if (!hasPay) continue;
+
+      const { staff: st, reason } = matchStaffRow(ext, full, byExt, byName);
+      const sheetRow = `${sheetName}:${i + 2}`;
+      if (!st) {
+        unmatched.push({ ext_id: ext || null, full_name: full || null, sheet_kind: sheetKindName, reason, sheet_row: sheetRow });
+        lines.push({
+          staff_id: null, tenant_id: null, ext_people_id: ext || null, name: full || null,
+          days, loaded, bagged, base_salary: baseSalary, gross: r2(gross), deduction: r2(ded), net: r2(net),
+          sheet_kind: sheetKindName, sheet_row: sheetRow, unmatched: true,
+        });
+        continue;
+      }
+      lines.push({
+        staff_id: st.id, tenant_id: st.tenant_id, ext_people_id: st.ext_people_id || ext || null,
+        name: st.full_name || full, days, loaded, bagged, base_salary: baseSalary,
+        gross: r2(gross), deduction: r2(ded), net: r2(net), sheet_kind: sheetKindName, sheet_row: sheetRow,
+      });
+    }
+  };
+
+  for (const kind of ['REGULAR', 'BAGGERS', 'LOADERS']) {
+    const name = Object.keys(wb.Sheets).find((n) => xlsNorm(n) === kind);
+    if (name) readSheet(name, kind);
+  }
+  if (!lines.length) return { error: 'no REGULAR, BAGGERS or LOADERS sheet found in that file' };
+  if (mixedPeriod) return { error: `the sheet covers more than one pay period (${mixedPeriod}) — split it and upload one period at a time` };
+
+  if (!pFrom || !pTo) {
+    pFrom = pFrom || asDate(body.period_from);
+    pTo = pTo || asDate(body.period_to);
+  }
+  if (!pFrom || !pTo) return { error: 'could not read the pay period — use a sheet with PAY START DATE / PAY END DATE, or send period_from and period_to' };
+  if (pFrom > pTo) return { error: 'the pay period starts after it ends' };
+
+  const kindIn = String(body.kind || '').toUpperCase();
+  const asked = kindIn === 'MONTHEND' || kindIn === 'MIDMONTH' ? kindIn : (kindIn === SHEET_KIND_MIDMONTH ? 'MIDMONTH' : (kindIn === SHEET_KIND_REGULAR ? 'MONTHEND' : null));
+  if (asked && sheetKind && asked !== sheetKind) {
+    return { error: `the sheet says ${sheetKind}, but the upload asked for ${asked}` };
+  }
+  const runKind = sheetKind === 'MIDMONTH' ? SHEET_KIND_MIDMONTH : (asked === 'MIDMONTH' ? SHEET_KIND_MIDMONTH : SHEET_KIND_REGULAR);
+
+  return {
+    period_from: pFrom, period_to: pTo, kind: runKind, lines, unmatched,
+    matched: lines.filter((l) => l.staff_id).length,
+    line_count: lines.length,
+    totals: {
+      gross: r2(lines.reduce((a, l) => a + (l.gross || 0), 0)),
+      deduction: r2(lines.reduce((a, l) => a + (l.deduction || 0), 0)),
+      net: r2(lines.reduce((a, l) => a + (l.net || 0), 0)),
+    },
+  };
+}
+
+async function activeSheetUpload(tenantIds, periodFrom, periodTo, kind) {
+  const ph = tenantIds.map(() => '?').join(',');
+  return qone(`SELECT * FROM payroll_sheet_uploads
+    WHERE tenant_id IN (${ph}) AND period_from=? AND period_to=? AND kind=? AND is_active=1
+    ORDER BY uploaded_at DESC LIMIT 1`, [...tenantIds, periodFrom, periodTo, kind]);
+}
+
+async function sheetUploadFor(c, uploadId) {
+  const ids = ctxTenants(c);
+  return qone(`SELECT * FROM payroll_sheet_uploads WHERE id=? AND tenant_id IN (${ids.map(() => '?').join(',')})`,
+    [uploadId, ...ids]);
+}
+
+function payrollKindFromPieceOnly(pieceOnly) {
+  return pieceOnly ? SHEET_KIND_MIDMONTH : SHEET_KIND_REGULAR;
+}
+
+function comparePayrollLines(computed, uploaded) {
+  const byStaff = new Map();
+  const byExt = new Map();
+  for (const l of computed || []) {
+    if (l.staff_id) byStaff.set(l.staff_id, l);
+    const ext = l.ext_people_id == null ? '' : String(l.ext_people_id).replace(/\.0$/, '').trim();
+    if (ext) byExt.set(ext, l);
+  }
+
+  const seen = new Set();
+  const diffs = [];
+  const addDiff = (computedLine, uploadedLine, source) => {
+    const key = computedLine?.staff_id || uploadedLine?.staff_id || `ext:${uploadedLine?.ext_people_id || computedLine?.ext_people_id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const cNet = round2(computedLine?.net ?? computedLine?.gross ?? 0);
+    const uNet = round2(uploadedLine?.net ?? 0);
+    const delta = round2(uNet - cNet);
+    let presence = 'both';
+    if (!computedLine) presence = 'uploaded';
+    else if (!uploadedLine) presence = 'computed';
+    diffs.push({
+      staff_id: computedLine?.staff_id || uploadedLine?.staff_id || null,
+      ext_people_id: uploadedLine?.ext_people_id || computedLine?.ext_people_id || null,
+      name: uploadedLine?.name || computedLine?.full_name || computedLine?.staff_name || '—',
+      computed_net: cNet,
+      uploaded_net: uNet,
+      delta,
+      presence,
+      source,
+    });
+  };
+
+  for (const u of uploaded || []) {
+    const c = (u.staff_id && byStaff.get(u.staff_id))
+      || (u.ext_people_id && byExt.get(String(u.ext_people_id).replace(/\.0$/, '').trim()))
+      || null;
+    addDiff(c, u, 'uploaded');
+  }
+  for (const c of computed || []) {
+    const ext = c.ext_people_id == null ? '' : String(c.ext_people_id).replace(/\.0$/, '').trim();
+    const matched = uploaded?.some((u) => (u.staff_id && u.staff_id === c.staff_id)
+      || (ext && u.ext_people_id && String(u.ext_people_id).replace(/\.0$/, '').trim() === ext));
+    if (!matched) addDiff(c, null, 'computed');
+  }
+  diffs.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return diffs;
+}
+
+router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  if (!req.file) return res.status(400).json({ error: 'no file uploaded' });
+  let wb;
+  try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
+
+  const tenants = await payrollGroup(req.user, c.tenant_id, c);
+  if (!tenants.length) return res.status(400).json({ error: 'no active workspaces' });
+  const ph = tenants.map(() => '?').join(',');
+  const staff = await qall(`SELECT s.id, s.tenant_id, s.full_name, s.ext_people_id FROM staff s WHERE s.tenant_id IN (${ph})`, tenants);
+
+  const parsed = parsePayrollSheetWorkbook(wb, staff, req.body || {});
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+
+  const dryRun = String(req.body?.dry_run || '') === '1' || req.body?.dry_run === true;
+  if (dryRun) return res.json({ dry_run: true, file_name: req.file.originalname, ...parsed });
+
+  const uploadId = uuid();
+  const scopeTenants = ctxTenants(c);
+  try {
+    await withTransaction(async (client) => {
+      const tx = clientQ(client);
+      const deactivatePh = scopeTenants.map(() => '?').join(',');
+      await tx.qrun(`UPDATE payroll_sheet_uploads SET is_active=0, status='SUPERSEDED'
+        WHERE tenant_id IN (${deactivatePh}) AND period_from=? AND period_to=? AND kind=? AND is_active=1`,
+      [...scopeTenants, parsed.period_from, parsed.period_to, parsed.kind]);
+
+      await tx.qrun(`INSERT INTO payroll_sheet_uploads
+        (id, tenant_id, period_from, period_to, kind, file_name, uploaded_by, uploaded_at, status, is_active, line_count)
+        VALUES (?,?,?,?,?,?,?,?, 'ACTIVE', 1, ?)`,
+      [uploadId, c.tenant_id, parsed.period_from, parsed.period_to, parsed.kind,
+        req.file.originalname || null, req.user.id, nowS(), parsed.line_count]);
+
+      for (const l of parsed.lines) {
+        await tx.qrun(`INSERT INTO payroll_sheet_lines
+          (id, upload_id, tenant_id, staff_id, ext_people_id, name, days, loaded, bagged, base_salary, gross, deduction, net, sheet_kind, sheet_row)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), uploadId, l.tenant_id, l.staff_id, l.ext_people_id, l.name,
+          l.days, l.loaded, l.bagged, l.base_salary, l.gross, l.deduction, l.net, l.sheet_kind, l.sheet_row]);
+      }
+    });
+  } catch (e) {
+    return res.status(500).json({ error: `Upload failed: ${e.message}` });
+  }
+
+  await audit(c.tenant_id, req.user.id, 'sheet.upload', 'payroll_sheet_uploads', uploadId,
+    { period: `${parsed.period_from}..${parsed.period_to}`, kind: parsed.kind, lines: parsed.line_count });
+  res.status(201).json({ id: uploadId, file_name: req.file.originalname, ...parsed });
+});
+
+router.get('/sheet-upload', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const { period_from: pFrom, period_to: pTo, kind } = req.query;
+  if (!pFrom || !pTo) return res.status(400).json({ error: 'period_from and period_to required' });
+  const runKind = kind === SHEET_KIND_MIDMONTH || kind === 'MIDMONTH' ? SHEET_KIND_MIDMONTH : SHEET_KIND_REGULAR;
+  const upload = await activeSheetUpload(ctxTenants(c), pFrom, pTo, runKind);
+  if (!upload) return res.json({ upload: null, lines: [] });
+  const lines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=? ORDER BY name', [upload.id]);
+  res.json({ upload, lines, totals: {
+    gross: r2(lines.reduce((a, l) => a + (l.gross || 0), 0)),
+    deduction: r2(lines.reduce((a, l) => a + (l.deduction || 0), 0)),
+    net: r2(lines.reduce((a, l) => a + (l.net || 0), 0)),
+  } });
+});
+
+router.delete('/sheet-upload/:id', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const upload = await sheetUploadFor(c, req.params.id);
+  if (!upload) return res.status(404).json({ error: 'not found' });
+  await qrun('UPDATE payroll_sheet_uploads SET is_active=0, status=? WHERE id=?', ['DELETED', upload.id]);
+  await audit(c.tenant_id, req.user.id, 'sheet.delete', 'payroll_sheet_uploads', upload.id,
+    { period: `${upload.period_from}..${upload.period_to}`, kind: upload.kind });
+  res.json({ ok: true });
+});
+
+router.get('/compare', requireAuth, async (req, res) => {
+  const c = await needCtx(req, res); if (!c) return;
+  const { period_from: pFrom, period_to: pTo, kind, combined, site, piece_only } = req.query;
+  if (!pFrom || !pTo) return res.status(400).json({ error: 'period_from and period_to required' });
+  const pieceOnly = piece_only === '1' || piece_only === 'true';
+  const runKind = kind === SHEET_KIND_MIDMONTH || kind === 'MIDMONTH' ? SHEET_KIND_MIDMONTH : SHEET_KIND_REGULAR;
+  const rates = await getBagRates(pieceOnly ? 'MIDMONTH' : 'MONTHEND');
+  const isCombined = combined === '1' || combined === 'true' || c.group;
+  const siteId = siteBound(c) ? c.site_id : (site || null);
+
+  const computed = isCombined
+    ? await computeCombinedLines(await payrollGroup(req.user, c.tenant_id, c), pFrom, pTo, rates, pieceOnly, siteId)
+    : await computeLines(c.tenant_id, pFrom, pTo, siteId, rates, pieceOnly);
+
+  const staffIds = (computed || []).map((l) => l.staff_id).filter(Boolean);
+  const extByStaff = {};
+  if (staffIds.length) {
+    const ph = staffIds.map(() => '?').join(',');
+    for (const s of await qall(`SELECT id, ext_people_id FROM staff WHERE id IN (${ph})`, staffIds)) {
+      extByStaff[s.id] = s.ext_people_id;
+    }
+  }
+
+  const computedLines = (computed || []).map((l) => ({
+    staff_id: l.staff_id,
+    ext_people_id: extByStaff[l.staff_id] || null,
+    full_name: l.full_name,
+    gross: l.gross,
+    net: round2(Math.max(0, (l.gross || 0) - (l.advance || 0))),
+    deduction: l.advance || 0,
+  }));
+
+  const upload = await activeSheetUpload(ctxTenants(c), pFrom, pTo, runKind);
+  const uploaded = upload
+    ? await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=? ORDER BY name', [upload.id])
+    : [];
+
+  const diffs = comparePayrollLines(computedLines, uploaded);
+  res.json({
+    period_from: pFrom,
+    period_to: pTo,
+    kind: runKind,
+    upload,
+    computed: computedLines,
+    uploaded,
+    diffs,
+    totals: {
+      computed: {
+        gross: round2(computedLines.reduce((a, l) => a + (l.gross || 0), 0)),
+        net: round2(computedLines.reduce((a, l) => a + (l.net || 0), 0)),
+      },
+      uploaded: upload ? {
+        gross: r2(uploaded.reduce((a, l) => a + (l.gross || 0), 0)),
+        net: r2(uploaded.reduce((a, l) => a + (l.net || 0), 0)),
+      } : null,
+    },
+  });
 });
 
 // Send the mid-month draft + Fido CSV to the accountants — on request, never

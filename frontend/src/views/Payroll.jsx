@@ -176,6 +176,9 @@ function RunTab({ sites, onSaved }) {
   // The override batch behind this period, if any — shown as a banner so the run
   // cannot be approved without knowing the bags came from a spreadsheet.
   const [override, setOverride] = useState(null);
+  const [sheetUpload, setSheetUpload] = useState(null);
+  const [comparison, setComparison] = useState(null);
+  const [showComparison, setShowComparison] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showOthers, setShowOthers] = useState(false);
   const [q, setQ] = useState('');
@@ -190,19 +193,39 @@ function RunTab({ sites, onSaved }) {
     // month = 28th prev → 27th, everyone, ₦6/bag full commission
     const w = kind === 'mid' ? midMonthWindow() : fullMonthWindow();
     setFrom(w.from); setTo(w.to); setPieceOnly(kind === 'mid');
-    setLines(null); setOverride(null); // stale result would still show the old staff mix and rate
+    setLines(null); setOverride(null); setSheetUpload(null); setComparison(null);
   };
+  const fetchSheetUpload = useCallback(async (f, t, mid) => {
+    if (!f || !t || mid) { setSheetUpload(null); return; }
+    try {
+      const p = new URLSearchParams({ period_from: f, period_to: t, kind: 'REGULAR' });
+      const r = await api(scopedAny(`/payroll/sheet-upload?${p}`));
+      setSheetUpload(r.upload || null);
+    } catch { setSheetUpload(null); }
+  }, []);
+  useEffect(() => { fetchSheetUpload(from, to, pieceOnly); }, [from, to, pieceOnly, fetchSheetUpload]);
+  const loadComparison = useCallback(async () => {
+    if (!from || !to || !lines?.length) { setComparison(null); return; }
+    try {
+      const p = new URLSearchParams({ period_from: from, period_to: to, kind: pieceOnly ? 'MIDMONTH' : 'REGULAR' });
+      if (combined) p.set('combined', '1');
+      if (pieceOnly) p.set('piece_only', '1');
+      setComparison(await api(scopedAny(`/payroll/compare?${p}`)));
+    } catch { setComparison(null); }
+  }, [from, to, lines, combined, pieceOnly]);
+  useEffect(() => { if (lines?.length && sheetUpload) loadComparison(); else setComparison(null); }, [lines, sheetUpload, loadComparison]);
   // `err` is kept on screen. A toast alone is missed: a failed compute answers in
   // ~40ms, so the spinner never registers and the page looks like nothing happened.
   const [err, setErr] = useState(null);
   const run = async () => {
     if (!from || !to) return toast('Pick both dates first', 'err');
     if (from > to) return toast('“From” is after “To”', 'err');
-    setBusy(true); setErr(null); setLines(null); setOverride(null);
+    setBusy(true); setErr(null); setLines(null); setOverride(null); setComparison(null);
     try {
       const r = await api(scopedAny('/payroll/compute2'), { method: 'POST', body: { from, to, site: site || undefined, combined, piece_only: pieceOnly } });
       setLines(r.lines.map((l) => ({ ...l, deduction: l.advance || 0 })));
       setOverride(r.override || null);
+      setSheetUpload(r.sheet_upload || null);
       if (!r.lines.length) toast('No one to pay for this period', 'err');
     } catch (e) {
       const msg = isNetErr(e) ? 'No connection — check your network and try again.' : (e.message || 'Compute failed');
@@ -290,6 +313,34 @@ function RunTab({ sites, onSaved }) {
       </button>
 
       <OverrideBanner override={override} />
+
+      <SheetUploadCard from={from} to={to} pieceOnly={pieceOnly} combined={combined} upload={sheetUpload}
+        onUploaded={(r) => { setSheetUpload({ id: r.id, file_name: r.file_name || r.upload?.file_name, line_count: r.line_count, uploaded_at: Math.floor(Date.now() / 1000) }); }}
+        onDeleted={() => { setSheetUpload(null); setComparison(null); }} />
+
+      {lines && sheetUpload && comparison && (
+        <div className="card" style={{ padding: '10px 12px', marginBottom: 10, background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 12.5 }}>
+              <strong>Side-by-side comparison</strong>
+              <div style={{ color: 'var(--muted)', marginTop: 2 }}>
+                Computed net {ngn(comparison.totals?.computed?.net)} vs sheet net {ngn(comparison.totals?.uploaded?.net)}
+                {' · '}{(comparison.diffs || []).filter((d) => Math.abs(d.delta) > 0.01).length} difference(s)
+              </div>
+            </div>
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
+              onClick={() => setShowComparison(true)}>View diff table</button>
+          </div>
+        </div>
+      )}
+
+      {showComparison && (
+        <div onClick={() => setShowComparison(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()}>
+            <PayrollComparison from={from} to={to} pieceOnly={pieceOnly} combined={combined} onClose={() => setShowComparison(false)} />
+          </div>
+        </div>
+      )}
 
       {lines && (() => {
         if (lines.length === 0) return <div className="empty"><div className="ic">💰</div><p>Nothing to pay</p></div>;
@@ -404,6 +455,7 @@ function RunsTab() {
   const [editLine, setEditLine] = useState(null); // line being adjusted
   const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [compareRun, setCompareRun] = useState(null);
 
   const importFile = async (file) => {
     if (!file) return;
@@ -500,14 +552,32 @@ function RunsTab() {
       {runs.length === 0 ? <div className="empty"><div className="ic">🧾</div><p>No saved payroll runs</p></div> : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {runs.map((r) => (
-            <button key={r.id} onClick={() => view(r.id)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid var(--line)', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left' }}>
+            <div key={r.id} onClick={() => view(r.id)} role="button" tabIndex={0}
+              onKeyDown={(e) => e.key === 'Enter' && view(r.id)}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid var(--line)', width: '100%', cursor: 'pointer', textAlign: 'left' }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700 }}>{r.period_from} → {r.period_to} <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[r.status] || '#f1f5f9' }}>{r.status}</span></div>
-                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.site_name || 'All sites'} · net {ngn(r.total_net)}</div>
+                <div style={{ fontWeight: 700 }}>{r.period_from} → {r.period_to} <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[r.status] || '#f1f5f9' }}>{r.status}</span>
+                  {r.sheet_upload_id && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#e0e7ff', marginLeft: 4 }}>Sheet uploaded</span>}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.site_name || 'All sites'} · net {ngn(r.total_net)}
+                  {r.sheet_upload_id && (
+                    <span className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '0 6px', marginLeft: 6, fontSize: 11, display: 'inline-block' }}
+                      onClick={(e) => { e.stopPropagation(); setCompareRun(r); }} role="button" tabIndex={0}>Compare</span>
+                  )}
+                </div>
               </div>
               <span style={{ color: 'var(--muted)' }}>›</span>
-            </button>
+            </div>
           ))}
+        </div>
+      )}
+
+      {compareRun && (
+        <div onClick={() => setCompareRun(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+          <div onClick={(e) => e.stopPropagation()}>
+            <PayrollComparison from={compareRun.period_from} to={compareRun.period_to}
+              pieceOnly={compareRun.kind === 'MIDMONTH'} combined onClose={() => setCompareRun(null)} />
+          </div>
         </div>
       )}
 
@@ -897,7 +967,134 @@ function MidMonthTab({ onSaved }) {
   );
 }
 
-// A run computed from the accountant's spreadsheet must say so on its face.
+// Side-by-side computed vs uploaded payroll comparison.
+function PayrollComparison({ from, to, pieceOnly, combined, onClose }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [q, setQ] = useState('');
+  useEffect(() => {
+    const p = new URLSearchParams({ period_from: from, period_to: to, kind: pieceOnly ? 'MIDMONTH' : 'REGULAR' });
+    if (combined) p.set('combined', '1');
+    if (pieceOnly) p.set('piece_only', '1');
+    api(scopedAny(`/payroll/compare?${p}`)).then(setData).catch((e) => setErr(e.message || 'Could not load comparison'));
+  }, [from, to, pieceOnly, combined]);
+  const term = q.trim().toLowerCase();
+  const diffs = (data?.diffs || []).filter((d) => !term || String(d.name || '').toLowerCase().includes(term));
+  const badge = (p) => ({ computed: 'Computed only', uploaded: 'Sheet only', both: 'Both' }[p] || p);
+  const badgeColor = (p) => ({ computed: '#e0e7ff', uploaded: '#fef3c7', both: '#dcfce7' }[p] || '#f1f5f9');
+  return (
+    <div className="modal-card" style={{ maxWidth: 520, maxHeight: '88vh', overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <strong>Computed vs uploaded sheet</strong>
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px' }} onClick={onClose}>✕</button>
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>{from} → {to}</div>
+      {err && <div style={{ padding: 10, background: '#fee2e2', borderRadius: 8, fontSize: 13, color: '#991b1b', marginBottom: 10 }}>{err}</div>}
+      {!data ? <div className="skel" /> : (
+        <>
+          <div className="card" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10, padding: '10px 12px' }}>
+            <div style={{ fontSize: 12 }}>
+              <div><b>Computed</b> net {ngn(data.totals?.computed?.net)}</div>
+              {data.upload ? <div style={{ marginTop: 4 }}><b>Uploaded</b> net {ngn(data.totals?.uploaded?.net)}</div> : <div style={{ marginTop: 4, color: 'var(--muted)' }}>No sheet uploaded</div>}
+            </div>
+            {data.upload && (
+              <div style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'right' }}>
+                {data.upload.file_name}<br />{data.upload.line_count} lines
+              </div>
+            )}
+          </div>
+          {data.upload && (
+            <>
+              <input className="input" style={{ marginBottom: 8 }} placeholder="Search name…" value={q} onChange={(e) => setQ(e.target.value)} />
+              <div style={{ border: '1px solid var(--line)', borderRadius: 10, overflow: 'hidden' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 72px 72px 64px 70px', gap: 4, padding: '6px 10px', background: '#f8fafc', fontSize: 11, fontWeight: 700 }}>
+                  <span>Name</span><span style={{ textAlign: 'right' }}>Comp.</span><span style={{ textAlign: 'right' }}>Sheet</span><span style={{ textAlign: 'right' }}>Δ</span><span />
+                </div>
+                {diffs.map((d) => (
+                  <div key={d.staff_id || d.ext_people_id || d.name} style={{ display: 'grid', gridTemplateColumns: '1fr 72px 72px 64px 70px', gap: 4, padding: '7px 10px', borderTop: '1px solid var(--line)', fontSize: 12, alignItems: 'center' }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
+                    <span style={{ textAlign: 'right' }}>{d.presence === 'uploaded' ? '—' : ngn(d.computed_net)}</span>
+                    <span style={{ textAlign: 'right' }}>{d.presence === 'computed' ? '—' : ngn(d.uploaded_net)}</span>
+                    <span style={{ textAlign: 'right', fontWeight: 700, color: Math.abs(d.delta) > 0.01 ? '#b45309' : 'inherit' }}>{d.presence === 'both' ? ngn(d.delta) : '—'}</span>
+                    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 10, background: badgeColor(d.presence), textAlign: 'center' }}>{badge(d.presence).split(' ')[0]}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Month-end sheet upload — stored side-by-side, does not replace computed payroll.
+function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, onDeleted }) {
+  const { toast, confirm } = useStore();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  if (pieceOnly) return null;
+
+  const uploadFile = async (file) => {
+    if (!file) return;
+    setBusy(true); setErr(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('period_from', from);
+      fd.append('period_to', to);
+      fd.append('kind', 'REGULAR');
+      const r = await api(scopedAny('/payroll/sheet-upload'), { method: 'POST', form: fd });
+      toast(`Sheet stored — ${r.line_count} lines ✓`, 'ok');
+      onUploaded && onUploaded(r);
+    } catch (e) { setErr(e.message || 'Upload failed'); }
+    setBusy(false);
+  };
+
+  const remove = async () => {
+    if (!upload?.id) return;
+    const ok = await confirm({
+      title: 'Remove uploaded sheet?',
+      message: `This removes the stored workbook for ${from} → ${to}. Computed payroll is not affected.`,
+      confirmText: 'Remove',
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api(scopedAny(`/payroll/sheet-upload/${upload.id}`), { method: 'DELETE' });
+      toast('Sheet removed ✓', 'ok');
+      onDeleted && onDeleted();
+    } catch (e) { toast(e.message, 'err'); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="card" style={{ padding: '12px 14px', marginBottom: 10, borderLeft: '3px solid #6366f1' }}>
+      <strong style={{ display: 'block', marginBottom: 2 }}>📤 Upload month-end sheet</strong>
+      <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+        Store the accountant&apos;s Excel alongside the computed payroll — it is not merged into the run automatically.
+      </span>
+      {upload ? (
+        <div style={{ marginTop: 8, fontSize: 12.5 }}>
+          <b>{upload.file_name || 'Uploaded sheet'}</b>
+          <span style={{ color: 'var(--muted)' }}> · {upload.line_count} lines · {new Date((upload.uploaded_at || 0) * 1000).toLocaleDateString()}</span>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={remove} disabled={busy}>Remove</button>
+          </div>
+        </div>
+      ) : (
+        <label className="btn btn-sm" style={{ marginTop: 10, cursor: 'pointer', width: 'auto', display: 'inline-flex' }}>
+          {busy ? <span className="spin" /> : '⬆ Choose Excel (.xls/.xlsx)'}
+          <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={busy}
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadFile(f); }} />
+        </label>
+      )}
+      {err && <div style={{ marginTop: 8, fontSize: 12, color: '#991b1b' }}>{err}</div>}
+    </div>
+  );
+}
+
 // Silently paying from an override is exactly the sort of thing that is fine
 // until the one time it is not.
 function OverrideBanner({ override }) {

@@ -1450,19 +1450,12 @@ router.get('/runs2/:id', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
+  // Prefer the site name stored on the line (set at compute/from-sheet). The old
+  // correlated REGEXP_REPLACE twin lookup scanned the whole staff table twice per
+  // line and made opening a large draft hang on mobile — looking like a no-op.
   run.lines = await qall(`SELECT pl.*,
-      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name,
-        (SELECT si.name FROM staff s2 JOIN sites si ON si.id=s2.site_id
-          WHERE LOWER(REGEXP_REPLACE(TRIM(s2.full_name), '\\s+', ' ', 'g'))
-              = LOWER(REGEXP_REPLACE(TRIM(s.full_name), '\\s+', ' ', 'g'))
-            AND s2.site_id IS NOT NULL
-          LIMIT 1)) AS primary_site_name,
-      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name,
-        (SELECT si.name FROM staff s2 JOIN sites si ON si.id=s2.site_id
-          WHERE LOWER(REGEXP_REPLACE(TRIM(s2.full_name), '\\s+', ' ', 'g'))
-              = LOWER(REGEXP_REPLACE(TRIM(s.full_name), '\\s+', ' ', 'g'))
-            AND s2.site_id IS NOT NULL
-          LIMIT 1)) AS site_name
+      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name) AS primary_site_name,
+      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name) AS site_name
     FROM pay_run_lines pl
     LEFT JOIN staff s ON s.id=pl.staff_id
     LEFT JOIN sites st ON st.id=s.site_id

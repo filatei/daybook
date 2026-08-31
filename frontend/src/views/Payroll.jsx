@@ -1,7 +1,19 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { api, scopedAny, ngn, today, getToken, downloadFile, isNetErr } from '../api.js';
 import { useStore, useRole, atLeast } from '../store.jsx';
 import SearchSelect from '../components/SearchSelect.jsx';
+
+/** Scope a run fetch to the run's own workspace when known. Under Group, that
+ *  avoids relying on __group__ resolution for a single-row open (list already
+ *  returned the row with its tenant_id). Falls back to scopedAny. */
+function runPath(id, runTenantId, suffix = '') {
+  const base = `/payroll/runs2/${id}${suffix}`;
+  if (runTenantId && runTenantId !== '__group__') {
+    return `${base}${base.includes('?') ? '&' : '?'}tenant=${encodeURIComponent(runTenantId)}`;
+  }
+  return scopedAny(base);
+}
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 // "Kpansia B80 · Okutukutu B40" — the per-site split behind a worker's bag total.
@@ -546,7 +558,7 @@ function RunTab({ sites, onSaved, onGenerated, onShowSheetHistory }) {
 
 // ── Runs: saved runs → approve → mark paid ────────────────────────────────────
 function RunsTab({ initialOpenId, onConsumedOpenId }) {
-  const { tenant, toast, confirm, sites } = useStore();
+  const { tenant, toast, confirm, sites, registerBack } = useStore();
   const role = useRole();
   const isGM = role && atLeast(role, 'GENERAL_MANAGER');
   const [runs, setRuns] = useState([]);
@@ -559,26 +571,33 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
   const [editLine, setEditLine] = useState(null); // line being adjusted
   const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [openingId, setOpeningId] = useState(null);
   const [compareRun, setCompareRun] = useState(null);
 
+  // Phone Back must close the draft sheet (local overlay), not leave Payroll.
+  useEffect(() => {
+    if (!open) return undefined;
+    return registerBack(() => { setOpen(null); setEditLine(null); });
+  }, [open, registerBack]);
+
   const importFile = async (file) => {
-    if (!file) return;
+    if (!file || !open) return;
     setImporting(true);
     try {
       const fd = new FormData(); fd.append('file', file);
-      const r = await api(scopedAny(`/payroll/runs2/${open.id}/import`), { method: 'POST', form: fd });
-      const fresh = await api(scopedAny(`/payroll/runs2/${open.id}`)); setOpen(fresh); load();
+      const r = await api(runPath(open.id, open.tenant_id, '/import'), { method: 'POST', form: fd });
+      const fresh = await api(runPath(open.id, open.tenant_id)); setOpen(fresh); load();
       toast(`Imported: ${r.updated} updated${r.unmatched?.length ? `, ${r.unmatched.length} unmatched ID(s)` : ''}`, 'ok');
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) { toast(e.message || 'Import failed', 'err'); }
     setImporting(false);
   };
 
   const saveLine = async (patch) => {
     try {
-      await api(scopedAny(`/payroll/runs2/${open.id}/lines/${editLine.id}`), { method: 'PATCH', body: patch });
-      const fresh = await api(scopedAny(`/payroll/runs2/${open.id}`));
+      await api(runPath(open.id, open.tenant_id, `/lines/${editLine.id}`), { method: 'PATCH', body: patch });
+      const fresh = await api(runPath(open.id, open.tenant_id));
       setOpen(fresh); setEditLine(null); toast('Line updated ✓', 'ok'); load();
-    } catch (e) { toast(e.message, 'err'); }
+    } catch (e) { toast(e.message || 'Could not update line', 'err'); }
   };
 
   const load = useCallback(async () => {
@@ -588,12 +607,21 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
   }, [tenant]);
   useEffect(() => { load(); }, [load]);
 
-  const view = async (id) => {
+  // `row` may be a list item (has tenant_id) or just an id string (auto-open after generate).
+  const view = async (row) => {
+    const id = typeof row === 'object' && row ? row.id : row;
+    const runTenantId = (typeof row === 'object' && row?.tenant_id) || null;
+    if (!id) return;
+    setOpeningId(id);
+    setBankCheck(null);
     try {
-      setBankCheck(null);
-      setOpen(await api(scopedAny(`/payroll/runs2/${id}`)));
-      api(scopedAny(`/payroll/runs2/${id}/bank-check`)).then(setBankCheck).catch(() => setBankCheck(null));
-    } catch (e) { toast(e.message, 'err'); }
+      const fresh = await api(runPath(id, runTenantId));
+      setOpen(fresh);
+      api(runPath(id, fresh.tenant_id || runTenantId, '/bank-check')).then(setBankCheck).catch(() => setBankCheck(null));
+    } catch (e) {
+      toast(e.message || 'Could not open draft — try again', 'err');
+    }
+    setOpeningId(null);
   };
   useEffect(() => {
     if (!initialOpenId) return;
@@ -601,39 +629,25 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
     onConsumedOpenId && onConsumedOpenId();
   }, [initialOpenId]);
   const setStatus = async (status) => {
-    try { const r = await api(scopedAny(`/payroll/runs2/${open.id}/status`), { method: 'POST', body: { status } }); setOpen((o) => ({ ...o, ...r })); toast(`Marked ${status.toLowerCase()} ✓`, 'ok'); load(); }
-    catch (e) { toast(e.message, 'err'); }
+    try {
+      const r = await api(runPath(open.id, open.tenant_id, '/status'), { method: 'POST', body: { status } });
+      setOpen((o) => ({ ...o, ...r }));
+      toast(`Marked ${status.toLowerCase()} ✓`, 'ok');
+      load();
+    } catch (e) { toast(e.message || 'Could not update status', 'err'); }
   };
 
   // A draft freezes its figures at compute time — it does NOT pick up a later rate
   // change or staff correction. Recompute rebuilds it in place; delete throws it
   // away (needed when the PERIOD itself is wrong, which recompute keeps).
   const [acting, setActing] = useState(false);
-  // Emailing is a deliberate act, confirmed, because it puts figures in front of
-  // people who will act on them. It used to fire automatically on save.
-  const sendEmail = async () => {
-    const ok = await confirm({
-      title: 'Email this run to the accountants?',
-      message: `${open.period_from} → ${open.period_to} · ${(open.lines || []).length} staff · ${ngn(open.total_net)}. `
-        + 'They will receive the summary and the Fido-format CSV.',
-      confirmText: 'Send',
-    });
-    if (!ok) return;
-    setActing(true);
-    try {
-      const r = await api(scopedAny(`/payroll/runs2/${open.id}/email`), { method: 'POST' });
-      toast(r.recipients ? `Sent to ${r.recipients} ✓` : 'Sent ✓', 'ok');
-    } catch (e) { toast(e.message || 'Could not send', 'err'); }
-    setActing(false);
-  };
-
   const recompute = async () => {
     setActing(true);
     try {
-      const r = await api(scopedAny(`/payroll/runs2/${open.id}/recompute`), { method: 'POST' });
+      const r = await api(runPath(open.id, open.tenant_id, '/recompute'), { method: 'POST' });
       const moved = ngn(r.total_gross - (r.was_gross || 0));
       toast(`Recomputed at ₦${r.rates?.bagged}/bag — ${r.count} staff, gross ${ngn(r.total_gross)} (${(r.total_gross - (r.was_gross || 0)) >= 0 ? '+' : ''}${moved})`, 'ok');
-      await view(open.id); load();
+      await view({ id: open.id, tenant_id: open.tenant_id }); load();
     } catch (e) { toast(e.message || 'Recompute failed', 'err'); }
     setActing(false);
   };
@@ -646,8 +660,23 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
     });
     if (!ok) return;
     setActing(true);
-    try { await api(scopedAny(`/payroll/runs2/${open.id}`), { method: 'DELETE' }); toast('Draft deleted ✓', 'ok'); setOpen(null); load(); }
+    try { await api(runPath(open.id, open.tenant_id), { method: 'DELETE' }); toast('Draft deleted ✓', 'ok'); setOpen(null); load(); }
     catch (e) { toast(e.message || 'Delete failed', 'err'); }
+    setActing(false);
+  };
+  const sendEmail = async () => {
+    const ok = await confirm({
+      title: 'Email this run to the accountants?',
+      message: `${open.period_from} → ${open.period_to} · ${(open.lines || []).length} staff · ${ngn(open.total_net)}. `
+        + 'They will receive the summary and the Fido-format CSV.',
+      confirmText: 'Send',
+    });
+    if (!ok) return;
+    setActing(true);
+    try {
+      const r = await api(runPath(open.id, open.tenant_id, '/email'), { method: 'POST' });
+      toast(r.recipients ? `Sent to ${r.recipients} ✓` : 'Sent ✓', 'ok');
+    } catch (e) { toast(e.message || 'Could not send', 'err'); }
     setActing(false);
   };
   const badge = { DRAFT: '#f1f5f9', APPROVED: '#dbeafe', PAID: '#dcfce7' };
@@ -656,64 +685,93 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
     .sort((a, b) => (a === UNASSIGNED_SITE ? 1 : b === UNASSIGNED_SITE ? -1 : a.localeCompare(b)));
 
   if (loading && !open) return <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>;
+
+  const primaryActions = open && (
+    <div style={{ display: 'flex', gap: 8, margin: '10px 0 12px', flexWrap: 'wrap' }}>
+      {open.status === 'DRAFT' && (
+        <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48 }} onClick={() => setStatus('APPROVED')}>
+          Approve
+        </button>
+      )}
+      <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48, ...(bankCheck?.at_risk ? { background: '#b45309' } : {}) }}
+        onClick={() => downloadFile(runPath(open.id, open.tenant_id, '/bank.xlsx'), `bank_payment_${open.period_from}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}
+        title="Workbook for the bank payroll portal — same file mid-month uses">
+        🏦 Bank portal file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
+      </button>
+      {open.status === 'APPROVED' && isGM && (
+        <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>
+      )}
+    </div>
+  );
+
   return (
     <div>
       <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 12px' }}>
-        Same for mid-month and month-end: open the draft, Approve, then <b>Bank portal file</b>.
+        Tap a row to open it. On the draft: <b>Approve</b>, then <b>Bank portal file</b>.
         A SHEET run pays the accountant&apos;s Excel (matched staff) — computed does not need to match.
       </p>
       {runs.length === 0 ? <div className="empty"><div className="ic">🧾</div><p>No saved payroll runs</p></div> : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {runs.map((r) => (
-            <div key={r.id} onClick={() => view(r.id)} role="button" tabIndex={0}
-              onKeyDown={(e) => e.key === 'Enter' && view(r.id)}
-              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 16px', borderBottom: '1px solid var(--line)', width: '100%', cursor: 'pointer', textAlign: 'left' }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700 }}>{r.period_from} → {r.period_to} <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[r.status] || '#f1f5f9' }}>{r.status}</span>
+            <div key={r.id} role="button" tabIndex={0}
+              onClick={() => !openingId && view(r)}
+              onKeyDown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && !openingId) { e.preventDefault(); view(r); } }}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px', minHeight: 64, borderBottom: '1px solid var(--line)', width: '100%', cursor: openingId ? 'wait' : 'pointer', textAlign: 'left', background: openingId === r.id ? '#f0f9ff' : 'transparent', WebkitTapHighlightColor: 'rgba(2,132,199,.15)' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700 }}>{r.period_from} → {r.period_to}{' '}
+                  <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[r.status] || '#f1f5f9' }}>{r.status}</span>
                   <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: r.pay_source === 'SHEET' ? '#dbeafe' : '#f1f5f9', marginLeft: 4 }}>{r.pay_source === 'SHEET' ? 'SHEET' : 'COMPUTED'}</span>
                   {r.sheet_upload_id && r.pay_source !== 'SHEET' && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#e0e7ff', marginLeft: 4 }}>Sheet uploaded</span>}
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.site_name || 'All sites'} · net {ngn(r.total_net)}
-                  {r.pay_source === 'SHEET'
-                    ? <span style={{ marginLeft: 6 }}>· open → Bank portal file</span>
-                    : (r.sheet_upload_id && (
-                    <span className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '0 6px', marginLeft: 6, fontSize: 11, display: 'inline-block' }}
-                      onClick={(e) => { e.stopPropagation(); setCompareRun(r); }} role="button" tabIndex={0}>Optional check vs computed</span>
-                    ))}
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+                  {r.site_name || 'All sites'} · net {ngn(r.total_net)}
+                  {r.status === 'DRAFT' ? ' · Approve → Bank portal file' : ''}
                 </div>
+                {r.sheet_upload_id && r.pay_source !== 'SHEET' && (
+                  <button type="button"
+                    style={{ marginTop: 6, fontSize: 12, color: 'var(--brand-d)', fontWeight: 700, background: 'none', border: 'none', padding: 0, textDecoration: 'underline', cursor: 'pointer' }}
+                    onClick={(e) => { e.stopPropagation(); setCompareRun(r); }}>
+                    Optional check vs computed
+                  </button>
+                )}
               </div>
-              <span style={{ color: 'var(--muted)' }}>›</span>
+              <span style={{ flex: 'none', fontWeight: 800, color: 'var(--brand-d)', fontSize: 13, whiteSpace: 'nowrap', pointerEvents: 'none' }}>
+                {openingId === r.id ? 'Opening…' : 'Open ›'}
+              </span>
             </div>
           ))}
         </div>
       )}
 
-      {compareRun && (
-        <div onClick={() => setCompareRun(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 130, padding: 16 }}>
+      {compareRun && createPortal(
+        <div onClick={() => setCompareRun(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 400, padding: 16 }}>
           <div onClick={(e) => e.stopPropagation()}>
             <PayrollComparison from={compareRun.period_from} to={compareRun.period_to}
               pieceOnly={compareRun.kind === 'MIDMONTH'} combined onClose={() => setCompareRun(null)} />
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {open && (
-        <div onClick={() => setOpen(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'center', zIndex: 120, padding: 16 }}>
-          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 440, margin: 0, maxHeight: '88vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      {open && createPortal(
+        <div onClick={() => setOpen(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,.5)', display: 'grid', placeItems: 'end center', zIndex: 400, padding: 0 }}>
+          <div className="card pop-in" onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 480, margin: 0, maxHeight: '92vh', overflowY: 'auto', borderRadius: '20px 20px 0 0', paddingBottom: 'calc(16px + var(--safe-b))' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
               <strong>{open.period_from} → {open.period_to}</strong>
               <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                 {open.pay_source === 'SHEET' && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#dbeafe' }}>SHEET</span>}
                 <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: badge[open.status] }}>{open.status}</span>
               </span>
             </div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+              Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}{open.site_name ? ` · ${open.site_name}` : ' · All sites'}
+            </div>
             {open.pay_source === 'SHEET' && (
-              <div style={{ fontSize: 12.5, marginBottom: 8, padding: '8px 10px', borderRadius: 8, background: '#eff6ff', border: '1px solid #bfdbfe' }}>
-                📄 Paid from the accountant&apos;s sheet — same as mid-month: Approve, then download the <b>Bank portal file</b>.
-                Computed figures do not need to match.
+              <div style={{ fontSize: 12.5, marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                📄 Paid from the accountant&apos;s sheet. Tap <b>Approve</b>, then <b>Bank portal file</b> (same as mid-month).
               </div>
             )}
-            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}{open.site_name ? ` · ${open.site_name}` : ' · All sites'}</div>
+            {primaryActions}
             {open.pay_source === 'SHEET' && open.sheet_summary?.unmatched_count > 0 && (
               <UnmatchedSheetNote summary={open.sheet_summary} />
             )}
@@ -723,15 +781,12 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
                   <SearchSelect style={{ flex: '1 1 140px' }} value={siteFilter} onChange={setSiteFilter}
                     options={[{ value: '', label: 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="Filter by site" />
                 )}
-                <button className={`btn btn-sm ${bySiteView ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setBySiteView((v) => !v)}>
+                <button type="button" className={`btn btn-sm ${bySiteView ? '' : 'btn-ghost'}`} style={{ width: 'auto', padding: '6px 12px' }} onClick={() => setBySiteView((v) => !v)}>
                   {bySiteView ? '✓ Grouped by site' : 'Group by site'}
                 </button>
               </div>
             )}
-            <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 10 }}>
-              {/* Provenance survives to the saved run, and stays visible even if
-                  the batch has since been removed — an approved payroll whose
-                  numbers cannot be explained is the thing to avoid. */}
+            <div style={{ maxHeight: 280, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 10 }}>
               {(open.override || open.override_removed) && (
                 <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--line)', fontSize: 12 }}>
                   <strong>📄 Paid from the accountant&apos;s sheet</strong>
@@ -750,7 +805,7 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
                     <div key={sn}>
                       <div style={{ padding: '8px 12px', background: '#f8fafc', fontWeight: 700, fontSize: 12, borderBottom: '1px solid var(--line)' }}>{sn} · {rows.length}</div>
                       {rows.map((l) => (
-                        <button key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
+                        <button type="button" key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
                           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13, width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: open.status === 'DRAFT' ? 'pointer' : 'default' }}>
                           <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {l.remarks ? <span title={l.remarks} style={{ marginRight: 4 }}>ℹ️</span> : null}
@@ -764,7 +819,7 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
                   );
                 })
                 : visibleLines.map((l) => (
-                <button key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
+                <button type="button" key={l.id} onClick={() => open.status === 'DRAFT' && setEditLine(l)}
                   style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 12px', borderBottom: '1px solid var(--line)', fontSize: 13, width: '100%', border: 'none', background: 'none', textAlign: 'left', cursor: open.status === 'DRAFT' ? 'pointer' : 'default' }}>
                   <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {l.remarks ? <span title={l.remarks} style={{ marginRight: 4 }}>ℹ️</span> : null}
@@ -777,13 +832,6 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
               )))}
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-              <button className="btn" style={{ flex: 1, ...(bankCheck?.at_risk ? { background: '#b45309' } : {}) }}
-                onClick={() => downloadFile(scopedAny(`/payroll/runs2/${open.id}/bank.xlsx`), `bank_payment_${open.period_from}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}
-                title="Workbook for the bank payroll portal — same file mid-month uses">
-                🏦 Bank portal file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
-              </button>
-              {open.status === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={() => setStatus('APPROVED')}>Approve</button>}
-              {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
               {open.status === 'DRAFT' && open.pay_source !== 'SHEET' && (
                 <label className="btn btn-ghost" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
                   {importing ? <span className="spin" /> : '⬆ Upload sheet'}
@@ -792,15 +840,15 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
                 </label>
               )}
               {open.status === 'DRAFT' && open.pay_source !== 'SHEET' && (
-                <button className="btn btn-ghost" style={{ flex: 1 }} onClick={recompute} disabled={acting}
+                <button type="button" className="btn btn-ghost" style={{ flex: 1 }} onClick={recompute} disabled={acting}
                   title="Rebuild this draft from today’s rates and staff — same period">
                   {acting ? <span className="spin" /> : '↻'} Recompute
                 </button>
               )}
-              <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/export.csv?tenant=${tenant}`, `payroll_${open.period_from}.csv`)}>⬇ CSV</button>
-              {open.kind === 'MIDMONTH' && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/fido.csv?tenant=${tenant}`, `midmonth_${open.period_from}.csv`)}>⬇ Fido format</button>}
+              <button type="button" className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(runPath(open.id, open.tenant_id || tenant, '/export.csv'), `payroll_${open.period_from}.csv`)}>⬇ CSV</button>
+              {open.kind === 'MIDMONTH' && <button type="button" className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(runPath(open.id, open.tenant_id || tenant, '/fido.csv'), `midmonth_${open.period_from}.csv`)}>⬇ Fido format</button>}
               {open.kind === 'MIDMONTH' && (
-                <button className="btn btn-ghost" style={{ flex: 1 }} disabled={acting} onClick={sendEmail}
+                <button type="button" className="btn btn-ghost" style={{ flex: 1 }} disabled={acting} onClick={sendEmail}
                   title="Email this run and the Fido CSV to the accountants — nothing is sent unless you press this">
                   {acting ? <span className="spin" /> : '✉️'} Send to accountants
                 </button>
@@ -830,10 +878,10 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
               {open.status === 'DRAFT' && (
-                <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px', color: '#b91c1c' }} onClick={del} disabled={acting}
+                <button type="button" className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px', color: '#b91c1c' }} onClick={del} disabled={acting}
                   title="Throw this draft away — use when the period itself is wrong">🗑 Delete</button>
               )}
-              <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px' }} onClick={() => setOpen(null)}>Close</button>
+              <button type="button" className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px' }} onClick={() => setOpen(null)}>Close</button>
             </div>
             {open.status === 'DRAFT' && open.pay_source === 'SHEET' && (
               <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>
@@ -848,11 +896,13 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
               </p>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
-      {editLine && (
-        <LineEditor line={editLine} onClose={() => setEditLine(null)} onSave={saveLine} />
+      {editLine && createPortal(
+        <LineEditor line={editLine} onClose={() => setEditLine(null)} onSave={saveLine} />,
+        document.body,
       )}
     </div>
   );

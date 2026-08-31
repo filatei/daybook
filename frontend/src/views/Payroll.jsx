@@ -162,7 +162,32 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
 }
 
 // ── Run: compute + save a payroll ─────────────────────────────────────────────
-function RunTab({ sites, onSaved, onShowSheetHistory }) {
+function UnmatchedSheetNote({ summary, compact }) {
+  if (!summary?.unmatched_count) return null;
+  return (
+    <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#fffbeb', border: '1px solid #fcd34d', fontSize: 12.5 }}>
+      <strong style={{ color: '#92400e' }}>
+        {summary.unmatched_count} sheet row{summary.unmatched_count === 1 ? '' : 's'} not on the roster
+        {summary.unmatched_net ? ` · ${ngn(summary.unmatched_net)} left out of the bank file` : ''}
+      </strong>
+      <div style={{ color: '#92400e', marginTop: 2 }}>
+        Add them under Rates, re-upload the Excel, then generate again. Generate from sheet only pays matched staff.
+      </div>
+      {!compact && (summary.unmatched || []).slice(0, 12).map((u, i) => (
+        <div key={`${u.name}-${i}`} style={{ fontSize: 12, marginTop: 2 }}>
+          {u.name}{u.ext_people_id ? ` · ID ${u.ext_people_id}` : ''} · {ngn(u.net)}
+        </div>
+      ))}
+      {!compact && summary.unmatched_count > 12 && (
+        <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 4 }}>
+          +{summary.unmatched_count - 12} more — Sheet history lists every row
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RunTab({ sites, onSaved, onGenerated, onShowSheetHistory }) {
   const { toast, openModal, closeModal, isGroup } = useStore();
   const fm = fullMonthWindow();
   const [from, setFrom] = useState(fm.from);
@@ -200,7 +225,9 @@ function RunTab({ sites, onSaved, onShowSheetHistory }) {
     try {
       const p = new URLSearchParams({ period_from: f, period_to: t, kind: 'REGULAR' });
       const r = await api(scopedAny(`/payroll/sheet-upload?${p}`));
-      setSheetUpload(r.upload || null);
+      setSheetUpload(r.upload
+        ? { ...r.upload, sheet_summary: r.sheet_summary, totals: r.totals }
+        : null);
     } catch { setSheetUpload(null); }
   }, []);
   useEffect(() => { fetchSheetUpload(from, to, pieceOnly); }, [from, to, pieceOnly, fetchSheetUpload]);
@@ -279,15 +306,26 @@ function RunTab({ sites, onSaved, onShowSheetHistory }) {
           month-end run (28→27), which covers these bags again — that overlap is intended.
         </div>
       )}
+      {!pieceOnly && (
+        <div className="card" style={{ padding: '10px 12px', marginBottom: 10, background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+          <strong style={{ display: 'block', marginBottom: 4 }}>Month-end bank file — same as mid-month</strong>
+          <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+            1. Upload the accountant&apos;s Excel → 2. Generate payroll from sheet → 3. <b>Saved</b>: Approve → <b>Bank portal file</b>.
+            The bank file uses the <b>uploaded</b> amounts. Computed figures are an optional check and do not need to match.
+          </div>
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={from} onChange={(e) => setFrom(e.target.value)} />
         <input type="date" className="input" style={{ flex: '1 1 120px' }} value={to} max={today()} onChange={(e) => setTo(e.target.value)} />
         {sites.length > 1 && (
           <SearchSelect style={{ flex: '1 1 120px' }} value={site} onChange={(val) => setSite(val)} options={[{ value: '', label: combined ? 'All sites (Fido + Fiafia)' : 'All sites' }, ...sites.map((s) => ({ value: s.id, label: s.name }))]} placeholder="All sites" />
         )}
-        <button className="btn" style={{ width: 'auto', padding: '8px 16px', minWidth: 116 }} onClick={run} disabled={busy}>
-          {busy ? <><span className="spin" /> Computing…</> : 'Compute'}
-        </button>
+        {pieceOnly && (
+          <button className="btn" style={{ width: 'auto', padding: '8px 16px', minWidth: 116 }} onClick={run} disabled={busy}>
+            {busy ? <><span className="spin" /> Computing…</> : 'Compute'}
+          </button>
+        )}
       </div>
       {/* Failures must stay on screen — a toast is gone before you look up. */}
       {err && (
@@ -307,27 +345,62 @@ function RunTab({ sites, onSaved, onShowSheetHistory }) {
           Combined payroll (Fido + Fiafia in one run; same person merged)
         </label>
       )}
-      <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
-        onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}${site ? `&site=${site}` : ''}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
-        ⬇ Excel template (Regular / Baggers / Loaders)
-      </button>
+      {pieceOnly && (
+        <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px', marginBottom: 10 }}
+          onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=${pieceOnly ? 1 : 0}${site ? `&site=${site}` : ''}`), `${pieceOnly ? 'midmonth-payroll' : 'payroll'}-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+          ⬇ Excel template (Regular / Baggers / Loaders)
+        </button>
+      )}
 
       <OverrideBanner override={override} />
 
       <SheetUploadCard from={from} to={to} pieceOnly={pieceOnly} combined={combined} upload={sheetUpload}
-        onUploaded={(r) => { setSheetUpload({ id: r.id, file_name: r.file_name || r.upload?.file_name, line_count: r.line_count, uploaded_at: Math.floor(Date.now() / 1000) }); }}
+        onUploaded={(r) => {
+          setSheetUpload({
+            id: r.id,
+            file_name: r.file_name || r.upload?.file_name,
+            line_count: r.line_count,
+            uploaded_at: Math.floor(Date.now() / 1000),
+            sheet_summary: r.sheet_summary,
+            totals: r.totals,
+          });
+        }}
         onDeleted={() => { setSheetUpload(null); setComparison(null); }}
-        onGenerated={() => { onSaved && onSaved(); }}
+        onGenerated={(r) => { onGenerated ? onGenerated(r) : (onSaved && onSaved()); }}
+        onCompare={() => setShowComparison(true)}
         onShowHistory={onShowSheetHistory} />
 
+      {!pieceOnly && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 600, marginBottom: 6 }}>
+            Optional — preview computed from attendance (does not build the bank file)
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 16px' }} onClick={run} disabled={busy}>
+              {busy ? <><span className="spin" /> Computing…</> : 'Preview computed'}
+            </button>
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '6px 12px' }}
+              onClick={() => downloadFile(scopedAny(`/payroll/template.xlsx?from=${from}&to=${to}&combined=${combined ? 1 : 0}&piece_only=0${site ? `&site=${site}` : ''}`), `payroll-${from}_${to}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}>
+              ⬇ Excel template
+            </button>
+          </div>
+        </div>
+      )}
+
       {lines && sheetUpload && comparison && (
-        <div className="card" style={{ padding: '10px 12px', marginBottom: 10, background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
+        <div className="card" style={{ padding: '10px 12px', marginBottom: 10, background: '#f8fafc', border: '1px solid var(--line)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 12.5 }}>
-              <strong>Side-by-side comparison</strong>
+              <strong>Optional check — computed vs sheet</strong>
               <div style={{ color: 'var(--muted)', marginTop: 2 }}>
-                Computed net {ngn(comparison.totals?.computed?.net)} vs sheet net {ngn(comparison.totals?.uploaded?.net)}
+                Computed {ngn(comparison.totals?.computed?.net)} vs uploaded {ngn(comparison.totals?.uploaded?.net)}
+                {comparison.sheet_summary?.unmatched_count
+                  ? ` · bank file will pay matched ${ngn(comparison.sheet_summary.matched_net)}`
+                  : ''}
                 {' · '}{(comparison.diffs || []).filter((d) => Math.abs(d.delta) > 0.01).length} difference(s)
+              </div>
+              <div style={{ color: 'var(--muted)', marginTop: 2, fontSize: 12 }}>
+                Totals do not need to match. Generate from sheet uses uploaded figures for the bank file.
               </div>
             </div>
             <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }}
@@ -443,7 +516,7 @@ function RunTab({ sites, onSaved, onShowSheetHistory }) {
 }
 
 // ── Runs: saved runs → approve → mark paid ────────────────────────────────────
-function RunsTab() {
+function RunsTab({ initialOpenId, onConsumedOpenId }) {
   const { tenant, toast, confirm, sites } = useStore();
   const role = useRole();
   const isGM = role && atLeast(role, 'GENERAL_MANAGER');
@@ -493,6 +566,11 @@ function RunsTab() {
       api(scopedAny(`/payroll/runs2/${id}/bank-check`)).then(setBankCheck).catch(() => setBankCheck(null));
     } catch (e) { toast(e.message, 'err'); }
   };
+  useEffect(() => {
+    if (!initialOpenId) return;
+    view(initialOpenId);
+    onConsumedOpenId && onConsumedOpenId();
+  }, [initialOpenId]);
   const setStatus = async (status) => {
     try { const r = await api(scopedAny(`/payroll/runs2/${open.id}/status`), { method: 'POST', body: { status } }); setOpen((o) => ({ ...o, ...r })); toast(`Marked ${status.toLowerCase()} ✓`, 'ok'); load(); }
     catch (e) { toast(e.message, 'err'); }
@@ -548,9 +626,13 @@ function RunsTab() {
   const siteNames = Array.from(new Set((open?.lines || []).map(groupSiteKey)))
     .sort((a, b) => (a === UNASSIGNED_SITE ? 1 : b === UNASSIGNED_SITE ? -1 : a.localeCompare(b)));
 
-  if (loading) return <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>;
+  if (loading && !open) return <>{[...Array(4)].map((_, i) => <div className="skel" key={i} />)}</>;
   return (
     <div>
+      <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 12px' }}>
+        Same for mid-month and month-end: open the draft, Approve, then <b>Bank portal file</b>.
+        A SHEET run pays the accountant&apos;s Excel (matched staff) — computed does not need to match.
+      </p>
       {runs.length === 0 ? <div className="empty"><div className="ic">🧾</div><p>No saved payroll runs</p></div> : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
           {runs.map((r) => (
@@ -563,10 +645,12 @@ function RunsTab() {
                   {r.sheet_upload_id && r.pay_source !== 'SHEET' && <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#e0e7ff', marginLeft: 4 }}>Sheet uploaded</span>}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>{r.site_name || 'All sites'} · net {ngn(r.total_net)}
-                  {r.sheet_upload_id && (
+                  {r.pay_source === 'SHEET'
+                    ? <span style={{ marginLeft: 6 }}>· open → Bank portal file</span>
+                    : (r.sheet_upload_id && (
                     <span className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '0 6px', marginLeft: 6, fontSize: 11, display: 'inline-block' }}
-                      onClick={(e) => { e.stopPropagation(); setCompareRun(r); }} role="button" tabIndex={0}>Compare</span>
-                  )}
+                      onClick={(e) => { e.stopPropagation(); setCompareRun(r); }} role="button" tabIndex={0}>Optional check vs computed</span>
+                    ))}
                 </div>
               </div>
               <span style={{ color: 'var(--muted)' }}>›</span>
@@ -595,11 +679,15 @@ function RunsTab() {
               </span>
             </div>
             {open.pay_source === 'SHEET' && (
-              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
-                📄 Figures from the accountant&apos;s uploaded workbook — not recomputed from attendance.
+              <div style={{ fontSize: 12.5, marginBottom: 8, padding: '8px 10px', borderRadius: 8, background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                📄 Paid from the accountant&apos;s sheet — same as mid-month: Approve, then download the <b>Bank portal file</b>.
+                Computed figures do not need to match.
               </div>
             )}
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Gross {ngn(open.total_gross)} · deductions {ngn(open.total_deductions)} · net {ngn(open.total_net)}{open.site_name ? ` · ${open.site_name}` : ' · All sites'}</div>
+            {open.pay_source === 'SHEET' && open.sheet_summary?.unmatched_count > 0 && (
+              <UnmatchedSheetNote summary={open.sheet_summary} />
+            )}
             {(sites.length > 1 || siteNames.length > 1) && (
               <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
                 {sites.length > 1 && (
@@ -660,7 +748,14 @@ function RunsTab() {
               )))}
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-              {open.status === 'DRAFT' && (
+              <button className="btn" style={{ flex: 1, ...(bankCheck?.at_risk ? { background: '#b45309' } : {}) }}
+                onClick={() => downloadFile(scopedAny(`/payroll/runs2/${open.id}/bank.xlsx`), `bank_payment_${open.period_from}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}
+                title="Workbook for the bank payroll portal — same file mid-month uses">
+                🏦 Bank portal file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
+              </button>
+              {open.status === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={() => setStatus('APPROVED')}>Approve</button>}
+              {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
+              {open.status === 'DRAFT' && open.pay_source !== 'SHEET' && (
                 <label className="btn btn-ghost" style={{ flex: 1, cursor: 'pointer', textAlign: 'center' }}>
                   {importing ? <span className="spin" /> : '⬆ Upload sheet'}
                   <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={importing}
@@ -673,8 +768,6 @@ function RunsTab() {
                   {acting ? <span className="spin" /> : '↻'} Recompute
                 </button>
               )}
-              {open.status === 'DRAFT' && <button className="btn" style={{ flex: 1 }} onClick={() => setStatus('APPROVED')}>Approve</button>}
-              {open.status === 'APPROVED' && isGM && <button className="btn" style={{ flex: 1, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>}
               <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/export.csv?tenant=${tenant}`, `payroll_${open.period_from}.csv`)}>⬇ CSV</button>
               {open.kind === 'MIDMONTH' && <button className="btn btn-ghost" style={{ flex: 1 }} onClick={() => dl(`/payroll/runs2/${open.id}/fido.csv?tenant=${tenant}`, `midmonth_${open.period_from}.csv`)}>⬇ Fido format</button>}
               {open.kind === 'MIDMONTH' && (
@@ -683,11 +776,6 @@ function RunsTab() {
                   {acting ? <span className="spin" /> : '✉️'} Send to accountants
                 </button>
               )}
-              <button className="btn btn-ghost" style={{ flex: 1, ...(bankCheck?.at_risk ? { color: '#b45309' } : {}) }}
-                onClick={() => dl(`/payroll/runs2/${open.id}/bank.xlsx?tenant=${tenant}`, `bank_payment_${open.period_from}.xlsx`)}
-                title="Workbook for upload to the bank — grouped by bank, payee, account number and net pay">
-                🏦 Bank file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
-              </button>
             </div>
 
             {bankCheck && bankCheck.at_risk > 0 && (
@@ -718,7 +806,13 @@ function RunsTab() {
               )}
               <button className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px' }} onClick={() => setOpen(null)}>Close</button>
             </div>
-            {open.status === 'DRAFT' && (
+            {open.status === 'DRAFT' && open.pay_source === 'SHEET' && (
+              <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>
+                This draft is the accountant&apos;s sheet. Approve, then download the <b>Bank portal file</b> (same as mid-month).
+                To change figures, go to <b>Run</b>, re-upload, and Generate payroll from sheet again.
+              </p>
+            )}
+            {open.status === 'DRAFT' && open.pay_source !== 'SHEET' && (
               <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>
                 A draft keeps the figures it was built with — it does not pick up a later rate change or staff correction.
                 <b> Recompute</b> rebuilds it for the same period; <b>Delete</b> it and start again if the period itself is wrong.
@@ -923,8 +1017,8 @@ function MidMonthTab({ onSaved }) {
       <p style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 0, marginBottom: 12 }}>
         Baggers &amp; loaders across <strong>every workspace</strong> (Fido + Fiafia), paid at the mid-month incentive
         rate for bags done 16th of last month → 15th of this one. Built automatically from recorded production — no
-        Excel upload. Save the draft, then approve &amp; mark paid under <strong>Saved</strong>, and download the
-        Fido-format CSV there. Saving does <strong>not</strong> email anyone — send it from <strong>Saved</strong>
+        Excel upload. Save the draft, then approve under <strong>Saved</strong>, and download the
+        <strong>Bank portal file</strong> (and Fido-format CSV) there. Saving does <strong>not</strong> email anyone — send it from <strong>Saved</strong>
         when the figures are agreed.
       </p>
 
@@ -996,17 +1090,25 @@ function PayrollComparison({ from, to, pieceOnly, combined, onClose }) {
   return (
     <div className="modal-card" style={{ maxWidth: 520, maxHeight: '88vh', overflowY: 'auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <strong>Computed vs uploaded sheet</strong>
+        <strong>Optional check — computed vs uploaded sheet</strong>
         <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '2px 10px' }} onClick={onClose}>✕</button>
       </div>
-      <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>{from} → {to}</div>
+      <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 10 }}>
+        {from} → {to}. These totals do not need to match. <b>Generate payroll from sheet</b> pays the uploaded amounts
+        for staff on the roster; that draft is what the <b>Bank portal file</b> uses.
+      </div>
       {err && <div style={{ padding: 10, background: '#fee2e2', borderRadius: 8, fontSize: 13, color: '#991b1b', marginBottom: 10 }}>{err}</div>}
       {!data ? <div className="skel" /> : (
         <>
           <div className="card" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10, padding: '10px 12px' }}>
             <div style={{ fontSize: 12 }}>
-              <div><b>Computed</b> net {ngn(data.totals?.computed?.net)}</div>
-              {data.upload ? <div style={{ marginTop: 4 }}><b>Uploaded</b> net {ngn(data.totals?.uploaded?.net)}</div> : <div style={{ marginTop: 4, color: 'var(--muted)' }}>No sheet uploaded</div>}
+              <div><b>Computed</b> (attendance, optional) {ngn(data.totals?.computed?.net)}</div>
+              {data.upload ? (
+                <>
+                  <div style={{ marginTop: 4 }}><b>Uploaded sheet</b> (all rows) {ngn(data.totals?.uploaded?.net)}</div>
+                  <div style={{ marginTop: 4 }}><b>Bank file will pay</b> (matched) {ngn(data.sheet_summary?.matched_net ?? data.totals?.uploaded?.matched_net)}</div>
+                </>
+              ) : <div style={{ marginTop: 4, color: 'var(--muted)' }}>No sheet uploaded</div>}
             </div>
             {data.upload && (
               <div style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'right' }}>
@@ -1014,6 +1116,7 @@ function PayrollComparison({ from, to, pieceOnly, combined, onClose }) {
               </div>
             )}
           </div>
+          <UnmatchedSheetNote summary={data.sheet_summary} compact />
           {data.upload && (
             <>
               <input className="input" style={{ marginBottom: 8 }} placeholder="Search name…" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -1040,11 +1143,12 @@ function PayrollComparison({ from, to, pieceOnly, combined, onClose }) {
 }
 
 // Month-end sheet upload — store alongside computed payroll, or generate a draft run.
-function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, onDeleted, onGenerated, onShowHistory }) {
+function SheetUploadCard({ from, to, pieceOnly, upload, onUploaded, onDeleted, onGenerated, onCompare, onShowHistory }) {
   const { toast, confirm } = useStore();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   if (pieceOnly) return null;
+  const summary = upload?.sheet_summary;
 
   const uploadFile = async (file) => {
     if (!file) return;
@@ -1056,7 +1160,10 @@ function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, on
       fd.append('period_to', to);
       fd.append('kind', 'REGULAR');
       const r = await api(scopedAny('/payroll/sheet-upload'), { method: 'POST', form: fd });
-      toast(`Sheet stored — ${r.line_count} lines ✓`, 'ok');
+      const left = r.sheet_summary?.unmatched_count
+        ? ` · ${r.sheet_summary.unmatched_count} unmatched (${ngn(r.sheet_summary.unmatched_net)})`
+        : '';
+      toast(`Sheet stored — ${r.line_count} lines${left} ✓`, r.sheet_summary?.unmatched_count ? 'err' : 'ok');
       onUploaded && onUploaded(r);
     } catch (e) { setErr(e.message || 'Upload failed'); }
     setBusy(false);
@@ -1064,10 +1171,15 @@ function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, on
 
   const generateFromSheet = async () => {
     if (!upload?.id && !from) return;
+    const um = summary?.unmatched_count || 0;
     const ok = await confirm({
       title: 'Generate payroll from sheet?',
-      message: `Create a DRAFT run for ${from} → ${to} using the uploaded workbook figures (not computed attendance). You can approve and download the bank file from Saved.`,
-      confirmText: 'Generate draft',
+      message: `Create a DRAFT for ${from} → ${to} using the uploaded workbook (not computed attendance). `
+        + 'Next, on Saved: Approve → Bank portal file — same as mid-month.'
+        + (um
+          ? `\n\n⚠ ${um} sheet row(s) totaling ${ngn(summary.unmatched_net)} are not on the roster and will be LEFT OUT of the bank file. Add them under Rates, re-upload, then generate again.`
+          : ''),
+      confirmText: um ? 'Generate without unmatched' : 'Generate draft',
     });
     if (!ok) return;
     setBusy(true); setErr(null);
@@ -1076,7 +1188,11 @@ function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, on
         method: 'POST',
         body: { from, to, upload_id: upload?.id },
       });
-      toast(`Draft created from sheet — ${r.line_count} staff, net ${ngn(r.total_net)} ✓`, 'ok');
+      if (r.unmatched_count) {
+        toast(`Draft created — ${r.line_count} staff, net ${ngn(r.total_net)}. ${r.unmatched_count} unmatched row(s) (${ngn(r.unmatched_net)}) are not in the bank file.`, 'err');
+      } else {
+        toast(`Draft from sheet — ${r.line_count} staff, net ${ngn(r.total_net)}. Opening Saved: Approve → Bank portal file.`, 'ok');
+      }
       onGenerated && onGenerated(r);
     } catch (e) { setErr(e.message || 'Could not generate from sheet'); }
     setBusy(false);
@@ -1101,24 +1217,40 @@ function SheetUploadCard({ from, to, pieceOnly, combined, upload, onUploaded, on
   };
 
   return (
-    <div className="card" style={{ padding: '12px 14px', marginBottom: 10, borderLeft: '3px solid #6366f1' }}>
-      <strong style={{ display: 'block', marginBottom: 2 }}>📤 Upload month-end sheet</strong>
-      <span style={{ fontSize: 12, color: 'var(--muted)' }}>
-        Upload the accountant&apos;s Excel, compare with computed figures, then generate a draft payroll from the sheet for bank export.
+    <div className="card" style={{ padding: '12px 14px', marginBottom: 10, borderLeft: '3px solid #2563eb' }}>
+      <strong style={{ display: 'block', marginBottom: 2 }}>Month-end: pay from the accountant&apos;s Excel</strong>
+      <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+        Same as mid-month: upload sheet → generate → bank file. The bank portal file uses these uploaded amounts.
       </span>
+      <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Step 1 — Upload Excel</div>
       {upload ? (
-        <div style={{ marginTop: 8, fontSize: 12.5 }}>
+        <div style={{ marginTop: 6, fontSize: 12.5 }}>
           <b>{upload.file_name || 'Uploaded sheet'}</b>
-          <span style={{ color: 'var(--muted)' }}> · {upload.line_count} lines · {new Date((upload.uploaded_at || 0) * 1000).toLocaleDateString()}</span>
-          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-            <button className="btn btn-sm" style={{ width: 'auto', padding: '4px 14px' }} onClick={generateFromSheet} disabled={busy}>
+          <span style={{ color: 'var(--muted)' }}>
+            {' · '}{upload.line_count} lines
+            {summary?.uploaded_net != null ? ` · sheet ${ngn(summary.uploaded_net)}` : ''}
+            {summary?.matched_net != null ? ` · matched ${ngn(summary.matched_net)}` : ''}
+            {upload.uploaded_at ? ` · ${new Date((upload.uploaded_at || 0) * 1000).toLocaleDateString()}` : ''}
+          </span>
+          <UnmatchedSheetNote summary={summary} />
+          <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Step 2 — Generate payroll from sheet</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+            <button className="btn" style={{ width: 'auto', padding: '8px 16px' }} onClick={generateFromSheet} disabled={busy}>
               {busy ? <span className="spin" /> : '📋'} Generate payroll from sheet
             </button>
-            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '4px 12px' }} onClick={remove} disabled={busy}>Remove</button>
+            {onCompare && (
+              <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '8px 12px' }} onClick={onCompare} disabled={busy}>
+                Optional check vs computed
+              </button>
+            )}
+            <button className="btn btn-ghost btn-sm" style={{ width: 'auto', padding: '8px 12px' }} onClick={remove} disabled={busy}>Remove</button>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--muted)' }}>
+            Step 3 — opens <b>Saved</b>: Approve, then <b>Bank portal file</b>.
           </div>
         </div>
       ) : (
-        <label className="btn btn-sm" style={{ marginTop: 10, cursor: 'pointer', width: 'auto', display: 'inline-flex' }}>
+        <label className="btn" style={{ marginTop: 8, cursor: 'pointer', width: 'auto', display: 'inline-flex' }}>
           {busy ? <span className="spin" /> : '⬆ Choose Excel (.xls/.xlsx)'}
           <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} disabled={busy}
             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadFile(f); }} />
@@ -1237,7 +1369,10 @@ function SheetHistoryTab({ onOpenRun }) {
               <div>
                 <strong>{viewing.upload?.file_name || 'Sheet lines'}</strong>
                 <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  {viewing.upload?.period_from} → {viewing.upload?.period_to} · net {ngn(viewing.totals?.net)}
+                  {viewing.upload?.period_from} → {viewing.upload?.period_to} · sheet {ngn(viewing.totals?.net)}
+                  {viewing.sheet_summary?.unmatched_count
+                    ? ` · ${viewing.sheet_summary.unmatched_count} unmatched (${ngn(viewing.sheet_summary.unmatched_net)})`
+                    : ''}
                 </div>
               </div>
               <button className="btn btn-ghost btn-sm" style={{ width: 'auto' }} onClick={() => setViewing(null)}>Close</button>
@@ -1252,8 +1387,8 @@ function SheetHistoryTab({ onOpenRun }) {
               </thead>
               <tbody>
                 {(viewing.lines || []).map((l) => (
-                  <tr key={l.id} style={{ borderBottom: '1px solid var(--line)' }}>
-                    <td style={{ padding: '6px 4px' }}>{l.name || '—'}</td>
+                  <tr key={l.id} style={{ borderBottom: '1px solid var(--line)', background: l.staff_id ? undefined : '#fffbeb' }}>
+                    <td style={{ padding: '6px 4px' }}>{l.name || '—'}{!l.staff_id ? ' · unmatched' : ''}</td>
                     <td style={{ padding: '6px 4px', color: 'var(--muted)' }}>{l.sheet_kind || '—'}</td>
                     <td style={{ padding: '6px 4px', textAlign: 'right', fontWeight: 700 }}>{ngn(l.net)}</td>
                   </tr>
@@ -1777,6 +1912,7 @@ export default function Payroll() {
   const role = useRole();
   const allowed = role && atLeast(role, 'SNR_ACCOUNTANT');
   const [tab, setTab] = useState('run');
+  const [openRunId, setOpenRunId] = useState(null);
   const [summary, setSummary] = useState(null);
 
   useEffect(() => { if (allowed && tab === 'history') api(scopedAny('/payroll/imported/summary')).then(setSummary).catch(() => {}); }, [allowed, tab]);
@@ -1796,9 +1932,11 @@ export default function Payroll() {
         <button className={`seg-b${tab === 'sheets' ? ' on' : ''}`} onClick={() => setTab('sheets')}>📁 Sheet history</button>
       </div>
 
-      {tab === 'run' ? <RunTab sites={sites} onSaved={() => setTab('runs')} onShowSheetHistory={() => setTab('sheets')} />
+      {tab === 'run' ? <RunTab sites={sites} onSaved={() => setTab('runs')}
+        onGenerated={(r) => { if (r?.id) setOpenRunId(r.id); setTab('runs'); }}
+        onShowSheetHistory={() => setTab('sheets')} />
         : tab === 'mid' ? <MidMonthTab onSaved={() => setTab('runs')} />
-        : tab === 'runs' ? <RunsTab />
+        : tab === 'runs' ? <RunsTab initialOpenId={openRunId} onConsumedOpenId={() => setOpenRunId(null)} />
           : tab === 'setup' ? <SetupTab sites={sites} />
             : tab === 'sheets' ? <SheetHistoryTab onOpenRun={() => setTab('runs')} />
             : !summary || !(summary.byMonth || []).length ? (

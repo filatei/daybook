@@ -1295,6 +1295,30 @@ router.post('/runs2', requireAuth, async (req, res) => {
   res.status(201).json({ id: runId });
 });
 
+// Matched vs unmatched totals for a stored month-end sheet. Generate-from-sheet
+// (and therefore the bank portal file) only pays matched rows — unmatched net is
+// the usual reason a SHEET draft is lower than the workbook total.
+function summarizeSheetLines(lines) {
+  const all = lines || [];
+  const matchedRows = all.filter((l) => l.staff_id);
+  const unmatchedRows = all.filter((l) => !l.staff_id && ((Number(l.net) || 0) > 0 || (Number(l.gross) || 0) > 0));
+  return {
+    line_count: all.length,
+    matched_count: matchedRows.length,
+    unmatched_count: unmatchedRows.length,
+    uploaded_net: round2(all.reduce((a, l) => a + (Number(l.net) || 0), 0)),
+    matched_net: round2(matchedRows.reduce((a, l) => a + (Number(l.net) || 0), 0)),
+    unmatched_net: round2(unmatchedRows.reduce((a, l) => a + (Number(l.net) || 0), 0)),
+    unmatched: unmatchedRows.slice(0, 80).map((l) => ({
+      name: l.name || l.full_name || '—',
+      ext_people_id: l.ext_people_id || null,
+      net: round2(l.net || 0),
+      sheet_kind: l.sheet_kind || null,
+      sheet_row: l.sheet_row || null,
+    })),
+  };
+}
+
 // Build pay_run_lines from stored sheet upload rows — figures taken as-is from the
 // accountant's workbook, not recomputed from attendance or production.
 async function linesFromSheetUpload(upload, sheetLines, tenantId) {
@@ -1370,7 +1394,7 @@ router.post('/runs2/from-sheet', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'no matched staff with pay on that sheet — check IDs and re-upload' });
   }
 
-  const unmatched = sheetLines.filter((l) => !l.staff_id && ((l.net || 0) > 0 || (l.gross || 0) > 0));
+  const summary = summarizeSheetLines(sheetLines);
   const runId = uuid();
   let tg = 0; let td = 0; let tn = 0;
   await withTransaction(async () => {
@@ -1391,7 +1415,7 @@ router.post('/runs2/from-sheet', requireAuth, async (req, res) => {
   });
 
   await audit(c.tenant_id, req.user.id, 'PAYROLL_RUN_FROM_SHEET', 'pay_runs', runId,
-    { upload_id: upload.id, period: `${upload.period_from}..${upload.period_to}`, lines: runLines.length, unmatched: unmatched.length });
+    { upload_id: upload.id, period: `${upload.period_from}..${upload.period_to}`, lines: runLines.length, unmatched: summary.unmatched_count });
   res.status(201).json({
     id: runId,
     pay_source: 'SHEET',
@@ -1399,7 +1423,10 @@ router.post('/runs2/from-sheet', requireAuth, async (req, res) => {
     period_from: upload.period_from,
     period_to: upload.period_to,
     line_count: runLines.length,
-    unmatched_count: unmatched.length,
+    unmatched_count: summary.unmatched_count,
+    unmatched_net: summary.unmatched_net,
+    unmatched: summary.unmatched,
+    sheet_summary: summary,
     total_gross: r2(tg),
     total_net: r2(tn),
   });
@@ -1446,6 +1473,10 @@ router.get('/runs2/:id', requireAuth, async (req, res) => {
     ? await qone('SELECT * FROM production_override_batch WHERE id=?', [run.override_batch_id])
     : null;
   run.override_removed = !!run.override_batch_id && !run.override;
+  if (run.sheet_upload_id) {
+    const sheetLines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=?', [run.sheet_upload_id]);
+    run.sheet_summary = summarizeSheetLines(sheetLines);
+  }
   res.json(run);
 });
 // Edit one payslip line on a DRAFT run — adjust deduction / bags / days, recompute
@@ -3395,9 +3426,10 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
     return res.status(500).json({ error: `Upload failed: ${e.message}` });
   }
 
+  const sheetSummary = summarizeSheetLines(parsed.lines);
   await audit(c.tenant_id, req.user.id, 'sheet.upload', 'payroll_sheet_uploads', uploadId,
-    { period: `${parsed.period_from}..${parsed.period_to}`, kind: parsed.kind, lines: parsed.line_count });
-  res.status(201).json({ id: uploadId, file_name: req.file.originalname, ...parsed });
+    { period: `${parsed.period_from}..${parsed.period_to}`, kind: parsed.kind, lines: parsed.line_count, unmatched: sheetSummary.unmatched_count });
+  res.status(201).json({ id: uploadId, file_name: req.file.originalname, ...parsed, sheet_summary: sheetSummary });
 });
 
 router.get('/sheet-upload', requireAuth, async (req, res) => {
@@ -3408,11 +3440,17 @@ router.get('/sheet-upload', requireAuth, async (req, res) => {
   const upload = await activeSheetUpload(ctxTenants(c), pFrom, pTo, runKind);
   if (!upload) return res.json({ upload: null, lines: [] });
   const lines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=? ORDER BY name', [upload.id]);
-  res.json({ upload, lines, totals: {
-    gross: r2(lines.reduce((a, l) => a + (l.gross || 0), 0)),
-    deduction: r2(lines.reduce((a, l) => a + (l.deduction || 0), 0)),
-    net: r2(lines.reduce((a, l) => a + (l.net || 0), 0)),
-  } });
+  const sheetSummary = summarizeSheetLines(lines);
+  res.json({
+    upload,
+    lines,
+    sheet_summary: sheetSummary,
+    totals: {
+      gross: r2(lines.reduce((a, l) => a + (l.gross || 0), 0)),
+      deduction: r2(lines.reduce((a, l) => a + (l.deduction || 0), 0)),
+      net: sheetSummary.uploaded_net,
+    },
+  });
 });
 
 router.get('/sheet-upload/history', requireAuth, async (req, res) => {
@@ -3466,13 +3504,15 @@ router.get('/sheet-upload/:id/lines', requireAuth, async (req, res) => {
   const upload = await sheetUploadFor(c, req.params.id);
   if (!upload) return res.status(404).json({ error: 'not found' });
   const lines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=? ORDER BY name', [upload.id]);
+  const sheetSummary = summarizeSheetLines(lines);
   res.json({
     upload,
     lines,
+    sheet_summary: sheetSummary,
     totals: {
       gross: r2(lines.reduce((a, l) => a + (l.gross || 0), 0)),
       deduction: r2(lines.reduce((a, l) => a + (l.deduction || 0), 0)),
-      net: r2(lines.reduce((a, l) => a + (l.net || 0), 0)),
+      net: sheetSummary.uploaded_net,
     },
   });
 });
@@ -3537,6 +3577,7 @@ router.get('/compare', requireAuth, async (req, res) => {
     : [];
 
   const diffs = comparePayrollLines(computedLines, uploaded);
+  const sheetSummary = upload ? summarizeSheetLines(uploaded) : null;
   res.json({
     period_from: pFrom,
     period_to: pTo,
@@ -3545,6 +3586,7 @@ router.get('/compare', requireAuth, async (req, res) => {
     computed: computedLines,
     uploaded,
     diffs,
+    sheet_summary: sheetSummary,
     totals: {
       computed: {
         gross: round2(computedLines.reduce((a, l) => a + (l.gross || 0), 0)),
@@ -3552,7 +3594,10 @@ router.get('/compare', requireAuth, async (req, res) => {
       },
       uploaded: upload ? {
         gross: r2(uploaded.reduce((a, l) => a + (l.gross || 0), 0)),
-        net: r2(uploaded.reduce((a, l) => a + (l.net || 0), 0)),
+        net: sheetSummary.uploaded_net,
+        matched_net: sheetSummary.matched_net,
+        unmatched_net: sheetSummary.unmatched_net,
+        unmatched_count: sheetSummary.unmatched_count,
       } : null,
     },
   });

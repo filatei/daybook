@@ -1296,8 +1296,9 @@ router.post('/runs2', requireAuth, async (req, res) => {
 });
 
 // Matched vs unmatched totals for a stored month-end sheet. Generate-from-sheet
-// (and therefore the bank portal file) only pays matched rows — unmatched net is
-// the usual reason a SHEET draft is lower than the workbook total.
+// (and therefore the bank portal file) only pays linked rows. After sheet upload,
+// unmatched rows are auto-created as staff when possible; remaining unmatched_net
+// is usually ambiguous IDs/names or rows without identity.
 function summarizeSheetLines(lines) {
   const all = lines || [];
   const matchedRows = all.filter((l) => l.staff_id);
@@ -3201,6 +3202,10 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
       const hasPay = gross > 0 || net > 0 || days > 0 || loaded > 0 || bagged > 0;
       if (!hasPay) continue;
 
+      const location = String(xlsGet(row, ['LOCATION', 'SITE']) ?? '').trim();
+      const accountRaw = String(xlsGet(row, ['ACCOUNT NUMBER', 'ACCOUNT', 'BANK ACCOUNT']) ?? '').trim();
+      const designation = String(xlsGet(row, ['DESIGNATION', 'ROLE', 'TITLE']) ?? '').trim();
+
       const { staff: st, reason } = matchStaffRow(ext, full, byExt, byName);
       const sheetRow = `${sheetName}:${i + 2}`;
       if (!st) {
@@ -3209,7 +3214,7 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
           staff_id: null, tenant_id: null, ext_people_id: ext || null, name: full || null,
           days, loaded, bagged, base_salary: baseSalary, gross: r2(gross), deduction: r2(ded), net: r2(net),
           sheet_kind: sheetKindName, sheet_row: sheetRow, unmatched: true,
-          days_abs: row._days_abs,
+          days_abs: row._days_abs, location, account_raw: accountRaw, designation,
         });
         continue;
       }
@@ -3217,7 +3222,7 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
         staff_id: st.id, tenant_id: st.tenant_id, ext_people_id: st.ext_people_id || ext || null,
         name: st.full_name || full, days, loaded, bagged, base_salary: baseSalary,
         gross: r2(gross), deduction: r2(ded), net: r2(net), sheet_kind: sheetKindName, sheet_row: sheetRow,
-        days_abs: row._days_abs,
+        days_abs: row._days_abs, location, account_raw: accountRaw, designation,
       });
     }
   };
@@ -3270,6 +3275,259 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
       net: r2(lines.reduce((a, l) => a + (l.net || 0), 0)),
     },
   };
+}
+
+function sheetStaffType(sheetKind) {
+  const k = String(sheetKind || '').toUpperCase();
+  if (k === 'BAGGERS' || k === 'BAGGER') return 'BAGGER';
+  if (k === 'LOADERS' || k === 'LOADER') return 'LOADER';
+  return 'REGULAR';
+}
+
+function sheetPayType(sheetKind) {
+  const st = sheetStaffType(sheetKind);
+  // REGULAR month-end salary schedule → MONTHLY (prorated by DAYS WORKED).
+  // Piece sections → PIECE. DAILY is only for non-sheet manual roster rows.
+  return st === 'REGULAR' ? 'MONTHLY' : 'PIECE';
+}
+
+/**
+ * Auto-create / update Daybook staff for unmatched month-end sheet rows, then
+ * set payroll_sheet_lines.staff_id so generate-from-sheet includes them.
+ *
+ * Tenant rule (Group / combined workbook covering Fido + Fiafia):
+ *   1. LOCATION matches exactly one site in the payroll group → that site's tenant
+ *   2. LOCATION matches the same site name on more than one tenant → prefer Fido
+ *   3. No LOCATION / unmatched location → prefer Fido if in scope, else the
+ *      uploader's current workspace; attach to that tenant's first site by name
+ *
+ * Idempotent: re-upload matches by ext_people_id then nameKey and updates rather
+ * than inserting duplicates. Ambiguous roster matches are skipped (no third copy).
+ * Garbage rows (no Staff ID and no name, HIRED placeholders, TOTAL) are skipped.
+ *
+ * `q` is either the global helpers ({ qone, qall, qrun }) or a transaction clientQ.
+ */
+async function ensureStaffFromSheetLines(q, lines, opts = {}) {
+  const tenantIds = tenantList(opts.tenantIds);
+  const workspaceTenantId = opts.workspaceTenantId || tenantIds[0];
+  const dryRun = !!opts.dryRun;
+  if (!tenantIds.length || !lines?.length) {
+    return { created: [], updated: [], skipped: [], tenant_rule: null };
+  }
+
+  const ph = tenantIds.map(() => '?').join(',');
+  const tenants = await q.qall(`SELECT id, slug, name FROM tenants WHERE id IN (${ph})`, tenantIds);
+  const fido = tenants.find((t) => String(t.slug || '').toLowerCase() === 'fido');
+  const preferredTenantId = (fido && tenantIds.includes(fido.id)) ? fido.id : workspaceTenantId;
+  const tenantRule = {
+    preferred_tenant_id: preferredTenantId,
+    preferred_slug: fido && preferredTenantId === fido.id ? 'fido' : null,
+    note: 'LOCATION → site tenant; ambiguous site name → Fido; else Fido if in payroll group, else current workspace',
+  };
+
+  const sites = await q.qall(
+    `SELECT id, tenant_id, name FROM sites WHERE tenant_id IN (${ph}) ORDER BY name, id`,
+    tenantIds,
+  );
+  const siteByName = Object.create(null);
+  const sitesByTenant = Object.create(null);
+  for (const s of sites) {
+    const k = String(s.name || '').trim().toLowerCase();
+    if (k) (siteByName[k] = siteByName[k] || []).push(s);
+    (sitesByTenant[s.tenant_id] = sitesByTenant[s.tenant_id] || []).push(s);
+  }
+
+  const resolveSite = (location) => {
+    const loc = String(location || '').trim().toLowerCase();
+    if (loc && siteByName[loc]?.length) {
+      const matches = siteByName[loc];
+      if (matches.length === 1) return { site: matches[0], how: 'location' };
+      const prefer = matches.find((m) => m.tenant_id === preferredTenantId);
+      return { site: prefer || matches[0], how: 'location_ambiguous_prefer_fido' };
+    }
+    const list = sitesByTenant[preferredTenantId] || sitesByTenant[workspaceTenantId] || [];
+    if (!list.length) return { site: null, how: 'none' };
+    return { site: list[0], how: loc ? 'location_unmatched_default' : 'default_preferred' };
+  };
+
+  let staffPool = await q.qall(
+    `SELECT id, tenant_id, site_id, full_name, ext_people_id, staff_type, pay_type,
+            bank_name, bank_account, daily_rate, status, payroll_eligible
+       FROM staff WHERE tenant_id IN (${ph})`,
+    tenantIds,
+  );
+  let lookup = buildStaffLookup(staffPool);
+
+  const created = [];
+  const updated = [];
+  const skipped = [];
+
+  const applyLink = (line, st) => {
+    line.staff_id = st.id;
+    line.tenant_id = st.tenant_id;
+    line.unmatched = false;
+    if (!line.name) line.name = st.full_name;
+    if (!line.ext_people_id && st.ext_people_id) line.ext_people_id = st.ext_people_id;
+  };
+
+  for (const line of lines) {
+    if (line.staff_id) continue;
+
+    const ext = line.ext_people_id == null ? '' : String(line.ext_people_id).replace(/\.0$/, '').trim();
+    const full = String(line.name || '').trim();
+    const hasPay = (Number(line.net) || 0) > 0 || (Number(line.gross) || 0) > 0
+      || (Number(line.days) || 0) > 0 || (Number(line.loaded) || 0) > 0 || (Number(line.bagged) || 0) > 0;
+    if (!hasPay) continue;
+    if (!ext && !full) {
+      skipped.push({ name: null, ext_people_id: null, reason: 'no Staff ID or name', sheet_row: line.sheet_row || null });
+      continue;
+    }
+    if (/HIRED/i.test(full) || /^total$/i.test(full)) {
+      skipped.push({ name: full || null, ext_people_id: ext || null, reason: 'placeholder / total row', sheet_row: line.sheet_row || null });
+      continue;
+    }
+
+    // Rematch against the live pool (covers same-upload creates + re-upload idempotency).
+    const rematch = matchStaffRow(ext, full, lookup.byExt, lookup.byName);
+    if (!rematch.staff && rematch.reason && /more than one/i.test(rematch.reason)) {
+      skipped.push({
+        name: full || null, ext_people_id: ext || null, reason: rematch.reason, sheet_row: line.sheet_row || null,
+      });
+      continue;
+    }
+
+    const staffType = sheetStaffType(line.sheet_kind);
+    const payType = sheetPayType(line.sheet_kind);
+    const baseSalary = staffType === 'REGULAR' ? (Number(line.base_salary) || 0) : 0;
+    const designation = String(line.designation || '').trim() || staffType;
+    const bank = parseBankFields(line.account_raw, null);
+
+    if (rematch.staff) {
+      const st = rematch.staff;
+      const { site } = resolveSite(line.location);
+      if (!dryRun) {
+        // Fill blank bank only — never overwrite a different roster account.
+        const haveAcct = accountDigits(st.bank_account);
+        const wantAcct = bank.bank_account || '';
+        const fillBank = wantAcct && !haveAcct;
+        await q.qrun(
+          `UPDATE staff SET
+             full_name = COALESCE(NULLIF(?, ''), full_name),
+             role_title = COALESCE(NULLIF(?, ''), role_title),
+             staff_type = ?,
+             pay_type = ?,
+             payroll_eligible = TRUE,
+             status = 'ACTIVE',
+             ext_people_id = COALESCE(NULLIF(ext_people_id, ''), ?),
+             site_id = COALESCE(site_id, ?),
+             bank_name = CASE WHEN ? THEN ? ELSE bank_name END,
+             bank_account = CASE WHEN ? THEN ? ELSE bank_account END,
+             daily_rate = CASE WHEN ? > 0 THEN ? ELSE daily_rate END
+           WHERE id = ?`,
+          [
+            full || null, designation, staffType, payType,
+            ext || null, site ? site.id : null,
+            fillBank, fillBank ? bank.bank_name : null,
+            fillBank, fillBank ? bank.bank_account : null,
+            baseSalary, baseSalary,
+            st.id,
+          ],
+        );
+        st.full_name = full || st.full_name;
+        st.ext_people_id = st.ext_people_id || ext || null;
+        st.staff_type = staffType;
+        st.pay_type = payType;
+        if (fillBank) {
+          st.bank_name = bank.bank_name;
+          st.bank_account = bank.bank_account;
+        }
+        if (baseSalary > 0) st.daily_rate = baseSalary;
+        if (!st.site_id && site) st.site_id = site.id;
+      }
+      applyLink(line, st);
+      updated.push({
+        id: st.id, name: st.full_name || full, ext_people_id: st.ext_people_id || ext || null,
+        staff_type: staffType, net: round2(line.net || 0), action: 'updated',
+      });
+      continue;
+    }
+
+    const { site, how } = resolveSite(line.location);
+    if (!site) {
+      skipped.push({
+        name: full || null, ext_people_id: ext || null,
+        reason: 'no site in payroll group to attach — create a site or set LOCATION',
+        sheet_row: line.sheet_row || null,
+      });
+      continue;
+    }
+
+    const newId = uuid();
+    if (!dryRun) {
+      try {
+        await q.qrun(
+          `INSERT INTO staff
+             (id, tenant_id, site_id, full_name, role_title, staff_type, pay_type,
+              daily_rate, bank_name, bank_account, ext_people_id, status, payroll_eligible)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?, 'ACTIVE', TRUE)`,
+          [
+            newId, site.tenant_id, site.id, full || ext, designation, staffType, payType,
+            baseSalary, bank.bank_name, bank.bank_account, ext || null,
+          ],
+        );
+      } catch (e) {
+        // UNIQUE(tenant_id, site_id, full_name) — link the existing row instead of failing the upload.
+        const twin = await q.qone(
+          `SELECT id, tenant_id, full_name, ext_people_id FROM staff
+            WHERE tenant_id=? AND site_id=? AND ${STAFF_NAME_KEY_SQL} = ? LIMIT 1`,
+          [site.tenant_id, site.id, nameKey(full || ext)],
+        );
+        if (twin) {
+          applyLink(line, twin);
+          updated.push({
+            id: twin.id, name: twin.full_name || full, ext_people_id: twin.ext_people_id || ext || null,
+            staff_type: staffType, net: round2(line.net || 0), action: 'linked_existing',
+          });
+          staffPool.push(twin);
+          lookup = buildStaffLookup(staffPool);
+          continue;
+        }
+        skipped.push({
+          name: full || null, ext_people_id: ext || null,
+          reason: `could not create staff: ${e.message}`, sheet_row: line.sheet_row || null,
+        });
+        continue;
+      }
+    }
+
+    const createdStaff = {
+      id: dryRun ? `dry:${line.sheet_row || created.length}` : newId,
+      tenant_id: site.tenant_id,
+      site_id: site.id,
+      full_name: full || ext,
+      ext_people_id: ext || null,
+      staff_type: staffType,
+      pay_type: payType,
+    };
+    if (!dryRun) {
+      staffPool.push(createdStaff);
+      lookup = buildStaffLookup(staffPool);
+    }
+    applyLink(line, createdStaff);
+    created.push({
+      id: createdStaff.id,
+      name: createdStaff.full_name,
+      ext_people_id: ext || null,
+      staff_type: staffType,
+      tenant_id: site.tenant_id,
+      site_id: site.id,
+      site_how: how,
+      net: round2(line.net || 0),
+      action: 'created',
+    });
+  }
+
+  return { created, updated, skipped, tenant_rule: tenantRule };
 }
 
 async function activeSheetUpload(tenantIds, periodFrom, periodTo, kind) {
@@ -3387,7 +3645,34 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
   if (parsed.error) return res.status(400).json({ error: parsed.error });
 
   const dryRun = String(req.body?.dry_run || '') === '1' || req.body?.dry_run === true;
-  if (dryRun) return res.json({ dry_run: true, file_name: req.file.originalname, ...parsed });
+  if (dryRun) {
+    const staffFromSheet = await ensureStaffFromSheetLines(
+      { qone, qall, qrun },
+      parsed.lines,
+      { tenantIds: tenants, workspaceTenantId: c.tenant_id, dryRun: true },
+    );
+    // Rebuild unmatched list after dry-run linking for an accurate preview summary.
+    parsed.unmatched = parsed.lines
+      .filter((l) => !l.staff_id)
+      .map((l) => ({
+        ext_id: l.ext_people_id || null, full_name: l.name || null,
+        sheet_kind: l.sheet_kind, reason: 'still unmatched', sheet_row: l.sheet_row,
+      }));
+    parsed.matched = parsed.lines.filter((l) => l.staff_id).length;
+    const sheetSummary = summarizeSheetLines(parsed.lines);
+    return res.json({
+      dry_run: true, file_name: req.file.originalname, ...parsed, sheet_summary: sheetSummary,
+      staff_from_sheet: {
+        created_count: staffFromSheet.created.length,
+        updated_count: staffFromSheet.updated.length,
+        skipped_count: staffFromSheet.skipped.length,
+        created: staffFromSheet.created.slice(0, 80),
+        updated: staffFromSheet.updated.slice(0, 40),
+        skipped: staffFromSheet.skipped.slice(0, 40),
+        tenant_rule: staffFromSheet.tenant_rule,
+      },
+    });
+  }
 
   const uploadId = uuid();
   const scopeTenants = ctxTenants(c);
@@ -3398,9 +3683,16 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
   } catch (e) {
     return res.status(500).json({ error: `Could not store file: ${e.message}` });
   }
+
+  let staffFromSheet = { created: [], updated: [], skipped: [], tenant_rule: null };
   try {
     await withTransaction(async (client) => {
       const tx = clientQ(client);
+      // Create / link staff for unmatched rows BEFORE inserting lines so staff_id is set.
+      staffFromSheet = await ensureStaffFromSheetLines(tx, parsed.lines, {
+        tenantIds: tenants, workspaceTenantId: c.tenant_id, dryRun: false,
+      });
+
       const deactivatePh = scopeTenants.map(() => '?').join(',');
       await tx.qrun(`UPDATE payroll_sheet_uploads SET is_active=0, status='SUPERSEDED'
         WHERE tenant_id IN (${deactivatePh}) AND period_from=? AND period_to=? AND kind=? AND is_active=1`,
@@ -3426,10 +3718,33 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
     return res.status(500).json({ error: `Upload failed: ${e.message}` });
   }
 
+  parsed.unmatched = parsed.lines
+    .filter((l) => !l.staff_id)
+    .map((l) => ({
+      ext_id: l.ext_people_id || null, full_name: l.name || null,
+      sheet_kind: l.sheet_kind, reason: 'still unmatched', sheet_row: l.sheet_row,
+    }));
+  parsed.matched = parsed.lines.filter((l) => l.staff_id).length;
   const sheetSummary = summarizeSheetLines(parsed.lines);
+  const staffPayload = {
+    created_count: staffFromSheet.created.length,
+    updated_count: staffFromSheet.updated.length,
+    skipped_count: staffFromSheet.skipped.length,
+    created: staffFromSheet.created.slice(0, 80),
+    updated: staffFromSheet.updated.slice(0, 40),
+    skipped: staffFromSheet.skipped.slice(0, 40),
+    tenant_rule: staffFromSheet.tenant_rule,
+  };
   await audit(c.tenant_id, req.user.id, 'sheet.upload', 'payroll_sheet_uploads', uploadId,
-    { period: `${parsed.period_from}..${parsed.period_to}`, kind: parsed.kind, lines: parsed.line_count, unmatched: sheetSummary.unmatched_count });
-  res.status(201).json({ id: uploadId, file_name: req.file.originalname, ...parsed, sheet_summary: sheetSummary });
+    {
+      period: `${parsed.period_from}..${parsed.period_to}`, kind: parsed.kind, lines: parsed.line_count,
+      unmatched: sheetSummary.unmatched_count,
+      staff_created: staffPayload.created_count, staff_updated: staffPayload.updated_count,
+    });
+  res.status(201).json({
+    id: uploadId, file_name: req.file.originalname, ...parsed,
+    sheet_summary: sheetSummary, staff_from_sheet: staffPayload,
+  });
 });
 
 router.get('/sheet-upload', requireAuth, async (req, res) => {

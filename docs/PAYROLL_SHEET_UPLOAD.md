@@ -24,27 +24,59 @@ In-app: *Same as mid-month: upload sheet → generate → bank file.*
 ## Month-end workflow (every month)
 
 1. Open **More → Payroll → Run** tab. Use **Full month (28→27)** — e.g. 2026-07-28 → 2026-08-27 for August 2026.
-2. **Step 1 — Upload Excel** — the accountant's `.xls`/`.xlsx` (REGULAR / BAGGERS / LOADERS), e.g. `FIDO SALARY SCHEDULE AUGUST 2026.xls`.
-3. **Step 2 — Generate payroll from sheet** — creates a **DRAFT** with sheet figures (`pay_source = SHEET`). The screen then opens **Saved**.
-4. **Step 3 — Saved:** Approve (if needed) → **Bank portal file**.
+2. Prefer **Group** (or Combined Fido + Fiafia) so both workspaces' staff match the workbook.
+3. **Step 1 — Upload Excel** — the accountant's `.xls`/`.xlsx` (REGULAR / BAGGERS / LOADERS), e.g. `FIDO SALARY SCHEDULE AUGUST 2026.xls`.
+4. After upload, Daybook **auto-creates** any sheet people who were not already on the roster (see below). The UI shows **Created N new staff from sheet** plus a short list.
+5. **Step 2 — Generate payroll from sheet** — creates a **DRAFT** with sheet figures (`pay_source = SHEET`). The screen then opens **Saved**.
+6. **Step 3 — Saved:** Approve (if needed) → **Bank portal file**.
 
 *(Optional)* **Preview computed** from attendance. Totals do not need to match the sheet. The bank file is built from the SHEET draft, not from computed.
 
-Prefer **Group** (or Combined Fido + Fiafia) so both workspaces' staff match the workbook.
+Re-uploading the same period supersedes the previous active upload (history kept with `is_active=0`; original files are retained on disk). Re-upload is **idempotent** for staff — existing people are updated/linked, not duplicated.
 
-Re-uploading the same period supersedes the previous active upload (history kept with `is_active=0`; original files are retained on disk).
+## Auto-create staff from unmatched sheet rows
+
+The accountant's workbook is treated as authentic. On `POST /payroll/sheet-upload` (same DB transaction as storing lines):
+
+1. Parse REGULAR / BAGGERS / LOADERS and match each pay row to roster staff (`ext_people_id`, then token-sorted `nameKey`).
+2. For each **unmatched** row that has a Staff ID and/or name **and** pay data:
+   - Find existing staff again (idempotent re-upload) → **update** rates / type / eligibility / blank bank fields, then link the line.
+   - Otherwise **create** staff: `payroll_eligible=true`, `status=ACTIVE`, `staff_type` / `pay_type` from the sheet section, base salary into `daily_rate` for REGULAR, bank from `ACCOUNT NUMBER` when present, `LOCATION` → site.
+3. Write `payroll_sheet_lines.staff_id` so **Generate payroll from sheet** includes them.
+
+**Pay types from sheet section**
+
+| Sheet tab | `staff_type` | `pay_type` |
+|-----------|--------------|------------|
+| REGULAR   | REGULAR      | MONTHLY    |
+| BAGGERS   | BAGGER       | PIECE      |
+| LOADERS   | LOADER       | PIECE      |
+
+**Skipped (not invented as staff):** empty identity, `HIRED …` placeholders, `TOTAL` rows, zero-pay rows, and **ambiguous** roster matches (same ID or name on more than one staff record — fix the roster, then re-upload).
+
+You do **not** need to add people under **Rates** for a normal month-end sheet upload.
+
+### Tenant rule (Group / combined)
+
+When the upload spans Fido + Fiafia:
+
+1. **LOCATION** matches exactly one site in the payroll group → create/update under that site's tenant.
+2. **LOCATION** matches the same site name on more than one tenant → **prefer Fido**.
+3. No LOCATION / unmatched location → **prefer Fido** if it is in the payroll group; otherwise the uploader's current workspace. Attach to that tenant's first site (by name).
+
+Single-workspace uploads only create under that workspace's sites.
 
 ## Why three nets can differ
 
-Example (August 2026): Computed ₦6.02M vs Uploaded ₦6.93M vs SHEET draft ₦6.65M.
+Example (August 2026): Computed ₦6.02M vs Uploaded ₦6.93M vs SHEET draft (before auto-create) ₦6.65M.
 
 | Figure | Meaning | In the bank file? |
 |--------|---------|-------------------|
 | **Computed** | Attendance + production at Daybook rates | No (unless you Save a COMPUTED draft instead) |
-| **Uploaded sheet** | Every pay row in the Excel, including people not on the roster | No — unmatched rows are dropped |
-| **SHEET draft / matched** | Uploaded amounts for staff Daybook could match | **Yes** — this is what **Bank portal file** pays |
+| **Uploaded sheet** | Every pay row in the Excel | No by itself — must generate a SHEET draft |
+| **SHEET draft / matched** | Uploaded amounts for linked staff (including auto-created) | **Yes** — this is what **Bank portal file** pays |
 
-Unmatched names are listed after upload and on the Saved run. Add them under **Rates**, re-upload, then generate again so they appear in the bank file.
+After auto-create, matched net should approach the uploaded workbook net (minus intentional skips: zero-pay, headers, ambiguous rows).
 
 ## File storage
 
@@ -60,14 +92,14 @@ Metadata on `payroll_sheet_uploads`: `stored_path`, `file_size`, `content_type`.
 
 | Method | Path | Role | Notes |
 |--------|------|------|-------|
-| POST | `/api/payroll/sheet-upload` | SNR_ACCOUNTANT+ | Multipart `file` (.xls/.xlsx). Optional `period_from`, `period_to`, `kind`, `dry_run=1`. Response includes `sheet_summary` (matched vs unmatched) |
+| POST | `/api/payroll/sheet-upload` | SNR_ACCOUNTANT+ | Multipart `file` (.xls/.xlsx). Optional `period_from`, `period_to`, `kind`, `dry_run=1`. Response includes `sheet_summary` and `staff_from_sheet` (`created` / `updated` / `skipped`, `tenant_rule`) |
 | GET | `/api/payroll/sheet-upload?period_from&period_to&kind` | SNR_ACCOUNTANT+ | Active upload + lines + `sheet_summary` |
 | GET | `/api/payroll/sheet-upload/history` | SNR_ACCOUNTANT+ | All uploads for tenant scope (active + superseded), with linked run if any |
 | GET | `/api/payroll/sheet-upload/:id/download` | SNR_ACCOUNTANT+ | Download original workbook (404 if not stored) |
 | GET | `/api/payroll/sheet-upload/:id/lines` | SNR_ACCOUNTANT+ | Parsed lines for any past upload + `sheet_summary` |
 | DELETE | `/api/payroll/sheet-upload/:id` | SNR_ACCOUNTANT+ | Soft-deletes (sets `is_active=0`) |
 | GET | `/api/payroll/compare?period_from&period_to&kind` | SNR_ACCOUNTANT+ | Optional check: `{ computed, uploaded, diffs, sheet_summary }` — not required for the bank file |
-| POST | `/api/payroll/runs2/from-sheet` | SNR_ACCOUNTANT+ | Body: `{ from, to, upload_id? }` — creates DRAFT from uploaded figures (matched staff only) |
+| POST | `/api/payroll/runs2/from-sheet` | SNR_ACCOUNTANT+ | Body: `{ from, to, upload_id? }` — creates DRAFT from uploaded figures (linked staff) |
 | GET | `/api/payroll/runs2/:id` | SNR_ACCOUNTANT+ | Includes `sheet_summary` when the run was built from a sheet |
 | GET | `/api/payroll/runs2/:id/bank.xlsx` | SNR_ACCOUNTANT+ | **Bank portal file** — same workbook mid-month uses. Works for SHEET and COMPUTED runs |
 
@@ -90,9 +122,9 @@ gross = monthly_salary × (Mon–Sat days clocked in) / (Mon–Sat working days 
 
 Parses sheets named **REGULAR**, **BAGGERS**, and **LOADERS** (same layout as the payroll template):
 
-- **REGULAR**: DAYS WORKED (or DAYS ABS), NET SALARY, SALARY ADV / DEDUCTION, optional BASE SALARY
-- **BAGGERS**: QTY, COMMISSION, DEDUCTION
-- **LOADERS**: BAGS LOADED, NET PAY (COMMISSION), DEDUCTION
+- **REGULAR**: DAYS WORKED (or DAYS ABS), NET SALARY, SALARY ADV / DEDUCTION, optional BASE SALARY, LOCATION, ACCOUNT NUMBER, DESIGNATION
+- **BAGGERS**: QTY, COMMISSION, DEDUCTION, LOCATION, ACCOUNT NUMBER
+- **LOADERS**: BAGS LOADED, NET PAY (COMMISSION), DEDUCTION, LOCATION, ACCOUNT NUMBER
 
 Period is read from PAY START DATE / PAY END DATE columns, or passed in the upload request.
 
@@ -104,15 +136,14 @@ Example (August 2026): period 2026-07-28 → 2026-08-27, **27 Mon–Sat working 
 2. Open **More → Payroll → Run** tab. Confirm the month-end steps banner (upload → generate → bank file).
 3. Set full-month dates (28→27). **Do not** require Preview computed.
 4. **Upload month-end sheet** (e.g. `FIDO SALARY SCHEDULE AUGUST 2026.xls`).
-5. If unmatched rows appear, note the ₦ left out of the bank file.
-6. **Generate payroll from sheet** — Saved opens on the new **SHEET** draft; **Bank portal file** is the primary button.
-7. Download **Bank portal file** — payees and nets match matched sheet rows (not computed, not unmatched).
-8. Approve / mark paid flow unchanged.
-9. Optional check vs computed still available; copy states totals do not need to match.
-10. **Preview computed → Save payroll (draft)** still creates a **COMPUTED** run (unchanged). Mid-month tab unchanged.
+5. Confirm toast / green note: **Created N new staff from sheet** (or 0 if everyone already matched). Unmatched should only be ambiguous/garbage rows.
+6. **Generate payroll from sheet** — Saved opens on the new **SHEET** draft; draft net ≈ uploaded sheet net.
+7. Download **Bank portal file** — payees and nets match linked sheet rows.
+8. Re-upload the same file — staff counts do not grow (idempotent); lines still linked.
+9. Approve / mark paid flow unchanged. Mid-month tab unchanged.
+10. Optional check vs computed still available; copy states totals do not need to match.
 11. Sheet-sourced drafts cannot be **Recompute**d — re-upload and generate again instead.
-12. Open **Sheet history** — unmatched rows highlighted; past uploads downloadable.
-13. Re-upload same period — previous upload shows **Superseded**, file still downloadable.
+12. Open **Sheet history** — past uploads downloadable.
 
 ## Deploy notes
 

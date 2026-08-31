@@ -162,16 +162,44 @@ function StaffPayDetail({ line, from, to, onDeduction, onClose }) {
 }
 
 // ── Run: compute + save a payroll ─────────────────────────────────────────────
+function StaffFromSheetNote({ staffFromSheet }) {
+  if (!staffFromSheet?.created_count) return null;
+  const list = staffFromSheet.created || [];
+  return (
+    <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#ecfdf5', border: '1px solid #6ee7b7', fontSize: 12.5 }}>
+      <strong style={{ color: '#065f46' }}>
+        Created {staffFromSheet.created_count} new staff from sheet
+        {staffFromSheet.updated_count ? ` · ${staffFromSheet.updated_count} existing updated` : ''}
+      </strong>
+      <div style={{ color: '#047857', marginTop: 2 }}>
+        They are linked to this upload — Generate payroll from sheet will include them in the bank file.
+      </div>
+      {list.slice(0, 12).map((u, i) => (
+        <div key={`${u.id || u.name}-${i}`} style={{ fontSize: 12, marginTop: 2 }}>
+          {u.name}{u.ext_people_id ? ` · ID ${u.ext_people_id}` : ''}
+          {u.staff_type ? ` · ${u.staff_type}` : ''}
+          {u.net ? ` · ${ngn(u.net)}` : ''}
+        </div>
+      ))}
+      {list.length > 12 && (
+        <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 4 }}>
+          +{list.length - 12} more
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UnmatchedSheetNote({ summary, compact }) {
   if (!summary?.unmatched_count) return null;
   return (
     <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#fffbeb', border: '1px solid #fcd34d', fontSize: 12.5 }}>
       <strong style={{ color: '#92400e' }}>
-        {summary.unmatched_count} sheet row{summary.unmatched_count === 1 ? '' : 's'} not on the roster
+        {summary.unmatched_count} sheet row{summary.unmatched_count === 1 ? '' : 's'} still unmatched
         {summary.unmatched_net ? ` · ${ngn(summary.unmatched_net)} left out of the bank file` : ''}
       </strong>
       <div style={{ color: '#92400e', marginTop: 2 }}>
-        Add them under Rates, re-upload the Excel, then generate again. Generate from sheet only pays matched staff.
+        Usually ambiguous names/IDs or missing Staff ID and name. Fix the roster or the sheet row, then re-upload.
       </div>
       {!compact && (summary.unmatched || []).slice(0, 12).map((u, i) => (
         <div key={`${u.name}-${i}`} style={{ fontSize: 12, marginTop: 2 }}>
@@ -363,6 +391,7 @@ function RunTab({ sites, onSaved, onGenerated, onShowSheetHistory }) {
             uploaded_at: Math.floor(Date.now() / 1000),
             sheet_summary: r.sheet_summary,
             totals: r.totals,
+            staff_from_sheet: r.staff_from_sheet || null,
           });
         }}
         onDeleted={() => { setSheetUpload(null); setComparison(null); }}
@@ -1095,7 +1124,7 @@ function PayrollComparison({ from, to, pieceOnly, combined, onClose }) {
       </div>
       <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 10 }}>
         {from} → {to}. These totals do not need to match. <b>Generate payroll from sheet</b> pays the uploaded amounts
-        for staff on the roster; that draft is what the <b>Bank portal file</b> uses.
+        for staff linked to the sheet (including people auto-created on upload); that draft is what the <b>Bank portal file</b> uses.
       </div>
       {err && <div style={{ padding: 10, background: '#fee2e2', borderRadius: 8, fontSize: 13, color: '#991b1b', marginBottom: 10 }}>{err}</div>}
       {!data ? <div className="skel" /> : (
@@ -1149,6 +1178,7 @@ function SheetUploadCard({ from, to, pieceOnly, upload, onUploaded, onDeleted, o
   const [err, setErr] = useState(null);
   if (pieceOnly) return null;
   const summary = upload?.sheet_summary;
+  const staffFromSheet = upload?.staff_from_sheet;
 
   const uploadFile = async (file) => {
     if (!file) return;
@@ -1160,10 +1190,15 @@ function SheetUploadCard({ from, to, pieceOnly, upload, onUploaded, onDeleted, o
       fd.append('period_to', to);
       fd.append('kind', 'REGULAR');
       const r = await api(scopedAny('/payroll/sheet-upload'), { method: 'POST', form: fd });
-      const left = r.sheet_summary?.unmatched_count
-        ? ` · ${r.sheet_summary.unmatched_count} unmatched (${ngn(r.sheet_summary.unmatched_net)})`
-        : '';
-      toast(`Sheet stored — ${r.line_count} lines${left} ✓`, r.sheet_summary?.unmatched_count ? 'err' : 'ok');
+      const createdN = r.staff_from_sheet?.created_count || 0;
+      const still = r.sheet_summary?.unmatched_count || 0;
+      if (createdN) {
+        toast(`Sheet stored — created ${createdN} new staff from sheet · ${r.line_count} lines${still ? ` · ${still} still unmatched` : ''} ✓`, still ? 'err' : 'ok');
+      } else if (still) {
+        toast(`Sheet stored — ${r.line_count} lines · ${still} unmatched (${ngn(r.sheet_summary.unmatched_net)})`, 'err');
+      } else {
+        toast(`Sheet stored — ${r.line_count} lines ✓`, 'ok');
+      }
       onUploaded && onUploaded(r);
     } catch (e) { setErr(e.message || 'Upload failed'); }
     setBusy(false);
@@ -1177,7 +1212,7 @@ function SheetUploadCard({ from, to, pieceOnly, upload, onUploaded, onDeleted, o
       message: `Create a DRAFT for ${from} → ${to} using the uploaded workbook (not computed attendance). `
         + 'Next, on Saved: Approve → Bank portal file — same as mid-month.'
         + (um
-          ? `\n\n⚠ ${um} sheet row(s) totaling ${ngn(summary.unmatched_net)} are not on the roster and will be LEFT OUT of the bank file. Add them under Rates, re-upload, then generate again.`
+          ? `\n\n⚠ ${um} sheet row(s) totaling ${ngn(summary.unmatched_net)} are still unmatched (ambiguous ID/name or missing identity) and will be LEFT OUT of the bank file.`
           : ''),
       confirmText: um ? 'Generate without unmatched' : 'Generate draft',
     });
@@ -1232,6 +1267,7 @@ function SheetUploadCard({ from, to, pieceOnly, upload, onUploaded, onDeleted, o
             {summary?.matched_net != null ? ` · matched ${ngn(summary.matched_net)}` : ''}
             {upload.uploaded_at ? ` · ${new Date((upload.uploaded_at || 0) * 1000).toLocaleDateString()}` : ''}
           </span>
+          <StaffFromSheetNote staffFromSheet={staffFromSheet} />
           <UnmatchedSheetNote summary={summary} />
           <div style={{ marginTop: 10, fontSize: 12, fontWeight: 700, color: 'var(--muted)' }}>Step 2 — Generate payroll from sheet</div>
           <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>

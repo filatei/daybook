@@ -28,7 +28,7 @@ try { fs.mkdirSync(PAYROLL_SHEET_DIR, { recursive: true }); } catch (e) {
   console.warn('[payroll] PAYROLL_SHEET_DIR not ready at startup:', e.message);
 }
 const { qone, qall, qrun, withTransaction, clientQ } = require('./db');
-const { requireAuth, contextFor, requestedTenant, atLeast, siteBound } = require('./auth');
+const { requireAuth, contextFor, requestedTenant, atLeast, siteBound, groupContexts } = require('./auth');
 const {
   nameKey, accountDigits, parseBankFields, csvAccountText, personGroups, STAFF_NAME_KEY_SQL,
 } = require('./staffIdentity');
@@ -50,23 +50,14 @@ async function audit(tenant_id, user_id, action, entity, entity_id, meta) {
 // resolve it rather than 403.
 const GROUP_ID = '__group__';
 
-// Every ACTIVE tenant where this user holds minRole (superadmin: all of them).
-// Ordered by name so the anchor tenant is stable across requests — a combined
-// run is recorded against the anchor, and it must not drift between compute and
-// save, or the draft would land in a different workspace than it was previewed in.
-async function groupContexts(user, minRole) {
-  const rows = await qall("SELECT id FROM tenants WHERE status='ACTIVE' ORDER BY name, id");
-  const out = [];
-  for (const t of rows) {
-    const c = await contextFor(user, t.id);
-    if (c && atLeast(c.role, minRole)) out.push(c);
-  }
-  return out;
-}
-
-// Payroll compute/config/approve is restricted to the finance tier: SNR
-// ACCOUNTANT / GENERAL MANAGER / ADMIN (rank ≥ 7). Operational routes (recording
-// production / advances) pass 'SECRETARY' explicitly to stay open to site staff.
+// Payroll compute/config/approve/delete/bank is restricted to the finance tier:
+// SNR ACCOUNTANT / GENERAL MANAGER / ADMIN (rank ≥ 7). Operational routes
+// (recording production / advances) pass 'SECRETARY' explicitly to stay open
+// to site staff.
+//
+// Uses auth.groupContexts (membership + finance-tier borrow) so a Snr Accountant
+// whose row is only under Fido can still open/approve a Fiafia-owned run when
+// Saved pins that run's tenant_id under Group.
 async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
   const tid = requestedTenant(req) || req.body?.tenant_id;
   if (!tid) { res.status(400).json({ error: 'select a workspace' }); return null; }
@@ -78,8 +69,19 @@ async function needCtx(req, res, minRole = 'SNR_ACCOUNTANT') {
     return { ...ctxs[0], site_id: null, group: true, tenant_ids: ctxs.map((x) => x.tenant_id) };
   }
   const c = await contextFor(req.user, tid);
-  if (!c || !atLeast(c.role, minRole)) { res.status(403).json({ error: 'forbidden' }); return null; }
-  return c;
+  if (c && atLeast(c.role, minRole)) return c;
+  // Whole-business finance borrow: SNR+ in ANY tenant → every active tenant.
+  const borrowed = (await groupContexts(req.user, minRole)).find((x) => x.tenant_id === tid);
+  if (borrowed) {
+    return {
+      tenant_id: borrowed.tenant_id,
+      role: borrowed.role,
+      site_id: borrowed.site_id || null,
+      borrowed: !!borrowed.borrowed,
+    };
+  }
+  res.status(403).json({ error: 'forbidden' });
+  return null;
 }
 
 // ── Shared payroll predicates ─────────────────────────────────────────────────
@@ -1447,31 +1449,40 @@ router.get('/runs2', requireAuth, async (req, res) => {
     WHERE ${sc.sql} ORDER BY r.created_at DESC LIMIT 100`, [...ids, ...sc.args]));
 });
 router.get('/runs2/:id', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
-  const run = await runFor(c, req.params.id);
-  if (!run) return res.status(404).json({ error: 'not found' });
-  // Prefer the site name stored on the line (set at compute/from-sheet). The old
-  // correlated REGEXP_REPLACE twin lookup scanned the whole staff table twice per
-  // line and made opening a large draft hang on mobile — looking like a no-op.
-  run.lines = await qall(`SELECT pl.*,
-      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name) AS primary_site_name,
-      COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name) AS site_name
-    FROM pay_run_lines pl
-    LEFT JOIN staff s ON s.id=pl.staff_id
-    LEFT JOIN sites st ON st.id=s.site_id
-    WHERE pl.run_id=? ORDER BY primary_site_name NULLS LAST, pl.staff_name`, [run.id]);
-  // Carry the provenance through to the saved view, so a run that was paid from
-  // the accountant's sheet still says so at approval time — and keeps saying so
-  // after the batch itself has been removed.
-  run.override = run.override_batch_id
-    ? await qone('SELECT * FROM production_override_batch WHERE id=?', [run.override_batch_id])
-    : null;
-  run.override_removed = !!run.override_batch_id && !run.override;
-  if (run.sheet_upload_id) {
-    const sheetLines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=?', [run.sheet_upload_id]);
-    run.sheet_summary = summarizeSheetLines(sheetLines);
+  try {
+    const c = await needCtx(req, res); if (!c) return;
+    const run = await runFor(c, req.params.id);
+    if (!run) return res.status(404).json({ error: 'not found' });
+    // Prefer the site name stored on the line (set at compute/from-sheet). The old
+    // correlated REGEXP_REPLACE twin lookup scanned the whole staff table twice per
+    // line and made opening a large draft hang on mobile — looking like a no-op.
+    // ORDER BY must not use bare primary_site_name — pl.* already exposes that
+    // column, so an alias of the same name makes Postgres raise 42702 (ambiguous)
+    // and an unhandled throw here crashes the container (502 on every open).
+    run.lines = await qall(`SELECT pl.*,
+        COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name) AS primary_site_name,
+        COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name) AS site_name
+      FROM pay_run_lines pl
+      LEFT JOIN staff s ON s.id=pl.staff_id
+      LEFT JOIN sites st ON st.id=s.site_id
+      WHERE pl.run_id=?
+      ORDER BY COALESCE(NULLIF(TRIM(pl.primary_site_name), ''), st.name) NULLS LAST, pl.staff_name`, [run.id]);
+    // Carry the provenance through to the saved view, so a run that was paid from
+    // the accountant's sheet still says so at approval time — and keeps saying so
+    // after the batch itself has been removed.
+    run.override = run.override_batch_id
+      ? await qone('SELECT * FROM production_override_batch WHERE id=?', [run.override_batch_id])
+      : null;
+    run.override_removed = !!run.override_batch_id && !run.override;
+    if (run.sheet_upload_id) {
+      const sheetLines = await qall('SELECT * FROM payroll_sheet_lines WHERE upload_id=?', [run.sheet_upload_id]);
+      run.sheet_summary = summarizeSheetLines(sheetLines);
+    }
+    res.json(run);
+  } catch (e) {
+    console.error('[payroll] GET /runs2/:id', e.message || e);
+    if (!res.headersSent) res.status(500).json({ error: e.message || 'failed to load payroll run' });
   }
-  res.json(run);
 });
 // Edit one payslip line on a DRAFT run — adjust deduction / bags / days, recompute
 // gross+net, and flag any discrepancy vs the daily-recorded snapshot in `remarks`.
@@ -1604,13 +1615,14 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
   res.json({ updated, unmatched });
 });
 
-// Approve (Snr Accountant+) → Paid (General Manager+).
+// Approve (SNR_ACCOUNTANT+) → Paid (GENERAL_MANAGER+; SNR ranks equal to GM).
 router.post('/runs2/:id/status', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
+  const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   const next = (req.body && req.body.status || '').toUpperCase();
   if (next === 'APPROVED') {
+    if (!atLeast(c.role, 'SNR_ACCOUNTANT')) return res.status(403).json({ error: 'forbidden' });
     if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be approved' });
     await qrun('UPDATE pay_runs SET status=?, approved_by=?, approved_at=? WHERE id=?', ['APPROVED', req.user.id, nowS(), run.id]);
   } else if (next === 'PAID') {
@@ -1620,12 +1632,11 @@ router.post('/runs2/:id/status', requireAuth, async (req, res) => {
   } else return res.status(400).json({ error: 'invalid status' });
   res.json(await qone('SELECT * FROM pay_runs WHERE id=?', [run.id]));
 });
-// Delete a DRAFT run. Drafts freeze gross at compute time, so one built against a
-// wrong rate or a wrong staff roster stays wrong for ever — it does not pick up a
-// later correction. Deleting and recomputing is the only way to fix it.
-// APPROVED/PAID runs are history and are never deletable.
+// Delete a DRAFT run — SNR_ACCOUNTANT+ only (needCtx). Drafts freeze gross at
+// compute time, so one built against a wrong rate or roster stays wrong forever.
+// APPROVED/PAID are history and are never deletable (Admin included — safer).
 router.delete('/runs2/:id', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
+  const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
   if (run.status !== 'DRAFT') return res.status(400).json({ error: `a ${String(run.status).toLowerCase()} run cannot be deleted — it is a record of money already committed` });
@@ -2657,19 +2668,25 @@ async function bankXlsxBuffer(run) {
   return XLSX.write(forceAccountTextSheets(wb, ['Account number']), { type: 'buffer', bookType: 'xlsx' });
 }
 
-// The workbook itself always generates — a payroll must not be blocked by
-// one bad record. The issues ride alongside (bank-check, below) so the UI
-// can warn before submission.
+// Bank portal workbook — available once APPROVED (and still after PAID).
+// SNR_ACCOUNTANT+ via needCtx. Drafts must be approved first (Approve → bank file).
+// The workbook itself always generates for eligible statuses — a payroll must not
+// be blocked by one bad record. Issues ride alongside (bank-check) so the UI can
+// warn before submission.
 router.get('/runs2/:id/bank.xlsx', requireAuth, async (req, res) => {
-  const c = await needCtx(req, res); if (!c) return;
+  const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).end();
+  const st = String(run.status || '').toUpperCase();
+  if (st !== 'APPROVED' && st !== 'PAID') {
+    return res.status(400).json({ error: 'approve the draft before downloading the bank portal file' });
+  }
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="bank-payment-${run.period_from}_${run.period_to}.xlsx"`);
   res.send(await bankXlsxBuffer(run));
 });
 
-// Pre-flight: who in this run cannot be paid as recorded.
+// Pre-flight: who in this run cannot be paid as recorded (SNR+; any status).
 router.get('/runs2/:id/bank-check', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return;
   const run = await runFor(c, req.params.id);

@@ -560,7 +560,8 @@ function RunTab({ sites, onSaved, onGenerated, onShowSheetHistory }) {
 function RunsTab({ initialOpenId, onConsumedOpenId }) {
   const { tenant, toast, confirm, sites, registerBack } = useStore();
   const role = useRole();
-  const isGM = role && atLeast(role, 'GENERAL_MANAGER');
+  const isSnr = role && atLeast(role, 'SNR_ACCOUNTANT'); // finance tier (Snr / GM / Admin)
+  const isGM = role && atLeast(role, 'GENERAL_MANAGER');  // equal rank to Snr; Mark paid
   const [runs, setRuns] = useState([]);
   const [open, setOpen] = useState(null);   // run detail
   const [siteFilter, setSiteFilter] = useState('');
@@ -688,16 +689,18 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
 
   const primaryActions = open && (
     <div style={{ display: 'flex', gap: 8, margin: '10px 0 12px', flexWrap: 'wrap' }}>
-      {open.status === 'DRAFT' && (
+      {open.status === 'DRAFT' && isSnr && (
         <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48 }} onClick={() => setStatus('APPROVED')}>
           Approve
         </button>
       )}
-      <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48, ...(bankCheck?.at_risk ? { background: '#b45309' } : {}) }}
-        onClick={() => downloadFile(runPath(open.id, open.tenant_id, '/bank.xlsx'), `bank_payment_${open.period_from}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}
-        title="Workbook for the bank payroll portal — same file mid-month uses">
-        🏦 Bank portal file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
-      </button>
+      {(open.status === 'APPROVED' || open.status === 'PAID') && isSnr && (
+        <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48, ...(bankCheck?.at_risk ? { background: '#b45309' } : {}) }}
+          onClick={() => downloadFile(runPath(open.id, open.tenant_id, '/bank.xlsx'), `bank_payment_${open.period_from}.xlsx`).catch((e) => toast(e.message || 'Download failed', 'err'))}
+          title="Workbook for the bank payroll portal — available after Approve">
+          🏦 Bank portal file{bankCheck?.at_risk ? ` (${bankCheck.at_risk}⚠)` : ''}
+        </button>
+      )}
       {open.status === 'APPROVED' && isGM && (
         <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48, background: '#16a34a' }} onClick={() => setStatus('PAID')}>Mark paid</button>
       )}
@@ -725,7 +728,7 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
                   {r.site_name || 'All sites'} · net {ngn(r.total_net)}
-                  {r.status === 'DRAFT' ? ' · Approve → Bank portal file' : ''}
+                  {r.status === 'DRAFT' ? ' · Approve → Bank portal file' : r.status === 'APPROVED' ? ' · Bank portal file ready' : ''}
                 </div>
                 {r.sheet_upload_id && r.pay_source !== 'SHEET' && (
                   <button type="button"
@@ -877,9 +880,9 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
               </div>
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-              {open.status === 'DRAFT' && (
+              {open.status === 'DRAFT' && isSnr && (
                 <button type="button" className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px', color: '#b91c1c' }} onClick={del} disabled={acting}
-                  title="Throw this draft away — use when the period itself is wrong">🗑 Delete</button>
+                  title="Throw this draft away — use when the period itself is wrong">🗑 Delete draft</button>
               )}
               <button type="button" className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px' }} onClick={() => setOpen(null)}>Close</button>
             </div>

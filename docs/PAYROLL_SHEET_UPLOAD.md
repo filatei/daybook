@@ -52,7 +52,7 @@ The accountant's workbook is treated as authentic. On `POST /payroll/sheet-uploa
 | BAGGERS   | BAGGER       | PIECE      |
 | LOADERS   | LOADER       | PIECE      |
 
-**Skipped (not invented as staff):** empty identity, `HIRED …` placeholders, `TOTAL` rows, zero-pay rows, and **ambiguous** roster matches (same ID or name on more than one staff record — fix the roster, then re-upload).
+**Skipped (not invented as staff):** empty identity, `HIRED …` placeholders, `TOTAL` rows, zero-pay rows, and rows where staff could not be created (e.g. no site in the workspace).
 
 You do **not** need to add people under **Rates** for a normal month-end sheet upload.
 

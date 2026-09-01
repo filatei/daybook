@@ -211,7 +211,7 @@ function UnmatchedSheetNote({ summary, compact }) {
         {summary.unmatched_net ? ` · ${ngn(summary.unmatched_net)} left out of the bank file` : ''}
       </strong>
       <div style={{ color: '#92400e', marginTop: 2 }}>
-        Usually ambiguous names/IDs or missing Staff ID and name. Fix the roster or the sheet row, then re-upload.
+        Only true junk rows stay unmatched (empty name with no pay, placeholders). Re-upload after deploy — new people are auto-created from the sheet.
       </div>
       {!compact && (summary.unmatched || []).slice(0, 12).map((u, i) => (
         <div key={`${u.name}-${i}`} style={{ fontSize: 12, marginTop: 2 }}>
@@ -1265,7 +1265,7 @@ function SheetUploadCard({ from, to, pieceOnly, upload, onUploaded, onDeleted, o
       message: `Create a DRAFT for ${from} → ${to} using the uploaded workbook (not computed attendance). `
         + 'Next, on Saved: Approve → Bank portal file — same as mid-month.'
         + (um
-          ? `\n\n⚠ ${um} sheet row(s) totaling ${ngn(summary.unmatched_net)} are still unmatched (ambiguous ID/name or missing identity) and will be LEFT OUT of the bank file.`
+          ? `\n\n⚠ ${um} sheet row(s) totaling ${ngn(summary.unmatched_net)} could not be linked and will be LEFT OUT of the bank file. Re-upload after fixing any roster/site issue.`
           : ''),
       confirmText: um ? 'Generate without unmatched' : 'Generate draft',
     });

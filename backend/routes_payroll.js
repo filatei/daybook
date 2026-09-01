@@ -3151,10 +3151,56 @@ function matchStaffRow(ext, full, byExt, byName) {
   return { staff: st, reason: null };
 }
 
+// When several roster rows share an ID or nameKey, pick the best one instead of
+// leaving the sheet row unmatched (common with Fido + Fiafia duplicate imports).
+function resolveStaffForSheet(ext, full, staffPool, opts = {}) {
+  const extNorm = ext ? String(ext).replace(/\.0$/, '').trim() : '';
+  const nk = nameKey(full);
+  const { workspaceTenantId, preferredTenantId, siteByName, location } = opts;
+
+  let candidates = [];
+  if (extNorm) {
+    candidates = staffPool.filter((s) => {
+      const e = s.ext_people_id == null ? '' : String(s.ext_people_id).replace(/\.0$/, '').trim();
+      return e === extNorm;
+    });
+  }
+  if (!candidates.length && nk) {
+    candidates = staffPool.filter((s) => nameKey(s.full_name) === nk);
+  }
+  if (!candidates.length) {
+    return {
+      staff: null,
+      reason: extNorm ? `no staff with ID ${extNorm}` : (full ? 'name not on the roster' : 'no Staff ID or name'),
+    };
+  }
+  if (candidates.length === 1) return { staff: candidates[0], reason: null };
+
+  const loc = String(location || '').trim().toLowerCase();
+  let locTenant = null;
+  if (loc && siteByName?.[loc]?.length) {
+    const matches = siteByName[loc];
+    const site = matches.length === 1 ? matches[0]
+      : matches.find((m) => m.tenant_id === preferredTenantId) || matches[0];
+    locTenant = site?.tenant_id || null;
+  }
+  const pickFrom = (list, subset) => (subset.length ? subset : list);
+  let pool = candidates;
+  if (locTenant) pool = pickFrom(pool, pool.filter((s) => s.tenant_id === locTenant));
+  if (workspaceTenantId) pool = pickFrom(pool, pool.filter((s) => s.tenant_id === workspaceTenantId));
+  if (preferredTenantId) pool = pickFrom(pool, pool.filter((s) => s.tenant_id === preferredTenantId));
+  return { staff: pickPayrollHead(pool), reason: null, resolved_ambiguous: true };
+}
+
+// Group roll-up spans Fido + Fiafia; a single-workspace upload should match/create
+// only within that workspace so cross-tenant duplicates do not block linking.
+function sheetStaffTenants(c, payrollTenants) {
+  return c.group ? payrollTenants : [c.tenant_id];
+}
+
 // Parse REGULAR / BAGGERS / LOADERS from a month-end workbook. Returns sheet
 // values as-is — no staff updates, no pay_run mutations.
 function parsePayrollSheetWorkbook(wb, staff, body = {}) {
-  const { byExt, byName } = buildStaffLookup(staff);
   let pFrom = null;
   let pTo = null;
   let sheetKind = null;
@@ -3216,7 +3262,7 @@ function parsePayrollSheetWorkbook(wb, staff, body = {}) {
       const accountRaw = String(xlsGet(row, ['ACCOUNT NUMBER', 'ACCOUNT', 'BANK ACCOUNT']) ?? '').trim();
       const designation = String(xlsGet(row, ['DESIGNATION', 'ROLE', 'TITLE']) ?? '').trim();
 
-      const { staff: st, reason } = matchStaffRow(ext, full, byExt, byName);
+      const { staff: st, reason } = resolveStaffForSheet(ext, full, staff, { location });
       const sheetRow = `${sheetName}:${i + 2}`;
       if (!st) {
         unmatched.push({ ext_id: ext || null, full_name: full || null, sheet_kind: sheetKindName, reason, sheet_row: sheetRow });
@@ -3312,7 +3358,8 @@ function sheetPayType(sheetKind) {
  *      uploader's current workspace; attach to that tenant's first site by name
  *
  * Idempotent: re-upload matches by ext_people_id then nameKey and updates rather
- * than inserting duplicates. Ambiguous roster matches are skipped (no third copy).
+ * than inserting duplicates. Duplicate roster rows (same ID or nameKey) are resolved
+ * to the best existing staff record — not skipped.
  * Garbage rows (no Staff ID and no name, HIRED placeholders, TOTAL) are skipped.
  *
  * `q` is either the global helpers ({ qone, qall, qrun }) or a transaction clientQ.
@@ -3398,13 +3445,9 @@ async function ensureStaffFromSheetLines(q, lines, opts = {}) {
     }
 
     // Rematch against the live pool (covers same-upload creates + re-upload idempotency).
-    const rematch = matchStaffRow(ext, full, lookup.byExt, lookup.byName);
-    if (!rematch.staff && rematch.reason && /more than one/i.test(rematch.reason)) {
-      skipped.push({
-        name: full || null, ext_people_id: ext || null, reason: rematch.reason, sheet_row: line.sheet_row || null,
-      });
-      continue;
-    }
+    const rematch = resolveStaffForSheet(ext, full, staffPool, {
+      workspaceTenantId, preferredTenantId, siteByName, location: line.location,
+    });
 
     const staffType = sheetStaffType(line.sheet_kind);
     const payType = sheetPayType(line.sheet_kind);
@@ -3486,19 +3529,24 @@ async function ensureStaffFromSheetLines(q, lines, opts = {}) {
           ],
         );
       } catch (e) {
-        // UNIQUE(tenant_id, site_id, full_name) — link the existing row instead of failing the upload.
-        const twin = await q.qone(
-          `SELECT id, tenant_id, full_name, ext_people_id FROM staff
-            WHERE tenant_id=? AND site_id=? AND ${STAFF_NAME_KEY_SQL} = ? LIMIT 1`,
-          [site.tenant_id, site.id, nameKey(full || ext)],
+        // uq_staff_tenant_name_key (tenant + token-sorted name) — link existing instead of failing.
+        const twins = await q.qall(
+          `SELECT id, tenant_id, site_id, full_name, ext_people_id, staff_type, pay_type,
+                  bank_name, bank_account, daily_rate, status, payroll_eligible
+             FROM staff
+            WHERE tenant_id=? AND ${STAFF_NAME_KEY_SQL} = ?
+              AND COALESCE(status,'') <> 'LEFT'
+            LIMIT 8`,
+          [site.tenant_id, nameKey(full || ext)],
         );
+        const twin = twins.length ? pickPayrollHead(twins) : null;
         if (twin) {
           applyLink(line, twin);
           updated.push({
             id: twin.id, name: twin.full_name || full, ext_people_id: twin.ext_people_id || ext || null,
             staff_type: staffType, net: round2(line.net || 0), action: 'linked_existing',
           });
-          staffPool.push(twin);
+          if (!staffPool.some((s) => s.id === twin.id)) staffPool.push(twin);
           lookup = buildStaffLookup(staffPool);
           continue;
         }
@@ -3646,20 +3694,22 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
   let wb;
   try { wb = XLSX.read(req.file.buffer, { type: 'buffer' }); } catch { return res.status(400).json({ error: 'unreadable spreadsheet' }); }
 
-  const tenants = await payrollGroup(req.user, c.tenant_id, c);
-  if (!tenants.length) return res.status(400).json({ error: 'no active workspaces' });
-  const ph = tenants.map(() => '?').join(',');
-  const staff = await qall(`SELECT s.id, s.tenant_id, s.full_name, s.ext_people_id FROM staff s WHERE s.tenant_id IN (${ph})`, tenants);
+  const payrollTenants = await payrollGroup(req.user, c.tenant_id, c);
+  if (!payrollTenants.length) return res.status(400).json({ error: 'no active workspaces' });
+  const staffTenants = sheetStaffTenants(c, payrollTenants);
+  const ph = staffTenants.map(() => '?').join(',');
+  const staff = await qall(`SELECT s.id, s.tenant_id, s.full_name, s.ext_people_id FROM staff s WHERE s.tenant_id IN (${ph})`, staffTenants);
 
   const parsed = parsePayrollSheetWorkbook(wb, staff, req.body || {});
   if (parsed.error) return res.status(400).json({ error: parsed.error });
 
+  const staffOpts = { tenantIds: staffTenants, workspaceTenantId: c.tenant_id };
   const dryRun = String(req.body?.dry_run || '') === '1' || req.body?.dry_run === true;
   if (dryRun) {
     const staffFromSheet = await ensureStaffFromSheetLines(
       { qone, qall, qrun },
       parsed.lines,
-      { tenantIds: tenants, workspaceTenantId: c.tenant_id, dryRun: true },
+      { ...staffOpts, dryRun: true },
     );
     // Rebuild unmatched list after dry-run linking for an accurate preview summary.
     parsed.unmatched = parsed.lines
@@ -3700,7 +3750,7 @@ router.post('/sheet-upload', requireAuth, xlsUpload.single('file'), async (req, 
       const tx = clientQ(client);
       // Create / link staff for unmatched rows BEFORE inserting lines so staff_id is set.
       staffFromSheet = await ensureStaffFromSheetLines(tx, parsed.lines, {
-        tenantIds: tenants, workspaceTenantId: c.tenant_id, dryRun: false,
+        ...staffOpts, dryRun: false,
       });
 
       const deactivatePh = scopeTenants.map(() => '?').join(',');

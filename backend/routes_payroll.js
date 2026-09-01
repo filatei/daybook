@@ -1615,7 +1615,7 @@ router.post('/runs2/:id/import', requireAuth, xlsUpload.single('file'), async (r
   res.json({ updated, unmatched });
 });
 
-// Approve (SNR_ACCOUNTANT+) → Paid (GENERAL_MANAGER+; SNR ranks equal to GM).
+// Approve / return to draft (SNR_ACCOUNTANT+) → Paid (GENERAL_MANAGER+; SNR ranks equal to GM).
 router.post('/runs2/:id/status', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+
   const run = await runFor(c, req.params.id);
@@ -1625,6 +1625,12 @@ router.post('/runs2/:id/status', requireAuth, async (req, res) => {
     if (!atLeast(c.role, 'SNR_ACCOUNTANT')) return res.status(403).json({ error: 'forbidden' });
     if (run.status !== 'DRAFT') return res.status(400).json({ error: 'only a draft can be approved' });
     await qrun('UPDATE pay_runs SET status=?, approved_by=?, approved_at=? WHERE id=?', ['APPROVED', req.user.id, nowS(), run.id]);
+  } else if (next === 'DRAFT') {
+    if (!atLeast(c.role, 'SNR_ACCOUNTANT')) return res.status(403).json({ error: 'forbidden' });
+    if (run.status !== 'APPROVED') return res.status(400).json({ error: 'only an approved run can be returned to draft' });
+    await qrun('UPDATE pay_runs SET status=?, approved_by=NULL, approved_at=NULL WHERE id=?', ['DRAFT', run.id]);
+    await audit(run.tenant_id, req.user.id, 'PAYROLL_RUN_UNAPPROVE', 'pay_runs', run.id,
+      { period: `${run.period_from}→${run.period_to}`, kind: run.kind, was_approved_by: run.approved_by, was_approved_at: run.approved_at });
   } else if (next === 'PAID') {
     if (!atLeast(c.role, 'GENERAL_MANAGER')) return res.status(403).json({ error: 'only a General Manager can mark paid' });
     if (run.status !== 'APPROVED') return res.status(400).json({ error: 'approve before marking paid' });
@@ -1632,23 +1638,26 @@ router.post('/runs2/:id/status', requireAuth, async (req, res) => {
   } else return res.status(400).json({ error: 'invalid status' });
   res.json(await qone('SELECT * FROM pay_runs WHERE id=?', [run.id]));
 });
-// Delete a DRAFT run — SNR_ACCOUNTANT+ only (needCtx). Drafts freeze gross at
-// compute time, so one built against a wrong rate or roster stays wrong forever.
-// APPROVED/PAID are history and are never deletable (Admin included — safer).
+// Delete a DRAFT or APPROVED run — SNR_ACCOUNTANT+ only (needCtx). PAID runs are
+// permanent payment records and cannot be deleted.
 router.delete('/runs2/:id', requireAuth, async (req, res) => {
   const c = await needCtx(req, res); if (!c) return; // SNR_ACCOUNTANT+
   const run = await runFor(c, req.params.id);
   if (!run) return res.status(404).json({ error: 'not found' });
-  if (run.status !== 'DRAFT') return res.status(400).json({ error: `a ${String(run.status).toLowerCase()} run cannot be deleted — it is a record of money already committed` });
+  const st = String(run.status || '').toUpperCase();
+  if (st === 'PAID') return res.status(400).json({ error: 'a paid run cannot be deleted — it is a permanent payment record' });
+  if (st !== 'DRAFT' && st !== 'APPROVED') {
+    return res.status(400).json({ error: `a ${st.toLowerCase()} run cannot be deleted` });
+  }
   await withTransaction(async () => {
-    // Release any advances this draft had claimed, or they would stay attached to
+    // Release any advances this run had claimed, or they would stay attached to
     // a run that no longer exists and never be deducted again.
     await qrun('UPDATE staff_advances SET run_id=NULL WHERE run_id=?', [run.id]);
     await qrun('DELETE FROM pay_run_lines WHERE run_id=?', [run.id]);
     await qrun('DELETE FROM pay_runs WHERE id=?', [run.id]);
   });
   await audit(run.tenant_id, req.user.id, 'PAYROLL_RUN_DELETE', 'pay_runs', run.id,
-    { period: `${run.period_from}→${run.period_to}`, kind: run.kind, total_gross: run.total_gross });
+    { period: `${run.period_from}→${run.period_to}`, kind: run.kind, total_gross: run.total_gross, previous_status: st });
   res.json({ ok: true, deleted: run.id });
 });
 

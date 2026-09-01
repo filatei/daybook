@@ -652,16 +652,39 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
     } catch (e) { toast(e.message || 'Recompute failed', 'err'); }
     setActing(false);
   };
-  const del = async () => {
+  const returnToDraft = async () => {
     const ok = await confirm({
-      title: 'Delete this draft?',
-      message: `${open.period_from} → ${open.period_to} · gross ${ngn(open.total_gross)}. Nothing is paid from a draft, so this is safe — rebuild it from the Run or Mid-month tab. Any advances it claimed are released.`,
-      confirmText: 'Delete draft',
+      title: 'Return to draft?',
+      message: `${open.period_from} → ${open.period_to} · gross ${ngn(open.total_gross)}. `
+        + 'The run goes back to draft so you can edit lines, recompute, or re-approve. '
+        + 'The bank portal file is disabled until you approve again.',
+      confirmText: 'Return to draft',
+    });
+    if (!ok) return;
+    setActing(true);
+    try {
+      const r = await api(runPath(open.id, open.tenant_id, '/status'), { method: 'POST', body: { status: 'DRAFT' } });
+      setOpen((o) => ({ ...o, ...r }));
+      setBankCheck(null);
+      toast('Returned to draft ✓', 'ok');
+      load();
+    } catch (e) { toast(e.message || 'Could not return to draft', 'err'); }
+    setActing(false);
+  };
+  const del = async () => {
+    const approved = open.status === 'APPROVED';
+    const ok = await confirm({
+      title: approved ? 'Delete this approved run?' : 'Delete this draft?',
+      message: `${open.period_from} → ${open.period_to} · gross ${ngn(open.total_gross)}. `
+        + (approved
+          ? 'This permanently removes the approved run. Use Return to draft if you only need to edit figures. Any advances it claimed are released.'
+          : 'Nothing is paid from a draft, so this is safe — rebuild it from the Run or Mid-month tab. Any advances it claimed are released.'),
+      confirmText: approved ? 'Delete run' : 'Delete draft',
       danger: true,
     });
     if (!ok) return;
     setActing(true);
-    try { await api(runPath(open.id, open.tenant_id), { method: 'DELETE' }); toast('Draft deleted ✓', 'ok'); setOpen(null); load(); }
+    try { await api(runPath(open.id, open.tenant_id), { method: 'DELETE' }); toast(`${approved ? 'Run' : 'Draft'} deleted ✓`, 'ok'); setOpen(null); load(); }
     catch (e) { toast(e.message || 'Delete failed', 'err'); }
     setActing(false);
   };
@@ -692,6 +715,12 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
       {open.status === 'DRAFT' && isSnr && (
         <button type="button" className="btn" style={{ flex: '1 1 140px', minHeight: 48 }} onClick={() => setStatus('APPROVED')}>
           Approve
+        </button>
+      )}
+      {open.status === 'APPROVED' && isSnr && (
+        <button type="button" className="btn btn-ghost" style={{ flex: '1 1 140px', minHeight: 48 }} onClick={returnToDraft} disabled={acting}
+          title="Reopen for editing — bank portal file disabled until re-approved">
+          {acting ? <span className="spin" /> : '↩'} Return to draft
         </button>
       )}
       {(open.status === 'APPROVED' || open.status === 'PAID') && isSnr && (
@@ -880,9 +909,11 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
               </div>
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-              {open.status === 'DRAFT' && isSnr && (
+              {(open.status === 'DRAFT' || open.status === 'APPROVED') && isSnr && (
                 <button type="button" className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px', color: '#b91c1c' }} onClick={del} disabled={acting}
-                  title="Throw this draft away — use when the period itself is wrong">🗑 Delete draft</button>
+                  title={open.status === 'APPROVED' ? 'Permanently remove this run' : 'Throw this draft away — use when the period itself is wrong'}>
+                  🗑 {open.status === 'APPROVED' ? 'Delete run' : 'Delete draft'}
+                </button>
               )}
               <button type="button" className="btn btn-ghost" style={{ width: 'auto', padding: '8px 12px' }} onClick={() => setOpen(null)}>Close</button>
             </div>
@@ -896,6 +927,12 @@ function RunsTab({ initialOpenId, onConsumedOpenId }) {
               <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>
                 A draft keeps the figures it was built with — it does not pick up a later rate change or staff correction.
                 <b> Recompute</b> rebuilds it for the same period; <b>Delete</b> it and start again if the period itself is wrong.
+              </p>
+            )}
+            {open.status === 'APPROVED' && isSnr && (
+              <p style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 8, marginBottom: 0 }}>
+                <b>Return to draft</b> to edit lines or recompute, then approve again for the bank portal file.
+                <b> Delete</b> removes the run permanently.
               </p>
             )}
           </div>

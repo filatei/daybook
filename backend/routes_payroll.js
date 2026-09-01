@@ -3130,29 +3130,6 @@ const xlsGet = (row, names) => {
   return undefined;
 };
 
-function buildStaffLookup(staff) {
-  const byExt = {};
-  const byName = {};
-  for (const s of staff) {
-    const e = s.ext_people_id == null ? '' : String(s.ext_people_id).replace(/\.0$/, '').trim();
-    if (e) byExt[e] = (e in byExt) ? null : s;
-    const n = nameKey(s.full_name);
-    if (n) byName[n] = (n in byName) ? null : s;
-  }
-  return { byExt, byName };
-}
-
-function matchStaffRow(ext, full, byExt, byName) {
-  const nk = nameKey(full);
-  if (ext && byExt[ext] === null) return { staff: null, reason: `ID ${ext} belongs to more than one staff record` };
-  if (!byExt[ext] && nk && byName[nk] === null) return { staff: null, reason: 'name matches more than one staff record' };
-  const st = (ext && byExt[ext]) || (nk ? byName[nk] : null);
-  if (!st) return { staff: null, reason: ext ? `no staff with ID ${ext}` : 'name not on the roster' };
-  return { staff: st, reason: null };
-}
-
-// When several roster rows share an ID or nameKey, pick the best one instead of
-// leaving the sheet row unmatched (common with Fido + Fiafia duplicate imports).
 function resolveStaffForSheet(ext, full, staffPool, opts = {}) {
   const extNorm = ext ? String(ext).replace(/\.0$/, '').trim() : '';
   const nk = nameKey(full);
@@ -3413,7 +3390,6 @@ async function ensureStaffFromSheetLines(q, lines, opts = {}) {
        FROM staff WHERE tenant_id IN (${ph})`,
     tenantIds,
   );
-  let lookup = buildStaffLookup(staffPool);
 
   const created = [];
   const updated = [];
@@ -3547,7 +3523,6 @@ async function ensureStaffFromSheetLines(q, lines, opts = {}) {
             staff_type: staffType, net: round2(line.net || 0), action: 'linked_existing',
           });
           if (!staffPool.some((s) => s.id === twin.id)) staffPool.push(twin);
-          lookup = buildStaffLookup(staffPool);
           continue;
         }
         skipped.push({
@@ -3569,7 +3544,6 @@ async function ensureStaffFromSheetLines(q, lines, opts = {}) {
     };
     if (!dryRun) {
       staffPool.push(createdStaff);
-      lookup = buildStaffLookup(staffPool);
     }
     applyLink(line, createdStaff);
     created.push({

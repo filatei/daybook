@@ -659,17 +659,28 @@ router.get('/:id/payments', requireAuth, async (req, res) => {
 });
 
 // Record a (partial) payment against an expense ticket — Secretary/Manager+.
-// A payment MUST carry a receipt (bank slip / voucher). The file rides in the same
-// multipart request so the payment and its proof are stored together — no payment
-// can exist without evidence, and a client can't drop the second call. The receipt
-// is pinned to the payment id it evidences.
+// A payment MUST be backed by a receipt (bank slip / voucher). Proof is either:
+//   1. a file uploaded with this request (preferred — pinned to the new payment), or
+//   2. a file already attached to the ticket (e.g. filed under Receipts & notes earlier).
+// Note-only attachments do not count — there must be an actual file. This lets
+// Snr Accountant / Manager pay once a receipt is on the ticket, same as Admin,
+// without forcing a duplicate upload.
 const cleanupUpload = (req) => { if (req.file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, req.file.filename)); } catch { /* ignore */ } } };
 router.post('/:id/payments', requireAuth, upload.single('file'), async (req, res) => {
   const a = await expenseAccess(req, req.params.id);
   if (!a) { cleanupUpload(req); return res.status(404).json({ error: 'not found' }); }
   if (!atLeast(a.ctx.role, 'SECRETARY')) { cleanupUpload(req); return res.status(403).json({ error: 'forbidden' }); }
-  // Enforce the receipt. Reject (and discard any partial upload) if none.
-  if (!req.file) return res.status(400).json({ error: 'a receipt is required to record a payment' });
+  // Prefer an unpinned ticket file so we can link it to this payment; otherwise any
+  // file on the ticket still satisfies the proof rule.
+  const existingFile = await qone(
+    `SELECT id FROM expense_attachments
+      WHERE expense_id=? AND file_name IS NOT NULL AND TRIM(file_name) <> ''
+      ORDER BY CASE WHEN payment_id IS NULL THEN 0 ELSE 1 END, created_at DESC
+      LIMIT 1`,
+    [a.expense.id]);
+  if (!req.file && !existingFile) {
+    return res.status(400).json({ error: 'a receipt is required to record a payment' });
+  }
   const b = req.body || {};
   const amount = Math.round((+b.amount || 0) * 100) / 100;
   if (!(amount > 0)) { cleanupUpload(req); return res.status(400).json({ error: 'amount required' }); }
@@ -681,10 +692,19 @@ router.post('/:id/payments', requireAuth, upload.single('file'), async (req, res
   const pay_date = (b.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
   await qrun('INSERT INTO expense_payments (id,tenant_id,expense_id,pay_date,amount,method,bank,memo,paid_by) VALUES (?,?,?,?,?,?,?,?,?)',
     [id, a.expense.tenant_id, a.expense.id, pay_date, amount, b.method || null, (b.bank || '').toUpperCase() || null, b.memo || null, req.user.id]);
-  // Store the receipt, pinned to this payment.
-  await qrun('INSERT INTO expense_attachments (id,tenant_id,expense_id,payment_id,note,file_name,stored_name,mime,size,uploaded_by) VALUES (?,?,?,?,?,?,?,?,?,?)',
-    [uuid(), a.expense.tenant_id, a.expense.id, id, (b.memo ? String(b.memo).trim() : null) || null,
-      req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, req.user.id]);
+  if (req.file) {
+    // New upload — store and pin to this payment.
+    await qrun('INSERT INTO expense_attachments (id,tenant_id,expense_id,payment_id,note,file_name,stored_name,mime,size,uploaded_by) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [uuid(), a.expense.tenant_id, a.expense.id, id, (b.memo ? String(b.memo).trim() : null) || null,
+        req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, req.user.id]);
+  } else if (existingFile) {
+    // Reuse the ticket receipt as proof of this payment (only if it isn't already
+    // pinned to another payment line).
+    await qrun(
+      `UPDATE expense_attachments SET payment_id=?
+        WHERE id=? AND expense_id=? AND payment_id IS NULL`,
+      [id, existingFile.id, a.expense.id]);
+  }
   const paid = Math.round((already + amount) * 100) / 100;
   const status = payStatus(total, paid);
   await qrun('UPDATE expenses SET amount_paid=?, status=? WHERE id=?', [paid, status, a.expense.id]);

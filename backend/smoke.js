@@ -9,12 +9,18 @@
 'use strict';
 const BASE = process.env.SMOKE_BASE || 'http://127.0.0.1:8090';
 
-async function api(method, p, { token, body } = {}) {
-  const res = await fetch(BASE + p, {
-    method,
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+async function api(method, p, { token, body, form } = {}) {
+  const headers = {
+    ...(token ? { Authorization: 'Bearer ' + token } : {}),
+  };
+  let payload;
+  if (form) {
+    payload = form; // FormData — fetch sets multipart boundary; do not set Content-Type
+  } else if (body) {
+    headers['Content-Type'] = 'application/json';
+    payload = JSON.stringify(body);
+  }
+  const res = await fetch(BASE + p, { method, headers, body: payload });
   let json; try { json = await res.json(); } catch { json = {}; }
   return { status: res.status, json };
 }
@@ -113,6 +119,42 @@ const check = (n, c, x) => { if (c) { pass++; console.log('  ✅ ' + n); } else 
   check('expense bad transition rejected', badStep.status === 409, badStep.json);
   const imp = await api('GET', `/api/expenses/imprest-summary?tenant=${fido.id}&from=2026-06-12&to=2026-06-12`, { token: su });
   check('imprest summary shape', Array.isArray(imp.json.sites), imp.json);
+
+  // ── pay with existing ticket receipt (no re-upload) — Manager / Snr Accountant path ──
+  // Regression: pay used to require a NEW multipart file even when a slip was already
+  // on the ticket; only Admin workflows felt usable. Proof on file must unlock Pay.
+  await api('POST', '/api/members', { token: su, body: { tenant_id: fido.id, email: 'snr@fido.test', role: 'SNR_ACCOUNTANT' } });
+  const snr = await dev('snr@fido.test');
+  const expPay = await api('POST', `/api/expenses?tenant=${fido.id}`, {
+    token: su,
+    body: {
+      site_id: kpansia.id, category: 'SUPPLIES', description: 'Smoke pay-with-receipt',
+      kind: 'NON_IMPREST', vendor: 'Smoke Vendor',
+      items: [{ name: 'Bags', qty: 2, price: 500 }],
+    },
+  });
+  check('create non-imprest expense for pay-proof', expPay.status === 201 && !!expPay.json.id, expPay.json);
+  const pid = expPay.json.id;
+  for (const action of ['validate', 'review', 'approve']) {
+    await api('POST', `/api/expenses/${pid}/transition?tenant=${fido.id}`, { token: su, body: { action } });
+  }
+  const noProof = await api('POST', `/api/expenses/${pid}/payments?tenant=${fido.id}`, {
+    token: snr, body: { amount: 1000, method: 'TRANSFER', bank: 'GTB' },
+  });
+  check('pay without receipt rejected', noProof.status === 400 && /receipt/i.test(noProof.json.error || ''), noProof.json);
+  const slip = new FormData();
+  slip.append('note', 'Bank slip already on ticket');
+  slip.append('file', new Blob(['smoke-receipt-bytes'], { type: 'application/pdf' }), 'slip.pdf');
+  const att = await api('POST', `/api/expenses/${pid}/attachments?tenant=${fido.id}`, { token: snr, form: slip });
+  check('attach receipt file to ticket', att.status === 201 && !!att.json.id, att.json);
+  const paySnr = await api('POST', `/api/expenses/${pid}/payments?tenant=${fido.id}`, {
+    token: snr, body: { amount: 500, method: 'TRANSFER', bank: 'GTB', memo: 'part pay using on-file slip' },
+  });
+  check('Snr Accountant pays using existing ticket receipt', paySnr.status === 201 && paySnr.json.receipt === true && Number(paySnr.json.amount_paid) === 500, paySnr.json);
+  const payMgr = await api('POST', `/api/expenses/${pid}/payments?tenant=${fido.id}`, {
+    token: mgr, body: { amount: 500, method: 'CASH', memo: 'manager settles balance' },
+  });
+  check('Manager pays remaining balance with on-file receipt', payMgr.status === 201 && payMgr.json.status === 'PAID', payMgr.json);
 
   // ── contact us reaches at least one recipient (admins, with inbox fallback) ──
   const contact = await api('POST', `/api/contact?tenant=${fido.id}`, { token: su, body: { message: 'Smoke contact test' } });

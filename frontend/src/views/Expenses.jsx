@@ -686,24 +686,42 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
     }
   }, [expense.id, tenants]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A file already on the ticket (Receipts & notes) counts as payment proof —
+  // Snr Accountant / Manager must not be blocked from Pay when a slip is attached.
+  // Note-only rows do not count (has_file requires a real file_name).
+  const hasTicketReceipt = atts.some((a) => a.has_file);
+  const canPayWithProof = !!(payFile || hasTicketReceipt);
+
   // Record a (partial or full) payment from the Pay form; attach the receipt and,
   // when it clears the balance, move the ticket to PAID — all in one go.
   const submitPay = async () => {
     const amt = Math.round((parseFloat(payAmt) || 0) * 100) / 100;
     if (!(amt > 0)) return toast('Enter an amount', 'err');
     if (amt > balance + 0.01) return toast(`Max ₦${balance.toLocaleString()} — that's the balance`, 'err');
-    if (!payFile) return toast('Attach the receipt / bank slip to record this payment', 'err');
+    if (!canPayWithProof) return toast('Attach the receipt / bank slip to record this payment', 'err');
     setBusy(true);
     try {
-      // Payment + receipt in ONE request so proof is stored with the payment and
-      // can't be skipped. The server rejects a payment with no receipt.
-      const fd = new FormData();
-      fd.append('amount', String(amt));
-      fd.append('method', payBank ? 'TRANSFER' : 'CASH');
-      if (payBank) fd.append('bank', payBank);
-      if (payNote.trim()) fd.append('memo', payNote.trim());
-      fd.append('file', payFile);
-      await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', form: fd });
+      // New file → multipart with proof. Existing ticket receipt → JSON body; the
+      // server accepts either and pins an unpinned ticket file to this payment.
+      if (payFile) {
+        const fd = new FormData();
+        fd.append('amount', String(amt));
+        fd.append('method', payBank ? 'TRANSFER' : 'CASH');
+        if (payBank) fd.append('bank', payBank);
+        if (payNote.trim()) fd.append('memo', payNote.trim());
+        fd.append('file', payFile);
+        await api(ts(`/expenses/${expense.id}/payments`), { method: 'POST', form: fd });
+      } else {
+        await api(ts(`/expenses/${expense.id}/payments`), {
+          method: 'POST',
+          body: {
+            amount: amt,
+            method: payBank ? 'TRANSFER' : 'CASH',
+            bank: payBank || null,
+            memo: payNote.trim() || null,
+          },
+        });
+      }
       const newPaid = Math.round((paid + amt) * 100) / 100;
       const newBal = Math.max(0, Math.round((billed - newPaid) * 100) / 100);
       if (newBal <= 0.01 && wf === 'APPROVED') { try { await api(ts(`/expenses/${expense.id}/transition`), { method: 'POST', body: { action: 'pay' } }); } catch { /* keep going */ } }
@@ -719,7 +737,8 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
 
   const runAction = async (action) => {
     // Pay is not a bare state flip — open the pay form (amount, bank, receipt).
-    if (action === 'pay') { setPayAmt(String(balance || '')); setPayOpen(true); return; }
+    // Refresh attachments so an on-file slip is detected before enabling Pay.
+    if (action === 'pay') { setPayAmt(String(balance || '')); setPayOpen(true); loadAtts(); return; }
     // Un-approving is destructive and must be explained — collect the reason in a
     // proper in-app dialog stacked over this modal, not a browser prompt.
     if (action === 'unapprove') { setUnapReason(''); setUnapOpen(true); return; }
@@ -911,14 +930,21 @@ function ExpenseDetail({ expense, sites, onEdit, onClose, onChanged }) {
             : <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>No bank selected — will record as cash.</div>}
           <label className="fl" style={{ marginTop: 8 }}>Note (optional)</label>
           <input className="input" value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="e.g. transfer ref, teller no." />
-          <label className="fl" style={{ marginTop: 8 }}>Receipt / bank slip <span style={{ color: 'var(--err)' }}>(required)</span></label>
+          <label className="fl" style={{ marginTop: 8 }}>
+            Receipt / bank slip{' '}
+            <span style={{ color: hasTicketReceipt && !payFile ? '#166534' : 'var(--err)' }}>
+              ({hasTicketReceipt && !payFile ? 'on file ✓' : 'required'})
+            </span>
+          </label>
           <input id="exp-pay-file" type="file" className="input"
             accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.heic,.xls,.xlsx,.doc,.docx,.txt,image/*"
             onChange={(e) => setPayFile(e.target.files?.[0] || null)} />
-          {!payFile && <div style={{ fontSize: 12, color: 'var(--err)', margin: '4px 2px 0' }}>A payment cannot be recorded without proof — attach the receipt or bank slip.</div>}
+          {hasTicketReceipt && !payFile
+            ? <div style={{ fontSize: 12, color: '#166534', margin: '4px 2px 0' }}>A receipt is already attached on this ticket — you can pay now, or attach a different slip above.</div>
+            : !payFile && <div style={{ fontSize: 12, color: 'var(--err)', margin: '4px 2px 0' }}>A payment cannot be recorded without proof — attach the receipt or bank slip.</div>}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 8, marginTop: 12 }}>
             <button className="btn btn-ghost" disabled={busy} onClick={() => { setPayOpen(false); setPayFile(null); }}>Cancel</button>
-            <button className="btn" disabled={busy || !((parseFloat(payAmt) || 0) > 0) || (parseFloat(payAmt) || 0) > balance + 0.01 || !payFile} onClick={submitPay}>{busy ? <span className="spin" /> : `💵 Pay ${ngn(Math.round((parseFloat(payAmt) || 0) * 100) / 100)}`}</button>
+            <button className="btn" disabled={busy || !((parseFloat(payAmt) || 0) > 0) || (parseFloat(payAmt) || 0) > balance + 0.01 || !canPayWithProof} onClick={submitPay}>{busy ? <span className="spin" /> : `💵 Pay ${ngn(Math.round((parseFloat(payAmt) || 0) * 100) / 100)}`}</button>
           </div>
         </div>
       )}

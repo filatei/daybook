@@ -123,7 +123,11 @@ const check = (n, c, x) => { if (c) { pass++; console.log('  ✅ ' + n); } else 
   // ── pay with existing ticket receipt (no re-upload) — Manager / Snr Accountant path ──
   // Regression: pay used to require a NEW multipart file even when a slip was already
   // on the ticket; only Admin workflows felt usable. Proof on file must unlock Pay.
-  await api('POST', '/api/members', { token: su, body: { tenant_id: fido.id, email: 'snr@fido.test', role: 'SNR_ACCOUNTANT' } });
+  // Create the user first: POST /members only adds a membership when the user already
+  // exists; otherwise it stores an invite that Google login consumes — not dev-login.
+  await dev('snr@fido.test');
+  const addSnr = await api('POST', '/api/members', { token: su, body: { tenant_id: fido.id, email: 'snr@fido.test', role: 'SNR_ACCOUNTANT' } });
+  check('admin adds Snr Accountant', addSnr.status === 201 && addSnr.json.added, addSnr.json);
   const snr = await dev('snr@fido.test');
   const expPay = await api('POST', `/api/expenses?tenant=${fido.id}`, {
     token: su,

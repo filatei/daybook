@@ -32,9 +32,30 @@ daybook.torama.money:2083 {
 		-Server
 	}
 
-	# Caddy upgrades WebSockets (/ws) transparently, so one reverse_proxy covers
-	# both the PWA/API and the realtime gateway.
-	reverse_proxy daybook:8090 {
+	# Upstream is the Compose service name on the `daybook` Docker network —
+	# never a hard-coded container IP. After `daybook` is recreated it gets a
+	# new address; dynamic A + short refresh re-queries Docker's embedded DNS
+	# (127.0.0.11) so Caddy does not stick to a dead IP (connection refused).
+	# Active health_uri is intentionally omitted: Caddy does not run active
+	# checks against dynamic upstreams. Retries (lb_try_*) + passive
+	# fail_duration cover the recreate / boot window instead.
+	# Caddy upgrades WebSockets (/ws) transparently.
+	reverse_proxy {
+		dynamic a {
+			name daybook
+			port 8090
+			refresh 5s
+			resolvers 127.0.0.11
+		}
+		lb_try_duration 10s
+		lb_try_interval 250ms
+		fail_duration 30s
+		max_fails 1
+		unhealthy_status 5xx
+		transport http {
+			dial_timeout 3s
+			response_header_timeout 60s
+		}
 		flush_interval -1
 		header_up X-Forwarded-Proto https
 		header_up Host {host}

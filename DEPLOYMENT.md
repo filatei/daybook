@@ -8,10 +8,57 @@ account `daybookuser`. Everything mirrors the otuburu conventions so
 `ssh daybook` works exactly like `ssh otuburu`.
 
 ```
-Browser ──► Apache (:443 TLS, daybook.torama.money)
-                 └─ reverse proxy ─► 127.0.0.1:8090  (daybook container)
-                                          └─ SQLite + uploads on the `daybookdata` volume
+Browser ──► Cloudflare ──► daybook-caddy (:2083, origin cert)
+                              └─ reverse_proxy ─► daybook:8090 (Compose DNS)
+                                                    └─ Postgres + uploads volumes
 ```
+
+Loopback publish (`127.0.0.1:${DAYBOOK_HOST_PORT:-8091}→8090`) remains for local
+health checks / legacy Apache; production ingress is Caddy on **:2083**.
+
+---
+
+## 0b. Boot hardening (systemd + Caddy)
+
+After a host reboot, Docker must be up before Compose starts; otherwise Caddy
+can cache a stale `daybook` container IP and return connection refused until
+reload. The unit at `infra/systemd/daybook.service` runs
+`docker compose up -d` in `/opt/daybook/backend` once Docker is ready.
+Caddy uses **dynamic A** upstreams (`daybook` / `8090`, refresh 5s via
+`127.0.0.11`) plus `lb_try_duration` / passive `fail_duration` so it re-resolves
+Docker DNS after container recreate.
+
+### Install / refresh on otuburu (one-time or after unit changes)
+
+```bash
+ssh otuburu   # or: ssh daybook
+cd /opt/daybook/backend
+
+# Ensure the unit file from the repo is installed
+sudo cp infra/systemd/daybook.service /etc/systemd/system/daybook.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now daybook
+
+# Verify
+systemctl is-enabled daybook
+systemctl status daybook --no-pager
+docker compose ps
+curl -fsS http://127.0.0.1:${DAYBOOK_HOST_PORT:-8091}/healthz
+# Public path (Cloudflare → Caddy :2083):
+curl -fsS https://daybook.torama.money/healthz
+```
+
+After shipping a new `infra/caddy/Caddyfile`, either run `daybook-deploy` (reloads
+Caddy) or:
+
+```bash
+cd /opt/daybook/backend
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+# or: docker compose up -d --no-deps --force-recreate caddy
+```
+
+`systemctl stop daybook` does **not** tear down containers (no `ExecStop`) so it
+won't fight `daybook-deploy`. To stop the stack: `docker compose stop`.
 
 ---
 

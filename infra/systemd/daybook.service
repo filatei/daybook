@@ -1,23 +1,32 @@
 # /etc/systemd/system/daybook.service
-# Runs the daybook container stack via docker compose, owned by daybookuser.
-# Mirrors the otuburu service model. Enable with:
+# Starts the Daybook Compose stack (postgres, daybook, caddy) after Docker is up.
+# Enable on otuburu with:
+#   sudo cp /opt/daybook/backend/infra/systemd/daybook.service /etc/systemd/system/daybook.service
+#   sudo systemctl daemon-reload
 #   sudo systemctl enable --now daybook
 [Unit]
-Description=Daybook (multi-tenant daily reporting)
+Description=Daybook (Docker Compose stack)
 Documentation=https://github.com/filatei/daybook
 Requires=docker.service
-After=docker.service network-online.target
+After=docker.service docker.socket network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-RemainAfterExit=true
+RemainAfterExit=yes
 User=daybookuser
 Group=daybookuser
 WorkingDirectory=/opt/daybook/backend
+# Bring the whole stack up on boot. Containers themselves use restart: always;
+# this unit only ensures `docker compose up` runs once Docker is ready.
 ExecStart=/usr/bin/docker compose up -d --remove-orphans
-ExecStop=/usr/bin/docker compose down
-ExecReload=/usr/bin/docker compose up -d --force-recreate --remove-orphans
-TimeoutStartSec=0
+# No ExecStop: do not `compose down`/`stop` on systemctl stop — that fights
+# daybook-deploy and operators who manage containers via docker compose.
+# To stop the stack intentionally: cd /opt/daybook/backend && docker compose stop
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

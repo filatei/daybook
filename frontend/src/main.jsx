@@ -15,26 +15,32 @@ setAppVh();
 window.addEventListener('resize', setAppVh);
 if (window.visualViewport) window.visualViewport.addEventListener('resize', setAppVh);
 
-// ── Standalone / edge-to-edge class ──────────────────────────────────────────
-// CSS @media (display-mode: standalone) covers most PWAs; also set a class for
-// iOS navigator.standalone and keep it in sync if display-mode changes. Styles
-// use html.is-standalone to floor safe-area padding when env() reports 0.
-const syncStandaloneClass = () => {
+// ── Safe-area floors (mobile always-on + standalone) ─────────────────────────
+// PR #2 only floored under display-mode:standalone. Production phones still
+// drew under the status bar / home indicator when env()=0 and the page was a
+// browser tab, custom tab, or a PWA that didn't match that media query.
+// Always floor on ≤767px; also keep standalone class for desktop-width PWAs.
+const syncSafeAreaClasses = () => {
+  const root = document.documentElement;
+  const mq = window.matchMedia;
   const standalone =
-    (window.matchMedia && (
-      window.matchMedia('(display-mode: standalone)').matches ||
-      window.matchMedia('(display-mode: fullscreen)').matches
-    )) ||
+    (mq && (mq('(display-mode: standalone)').matches || mq('(display-mode: fullscreen)').matches)) ||
     window.navigator.standalone === true;
-  document.documentElement.classList.toggle('is-standalone', !!standalone);
+  const mobile = mq ? mq('(max-width: 767px)').matches : (window.innerWidth || 0) < 768;
+  root.classList.toggle('is-standalone', !!standalone);
+  root.classList.toggle('is-mobile-safe', !!mobile);
+  // Inline vars beat stylesheet order races; desktop clears floors.
+  root.style.setProperty('--safe-top-floor', mobile || standalone ? '28px' : '0px');
+  root.style.setProperty('--safe-bottom-floor', mobile || standalone ? '24px' : '0px');
 };
-syncStandaloneClass();
+syncSafeAreaClasses();
+window.addEventListener('resize', syncSafeAreaClasses);
 try {
   if (window.matchMedia) {
-    for (const q of ['(display-mode: standalone)', '(display-mode: fullscreen)']) {
+    for (const q of ['(display-mode: standalone)', '(display-mode: fullscreen)', '(max-width: 767px)']) {
       const mql = window.matchMedia(q);
-      if (mql.addEventListener) mql.addEventListener('change', syncStandaloneClass);
-      else if (mql.addListener) mql.addListener(syncStandaloneClass);
+      if (mql.addEventListener) mql.addEventListener('change', syncSafeAreaClasses);
+      else if (mql.addListener) mql.addListener(syncSafeAreaClasses);
     }
   }
 } catch { /* ignore */ }

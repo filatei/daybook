@@ -30,8 +30,10 @@ const syncSafeAreaClasses = () => {
   root.classList.toggle('is-standalone', !!standalone);
   root.classList.toggle('is-mobile-safe', !!mobile);
   // Inline vars beat stylesheet order races; desktop clears floors.
+  // Bottom floor 40px (was 24px): #3 cleared the header but tab labels still
+  // sat flush to the home indicator — need Facebook-like breathing room.
   root.style.setProperty('--safe-top-floor', mobile || standalone ? '28px' : '0px');
-  root.style.setProperty('--safe-bottom-floor', mobile || standalone ? '24px' : '0px');
+  root.style.setProperty('--safe-bottom-floor', mobile || standalone ? '40px' : '0px');
 };
 syncSafeAreaClasses();
 window.addEventListener('resize', syncSafeAreaClasses);

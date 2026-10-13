@@ -5,8 +5,8 @@
   --ok: #16a34a; --warn: #d97706; --err: #dc2626;
   --shadow: 0 6px 24px rgba(15,23,42,.08); --r: 16px;
   /* Mobile edge-to-edge floors (Android often reports env()=0). Desktop stays 0;
-     @media (max-width:767px) + main.jsx set 28px/24px so padding never depends
-     on display-mode:standalone alone (PR #2 was insufficient in production). */
+     @media (max-width:767px) + main.jsx set top 28px / bottom 40px. Bottom was
+     raised after #3: 24px still left tab labels flush to the home indicator. */
   --safe-top-floor: 0px;
   --safe-bottom-floor: 0px;
   --safe-b: max(var(--safe-bottom-floor), env(safe-area-inset-bottom, 0px));
@@ -61,7 +61,8 @@ a { color: var(--brand-d); text-decoration: none; }
 @media (max-width: 767px) {
   :root {
     --safe-top-floor: 28px;
-    --safe-bottom-floor: 24px;
+    /* ~40px: Facebook-like breathing room above home indicator when env()=0 */
+    --safe-bottom-floor: 40px;
   }
 }
 /* Keep standalone/fullscreen + JS class as redundant floors (desktop PWA,
@@ -69,13 +70,13 @@ a { color: var(--brand-d); text-decoration: none; }
 @media (display-mode: standalone), (display-mode: fullscreen) {
   :root {
     --safe-top-floor: 28px;
-    --safe-bottom-floor: 24px;
+    --safe-bottom-floor: 40px;
   }
 }
 html.is-standalone,
 html.is-mobile-safe {
   --safe-top-floor: 28px;
-  --safe-bottom-floor: 24px;
+  --safe-bottom-floor: 40px;
 }
 .nav-top {
   display: flex; align-items: center; gap: 10px;
@@ -639,16 +640,17 @@ tr:hover td { background: #f8fafc; }
   /* IN-FLOW bottom nav, not position:fixed. The old fixed bar pinned to the
      LAYOUT viewport's bottom, which sits below the VISIBLE bottom inside
      in-app browsers (WhatsApp/IG) and Android 15's edge-to-edge Chrome —
-     confirmed on a real phone as half-clipped icons. #root is a 100dvh
+     confirmed on a real phone as half-clipped icons. #root uses --appvh
      flex column with .main-content as its only scroller, so an in-flow bar
      ordered last is always fully visible above any browser/system chrome.
-     Hard padding-bottom floor clears the gesture/home indicator when env=0. */
+     White bar extends into the inset; 40px floor lifts icon+label content
+     with Facebook-like clearance when env(safe-area-inset-bottom)=0. */
   .bottom-nav {
     display: flex; position: static; order: 99; flex-shrink: 0;
-    padding-bottom: 24px;
+    padding-bottom: 40px;
     padding-bottom: constant(safe-area-inset-bottom);
-    padding-bottom: max(24px, constant(safe-area-inset-bottom));
-    padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
+    padding-bottom: max(40px, constant(safe-area-inset-bottom));
+    padding-bottom: max(40px, env(safe-area-inset-bottom, 0px));
   }
   /* Content no longer hides under a fixed bar — a small cushion is enough. */
   .main-content { padding-bottom: calc(24px + max(var(--safe-bottom-floor), env(safe-area-inset-bottom, 0px))); }

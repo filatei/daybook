@@ -15,6 +15,30 @@ setAppVh();
 window.addEventListener('resize', setAppVh);
 if (window.visualViewport) window.visualViewport.addEventListener('resize', setAppVh);
 
+// ── Standalone / edge-to-edge class ──────────────────────────────────────────
+// CSS @media (display-mode: standalone) covers most PWAs; also set a class for
+// iOS navigator.standalone and keep it in sync if display-mode changes. Styles
+// use html.is-standalone to floor safe-area padding when env() reports 0.
+const syncStandaloneClass = () => {
+  const standalone =
+    (window.matchMedia && (
+      window.matchMedia('(display-mode: standalone)').matches ||
+      window.matchMedia('(display-mode: fullscreen)').matches
+    )) ||
+    window.navigator.standalone === true;
+  document.documentElement.classList.toggle('is-standalone', !!standalone);
+};
+syncStandaloneClass();
+try {
+  if (window.matchMedia) {
+    for (const q of ['(display-mode: standalone)', '(display-mode: fullscreen)']) {
+      const mql = window.matchMedia(q);
+      if (mql.addEventListener) mql.addEventListener('change', syncStandaloneClass);
+      else if (mql.addListener) mql.addListener(syncStandaloneClass);
+    }
+  }
+} catch { /* ignore */ }
+
 createRoot(document.getElementById('root')).render(<App />);
 
 // ── Service worker: register + auto-reload on update ──────────────────────────

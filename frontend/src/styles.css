@@ -4,7 +4,11 @@
   --bg: #f4f6fb; --card: #ffffff; --ink: #0f172a; --muted: #64748b; --line: #e6e9f0;
   --ok: #16a34a; --warn: #d97706; --err: #dc2626;
   --shadow: 0 6px 24px rgba(15,23,42,.08); --r: 16px;
-  --safe-b: env(safe-area-inset-bottom, 0px);
+  /* Floors for edge-to-edge standalone (Android often reports env()=0).
+     Set to 28px/24px in standalone/fullscreen — see media query + html.is-standalone. */
+  --safe-top-floor: 0px;
+  --safe-bottom-floor: 0px;
+  --safe-b: max(var(--safe-bottom-floor), env(safe-area-inset-bottom, 0px));
   --nav-h: 104px; /* topbar + tabs */
   color-scheme: light;
 }
@@ -34,26 +38,32 @@ button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--brand-d); text-decoration: none; }
 
 /* ── Top nav ───────────────────────────────────────────────────────────────── */
+/* Not sticky: #root is overflow:hidden and only .main-content scrolls, so the
+   header stays put as a flex sibling. sticky was leftover from full-page scroll
+   and is unnecessary here. flex-shrink:0 keeps the bar from being squeezed. */
 .nav {
-  position: sticky; top: 0; z-index: 30;
+  position: relative; z-index: 30; flex-shrink: 0;
   background: var(--brand, #0ea5e9);
   box-shadow: 0 2px 12px rgba(2,132,199,.25);
-  padding-top: env(safe-area-inset-top, 0px);
+  /* Extend blue into the status-bar inset; pad *content* below icons.
+     Floors activate in standalone (see --safe-top-floor). */
+  padding-top: max(var(--safe-top-floor), env(safe-area-inset-top, 0px));
 }
-/* Installed-app (standalone) fix, same family as the bottom-nav clip: newer
-   Android Chrome draws standalone PWAs edge-to-edge, so page content starts
-   UNDER the status bar - and on many devices env(safe-area-inset-top) still
-   computes to 0, which left the Daybook logo row half-hidden behind the
-   clock/battery icons (confirmed on a real phone). Floor the header padding
-   at 28px (Android status bar is 24-28dp); max() still prefers the real
-   inset on devices that report one. Browser tabs are unaffected - their own
-   chrome sits above the page, and this media query doesn't match there. */
+/* Installed-app (standalone) floors: newer Android Chrome draws PWAs
+   edge-to-edge and often reports env(safe-area-inset-*)=0, which left the
+   logo row / bottom-nav icons under the clock and home indicator. Floor at
+   28px top / 24px bottom; max() still prefers a real inset when present.
+   html.is-standalone mirrors this for navigator.standalone (iOS) and JS
+   matchMedia. Browser tabs keep floors at 0 — their chrome sits outside. */
 @media (display-mode: standalone), (display-mode: fullscreen) {
-  .nav { padding-top: max(28px, env(safe-area-inset-top, 0px)); }
-  .offline-pill { top: calc(max(28px, env(safe-area-inset-top, 0px)) + 6px); }
-  /* Edge-to-edge gesture/3-button bar clearance at the bottom, mirroring
-     the header floor above. */
-  .bottom-nav { padding-bottom: max(24px, env(safe-area-inset-bottom, 0px)); }
+  :root {
+    --safe-top-floor: 28px;
+    --safe-bottom-floor: 24px;
+  }
+}
+html.is-standalone {
+  --safe-top-floor: 28px;
+  --safe-bottom-floor: 24px;
 }
 .nav-top {
   display: flex; align-items: center; gap: 10px;
@@ -506,7 +516,8 @@ label.fl { display: block; font-size: 13px; font-weight: 600; color: var(--muted
 
 /* ── Offline pill ──────────────────────────────────────────────────────────── */
 .offline-pill {
-  position: fixed; top: calc(env(safe-area-inset-top, 0) + 6px);
+  position: fixed;
+  top: calc(max(var(--safe-top-floor), env(safe-area-inset-top, 0px)) + 6px);
   left: 50%; transform: translateX(-50%); z-index: 60;
   background: #d97706; color: #fff; font-size: 12px; font-weight: 700;
   padding: 4px 14px; border-radius: 999px; box-shadow: 0 4px 14px rgba(0,0,0,.2);
@@ -571,7 +582,9 @@ tr:hover td { background: #f8fafc; }
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
   background: #fff; border-top: 1px solid var(--line);
   box-shadow: 0 -2px 12px rgba(15,23,42,.07);
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  /* Use --safe-bottom-floor (not a later override of a standalone max()) so
+     the cascade cannot wipe the 24px PWA gesture-bar floor. */
+  padding-bottom: max(var(--safe-bottom-floor), env(safe-area-inset-bottom, 0px));
   scrollbar-width: none;
 }
 .bottom-nav::-webkit-scrollbar { display: none; }

@@ -4,8 +4,9 @@
   --bg: #f4f6fb; --card: #ffffff; --ink: #0f172a; --muted: #64748b; --line: #e6e9f0;
   --ok: #16a34a; --warn: #d97706; --err: #dc2626;
   --shadow: 0 6px 24px rgba(15,23,42,.08); --r: 16px;
-  /* Floors for edge-to-edge standalone (Android often reports env()=0).
-     Set to 28px/24px in standalone/fullscreen — see media query + html.is-standalone. */
+  /* Mobile edge-to-edge floors (Android often reports env()=0). Desktop stays 0;
+     @media (max-width:767px) + main.jsx set 28px/24px so padding never depends
+     on display-mode:standalone alone (PR #2 was insufficient in production). */
   --safe-top-floor: 0px;
   --safe-bottom-floor: 0px;
   --safe-b: max(var(--safe-bottom-floor), env(safe-area-inset-bottom, 0px));
@@ -46,22 +47,33 @@ a { color: var(--brand-d); text-decoration: none; }
   background: var(--brand, #0ea5e9);
   box-shadow: 0 2px 12px rgba(2,132,199,.25);
   /* Extend blue into the status-bar inset; pad *content* below icons.
-     Floors activate in standalone (see --safe-top-floor). */
+     Floor via --safe-top-floor (mobile always-on). constant() is only used
+     in progressive declarations under the mobile media query — putting it
+     inside max() here would invalidate the whole rule on engines that
+     don't know constant(). */
   padding-top: max(var(--safe-top-floor), env(safe-area-inset-top, 0px));
 }
-/* Installed-app (standalone) floors: newer Android Chrome draws PWAs
-   edge-to-edge and often reports env(safe-area-inset-*)=0, which left the
-   logo row / bottom-nav icons under the clock and home indicator. Floor at
-   28px top / 24px bottom; max() still prefers a real inset when present.
-   html.is-standalone mirrors this for navigator.standalone (iOS) and JS
-   matchMedia. Browser tabs keep floors at 0 — their chrome sits outside. */
+/* Always-on mobile floors: Android Chrome (browser + PWA) and many in-app
+   webviews draw edge-to-edge with env(safe-area-inset-*)=0. PR #2 only set
+   floors under display-mode:standalone / html.is-standalone — production
+   phones still painted logo/tabs under the clock and home indicator after
+   that deploy. Floor every ≤767px viewport; max() still prefers a real inset. */
+@media (max-width: 767px) {
+  :root {
+    --safe-top-floor: 28px;
+    --safe-bottom-floor: 24px;
+  }
+}
+/* Keep standalone/fullscreen + JS class as redundant floors (desktop PWA,
+   odd display-mode widths, or if the max-width query is somehow skipped). */
 @media (display-mode: standalone), (display-mode: fullscreen) {
   :root {
     --safe-top-floor: 28px;
     --safe-bottom-floor: 24px;
   }
 }
-html.is-standalone {
+html.is-standalone,
+html.is-mobile-safe {
   --safe-top-floor: 28px;
   --safe-bottom-floor: 24px;
 }
@@ -582,8 +594,8 @@ tr:hover td { background: #f8fafc; }
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
   background: #fff; border-top: 1px solid var(--line);
   box-shadow: 0 -2px 12px rgba(15,23,42,.07);
-  /* Use --safe-bottom-floor (not a later override of a standalone max()) so
-     the cascade cannot wipe the 24px PWA gesture-bar floor. */
+  /* Floor via --safe-bottom-floor (always-on mobile) so the cascade cannot
+     wipe gesture-bar clearance when env() reports 0. */
   padding-bottom: max(var(--safe-bottom-floor), env(safe-area-inset-bottom, 0px));
   scrollbar-width: none;
 }
@@ -609,16 +621,37 @@ tr:hover td { background: #f8fafc; }
 /* ── Responsive: mobile layout ─────────────────────────────────────────────── */
 @media (max-width: 767px) {
   .nav-tabs  { display: none; }     /* move tabs to bottom on mobile */
+  /* Belt-and-suspenders: hard floors on the chrome itself (not only vars),
+     so even if a custom-property race leaves --safe-*-floor at 0px, content
+     still clears the status bar / home indicator. Progressive: plain floor,
+     then constant() (old iOS), then max(floor, env). */
+  .nav {
+    padding-top: 28px;
+    padding-top: constant(safe-area-inset-top);
+    padding-top: max(28px, constant(safe-area-inset-top));
+    padding-top: max(28px, env(safe-area-inset-top, 0px));
+  }
+  .offline-pill {
+    top: 34px; /* 28px floor + 6px */
+    top: calc(constant(safe-area-inset-top) + 6px);
+    top: calc(max(28px, env(safe-area-inset-top, 0px)) + 6px);
+  }
   /* IN-FLOW bottom nav, not position:fixed. The old fixed bar pinned to the
      LAYOUT viewport's bottom, which sits below the VISIBLE bottom inside
      in-app browsers (WhatsApp/IG) and Android 15's edge-to-edge Chrome —
      confirmed on a real phone as half-clipped icons. #root is a 100dvh
      flex column with .main-content as its only scroller, so an in-flow bar
-     ordered last is always fully visible above any browser/system chrome;
-     the env() padding still lifts it off a PWA gesture bar. */
-  .bottom-nav { display: flex; position: static; order: 99; flex-shrink: 0; }
+     ordered last is always fully visible above any browser/system chrome.
+     Hard padding-bottom floor clears the gesture/home indicator when env=0. */
+  .bottom-nav {
+    display: flex; position: static; order: 99; flex-shrink: 0;
+    padding-bottom: 24px;
+    padding-bottom: constant(safe-area-inset-bottom);
+    padding-bottom: max(24px, constant(safe-area-inset-bottom));
+    padding-bottom: max(24px, env(safe-area-inset-bottom, 0px));
+  }
   /* Content no longer hides under a fixed bar — a small cushion is enough. */
-  .main-content { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+  .main-content { padding-bottom: calc(24px + max(var(--safe-bottom-floor), env(safe-area-inset-bottom, 0px))); }
   /* FAB sits above the bottom nav on mobile */
   .fab { bottom: calc(72px + var(--safe-b)); }
   /* AI: hide the header button, show the floating FAB instead — lifted

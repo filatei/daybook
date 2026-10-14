@@ -107,6 +107,15 @@ LAST_ERR=""
 for i in $(seq 1 10); do
   if LAST_ERR="$(verify_daybook_health 2>&1)"; then
     ok "daybook healthy (service=daybook, status=ok on :${HOST_PORT})"
+    # Reload Caddy so a new bind-mounted Caddyfile takes effect, and so any
+    # upstream DNS cache is refreshed after the app container was recreated.
+    log "Reloading daybook-caddy…"
+    if docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null; then
+      ok "caddy reloaded"
+    else
+      log "caddy reload failed — ensuring caddy is up…"
+      docker compose up -d --no-deps caddy >/dev/null
+    fi
     exit 0
   fi
   sleep 2
